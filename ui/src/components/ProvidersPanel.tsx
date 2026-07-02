@@ -12,6 +12,7 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [usageData, setUsageData] = useState<Record<string, AccountUsage>>({});
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("anthropic");
+  const [localEndpoint, setLocalEndpoint] = useState("http://localhost:8000");
   const [adding, setAdding] = useState(false);
   const [loggingIn, setLoggingIn] = useState<string | null>(null);
   const [loginKeys, setLoginKeys] = useState<Record<string, string>>({});
@@ -20,8 +21,7 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [refreshingUsage, setRefreshingUsage] = useState<string | null>(null);
 
-  const isApiKeyProvider = (provider: string) =>
-    provider === "mistral" || provider === "opencode";
+  const isApiKeyProvider = (provider: string) => provider === "mistral";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -73,6 +73,10 @@ export function ProvidersPanel({ api, connected }: Props) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  useEffect(() => {
+    api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
+  }, [api]);
+
   const pollReady = useCallback(async (name: string) => {
     // Install + browser OAuth complete out-of-band; poll until ready.
     for (let i = 0; i < 180; i++) {
@@ -118,6 +122,10 @@ export function ProvidersPanel({ api, connected }: Props) {
     setAdding(true);
     setStatus(null);
     try {
+      if (provider === "local") {
+        const r = await api.setLocalEndpoint(localEndpoint);
+        setLocalEndpoint(r.endpoint);
+      }
       await api.createAccount({ name, provider: provider as Account["provider"] });
       setNewName("");
       flash(`Added ${name}`);
@@ -133,7 +141,7 @@ export function ProvidersPanel({ api, connected }: Props) {
     if (!isApiKeyProvider(provider)) {
       await handleLogin(name);
     }
-  }, [api, newName, newType, refresh, flash, handleLogin]);
+  }, [api, newName, newType, localEndpoint, refresh, flash, handleLogin]);
 
   const handleDelete = useCallback(async (name: string) => {
     try {
@@ -359,6 +367,16 @@ export function ProvidersPanel({ api, connected }: Props) {
               <option key={p.type} value={p.type}>{p.name}</option>
             ))}
           </select>
+          {newType === "local" && (
+            <input
+              type="text"
+              value={localEndpoint}
+              onChange={(e) => setLocalEndpoint(e.target.value)}
+              placeholder="http://localhost:8000"
+              title="Host and port of the local OpenAI-compatible model server"
+              disabled={dis}
+            />
+          )}
           <button onClick={handleAdd} disabled={adding || !newName.trim() || dis}>
             {adding ? "Adding..." : "+ Add"}
           </button>

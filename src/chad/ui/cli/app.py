@@ -36,20 +36,21 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
     if provider in provider_login.API_KEY_PROVIDERS:
         if provider_login.is_logged_in(provider, account_name):
             return True, "Already logged in"
-        if provider == "mistral":
-            import webbrowser
-            print("Mistral requires an API key.")
-            print("Opening https://console.mistral.ai/codestral/cli ...")
-            webbrowser.open("https://console.mistral.ai/codestral/cli")
-        else:
-            print("OpenCode requires an API key.")
-            print("Get one at https://opencode.ai/auth")
+        import webbrowser
+        print("Mistral requires an API key.")
+        print("Opening https://console.mistral.ai/codestral/cli ...")
+        webbrowser.open("https://console.mistral.ai/codestral/cli")
         print()
         try:
             api_key = input("Paste your API key: ").strip()
         except (EOFError, KeyboardInterrupt):
             api_key = ""
         return provider_login.run_login(provider, account_name, api_key)
+
+    if provider == "local":
+        print("Installing Qwen Code CLI if needed... (a local server requires no login)")
+        print()
+        return provider_login.run_login(provider, account_name)
 
     label = _PROVIDER_LOGIN_LABELS.get(provider, provider.title())
     print(f"Starting {label} login... (browser will open)")
@@ -155,6 +156,7 @@ def run_settings_menu(client: APIClient) -> None:
         verification_agent_name = client.get_verification_agent()
         verification_model = client.get_preferred_verification_model()
         max_verification_attempts = client.get_max_verification_attempts()
+        local_endpoint = client.get_local_endpoint()
         action_settings = client.get_action_settings()
         try:
             slack_settings = client.get_slack_settings()
@@ -174,6 +176,7 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Verification Agent: {verification_agent_name or '(not set)'}")
         print(f"  Verification Model: {verification_model or '(auto)'}")
         print(f"  Max Verif Attempts: {max_verification_attempts}")
+        print(f"  Local Endpoint:     {local_endpoint}")
         print("  Action Rules:")
         print(_format_action_settings(action_settings))
         slack_status = "enabled" if slack_settings.get("enabled") else "disabled"
@@ -191,6 +194,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [7] Slack integration")
         print("  [8] Remote access (tunnel)")
         print("  [9] Export/import config")
+        print("  [10] Set local model endpoint")
         print("  [b] Back to main menu")
         print()
 
@@ -522,6 +526,20 @@ def run_settings_menu(client: APIClient) -> None:
                             result = client.import_config(data)
                             print(result.get("message", "Config imported"))
             except (ValueError, EOFError) as e:
+                print(f"Error: {e}")
+            input("Press Enter to continue...")
+
+        elif choice == "10":
+            # Set local model endpoint
+            print()
+            print(f"Current local endpoint: {local_endpoint}")
+            print("Base URL of the local OpenAI-compatible model server (llama.cpp, vLLM, ...).")
+            try:
+                new_endpoint = input("New endpoint (e.g. http://localhost:8000): ").strip()
+                if new_endpoint:
+                    saved = client.set_local_endpoint(new_endpoint)
+                    print(f"Local endpoint set to {saved}")
+            except Exception as e:
                 print(f"Error: {e}")
             input("Press Enter to continue...")
 

@@ -1356,63 +1356,6 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
-def _get_opencode_usage_percentage(account_name: str) -> float | None:
-    """Get OpenCode usage percentage by counting today's requests.
-
-    OpenCode supports multiple backends (Anthropic, OpenAI, etc.) and stores
-    session data in XDG_DATA_HOME/opencode/sessions/.
-
-    Args:
-        account_name: The account name for isolated data directory
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
-    """
-    from datetime import datetime, timezone
-
-    # OpenCode v1.1+ stores session data at ~/.local/share/opencode
-    base_home = safe_home()
-    data_dir = Path(base_home) / ".local" / "share" / "opencode"
-
-    sessions_dir = data_dir / "sessions"
-    if not sessions_dir.exists():
-        return 0.0  # No sessions yet
-
-    # Count today's requests from session files (JSONL format)
-    today_requests = 0
-    today = datetime.now(timezone.utc).date()
-
-    for session_file in sessions_dir.glob("*.jsonl"):
-        try:
-            with open(session_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                        # Count assistant responses
-                        if event.get("type") == "assistant":
-                            timestamp = event.get("timestamp", "")
-                            if timestamp:
-                                try:
-                                    msg_date = datetime.fromisoformat(
-                                        timestamp.replace("Z", "+00:00")
-                                    ).date()
-                                    if msg_date == today:
-                                        today_requests += 1
-                                except (ValueError, AttributeError):
-                                    pass
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            continue
-
-    # Default daily limit (varies by backend provider)
-    daily_limit = 2000
-    return min((today_requests / daily_limit) * 100, 100.0)
-
-
 def _get_kimi_usage_percentage(account_name: str) -> float | None:
     """Get Kimi Code usage percentage by counting today's requests.
 
@@ -2732,6 +2675,38 @@ class GeminiCodeAssistProvider(AIProvider):
         return _get_gemini_usage_percentage(self.config.account_name)
 
 
+def discover_local_models(endpoint: str, timeout: float = 3.0) -> list[str]:
+    """Return model ids served by an OpenAI-compatible endpoint (GET /v1/models)."""
+    import json
+    import urllib.request
+
+    url = endpoint.rstrip("/") + "/v1/models"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return [str(m["id"]) for m in data.get("data", []) if m.get("id")]
+
+
+def build_local_env(endpoint: str, model: str | None) -> dict[str, str]:
+    """Environment variables that point the Qwen Code CLI at a local server.
+
+    The CLI's OpenAI-compatible auth reads OPENAI_BASE_URL / OPENAI_API_KEY /
+    OPENAI_MODEL. When no model is pinned, the served model is discovered from
+    the endpoint (servers like llama.cpp accept any name, vLLM requires the
+    exact id).
+    """
+    if not model or model == "default":
+        try:
+            models = discover_local_models(endpoint)
+            model = models[0] if models else "default"
+        except (OSError, ValueError):
+            model = "default"
+    return {
+        "OPENAI_BASE_URL": endpoint.rstrip("/") + "/v1",
+        "OPENAI_API_KEY": "local",
+        "OPENAI_MODEL": model,
+    }
+
+
 class QwenCodeProvider(AIProvider):
     """Provider for Qwen Code CLI with multi-turn support.
 
@@ -2751,6 +2726,11 @@ class QwenCodeProvider(AIProvider):
         self.process: object | None = None
         self.master_fd: int | None = None
         self.session_id: str | None = None  # For multi-turn support
+        self.extra_cli_args: list[str] = []
+
+    def runtime_env(self) -> dict[str, str]:
+        """Extra environment variables for the CLI process."""
+        return {}
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("qwen", self._notify_activity)
@@ -2786,6 +2766,7 @@ class QwenCodeProvider(AIProvider):
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls (required for non-interactive)
+                *self.extra_cli_args,
                 "--resume",
                 self.session_id,
                 "-p", self.current_message,
@@ -2796,6 +2777,7 @@ class QwenCodeProvider(AIProvider):
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls
+                *self.extra_cli_args,
                 "-p", self.current_message,
             ]
             if self.config.model_name and self.config.model_name != "default":
@@ -2804,6 +2786,7 @@ class QwenCodeProvider(AIProvider):
         try:
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
+            env.update(self.runtime_env())
 
             json_events = []
             response_parts = []
@@ -2925,180 +2908,30 @@ class QwenCodeProvider(AIProvider):
         return _get_qwen_usage_percentage(self.config.account_name)
 
 
-class OpenCodeProvider(AIProvider):
-    """Provider for OpenCode CLI with multi-turn support.
+class LocalProvider(QwenCodeProvider):
+    """Provider for a local OpenAI-compatible model server (llama.cpp, vLLM, ...).
 
-    Uses the `opencode` command-line interface with JSON output format
-    for real-time streaming. Supports multi-turn via `--session <id>` or `--continue`.
-
-    OpenCode is an open-source AI coding agent supporting multiple backends
-    (Anthropic, OpenAI, Gemini, etc.) with session persistence.
-    Model format: provider/model (e.g., anthropic/claude-sonnet-4-5)
+    Drives the Qwen Code CLI with its OpenAI-compatible auth pointed at the
+    endpoint configured via ConfigManager.get_local_endpoint() (default
+    http://localhost:8000). No login or quota tracking applies.
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
-        self.project_path: str | None = None
-        self.system_prompt: str | None = None
-        self.current_message: str | None = None
-        self.process: object | None = None
-        self.master_fd: int | None = None
-        self.session_id: str | None = None  # For multi-turn support
+        self.extra_cli_args = ["--auth-type", "openai"]
 
-    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
-        ok, detail = _ensure_cli_tool("opencode", self._notify_activity)
-        if not ok:
-            return False
+    def runtime_env(self) -> dict[str, str]:
+        from chad.util.config_manager import ConfigManager
 
-        self.project_path = project_path
-        self.system_prompt = system_prompt
-        self.cli_path = detail
-        return True
-
-    def send_message(self, message: str) -> None:
-        # Only prepend system prompt on first message (no session_id yet)
-        if self.system_prompt and not self.session_id:
-            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
-        else:
-            self.current_message = message
-
-    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
-        import json
-
-        if not self.current_message:
-            return ""
-
-        opencode_cli = getattr(self, "cli_path", None) or find_cli_executable("opencode")
-
-        # Build command - use `opencode run` with --format json
-        cmd = [opencode_cli, "run", "--format", "json"]
-        if self.session_id:
-            cmd.extend(["--session", self.session_id])
-        elif self.config.model_name and self.config.model_name != "default":
-            cmd.extend(["-m", self.config.model_name])
-        cmd.append(self.current_message)
-
-        try:
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            # No need to set XDG_DATA_HOME; OpenCode v1.1+ uses ~/.local/share/opencode
-
-            json_events = []
-            response_parts = []
-            final_result = [None]  # Store final result from result event
-
-            def handle_chunk(decoded: str) -> None:
-                # Stream raw output for live display
-                self._notify_activity("stream", decoded)
-                # Parse JSON lines
-                for line in decoded.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                        if not isinstance(event, dict):
-                            continue
-                        json_events.append(event)
-                        # Extract session_id from system/init event or session event
-                        if event.get("type") == "system" and "session_id" in event:
-                            self.session_id = event["session_id"]
-                        elif event.get("type") == "session" and "id" in event:
-                            self.session_id = event["id"]
-                        # Handle assistant type with content blocks
-                        if event.get("type") == "assistant":
-                            message = event.get("message", {})
-                            content_blocks = message.get("content", [])
-                            for block in content_blocks:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    text = block.get("text", "")
-                                    if text:
-                                        response_parts.append(text)
-                                        self._notify_activity("text", text[:80])
-                        # Capture final result from result event
-                        if event.get("type") == "result" and "result" in event:
-                            final_result[0] = event["result"]
-                    except json.JSONDecodeError:
-                        # Non-JSON line (warnings, etc.) - just notify
-                        if line and len(line) > 10:
-                            self._notify_activity("text", line[:80])
-
-            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
-
-            # Close stdin immediately - prompt is passed via -p argument
-            if self.process.stdin:
-                self.process.stdin.close()
-
-            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
-
-            self.current_message = None
-            self.process = None
-            self.master_fd = None
-
-            if idle_stalled:
-                return f"Error: OpenCode execution stalled (no output for {int(timeout)}s)"
-            if timed_out:
-                return f"Error: OpenCode execution timed out ({int(timeout / 60)} minutes)"
-
-            # Prefer final result from result event (most reliable)
-            if final_result[0]:
-                return str(final_result[0]).strip()
-
-            # Return collected response parts if any
-            if response_parts:
-                return "".join(response_parts).strip()
-
-            # Fallback to raw output
-            output = _strip_ansi_codes(output)
-            return output.strip() if output else "No response from OpenCode"
-
-        except FileNotFoundError:
-            self.current_message = None
-            self.process = None
-            _close_master_fd(self.master_fd)
-            self.master_fd = None
-            return (
-                "Failed to run OpenCode: command not found\n\n"
-                "Install with: curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install | bash"
-            )
-        except (PermissionError, OSError) as exc:
-            self.current_message = None
-            self.process = None
-            _close_master_fd(self.master_fd)
-            self.master_fd = None
-            return f"Failed to run OpenCode: {exc}"
-
-    def stop_session(self) -> None:
-        self.current_message = None
-        self.session_id = None  # Clear session_id to end multi-turn
-        _close_master_fd(self.master_fd)
-        self.master_fd = None
-        if self.process:
-            try:
-                self.process.kill()
-                self.process.wait(timeout=5)
-            except Exception:
-                pass
-            self.process = None
-
-    def is_alive(self) -> bool:
-        # Session is "alive" if we have a session_id for resuming
-        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
-
-    def supports_multi_turn(self) -> bool:
-        return True
-
-    def get_session_id(self) -> str | None:
-        """Get the OpenCode session_id for native resume."""
-        return self.session_id
+        endpoint = ConfigManager().get_local_endpoint()
+        return build_local_env(endpoint, self.config.model_name)
 
     def supports_usage_reporting(self) -> bool:
-        """OpenCode supports usage reporting via local session files."""
-        return True
+        """A local server has no usage limits to report."""
+        return False
 
     def get_session_usage_percentage(self) -> float | None:
-        """Get OpenCode usage percentage from local session files."""
-        return _get_opencode_usage_percentage(self.config.account_name)
+        return None
 
 
 class KimiCodeProvider(AIProvider):
@@ -3818,8 +3651,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return GeminiCodeAssistProvider(config)
     elif config.provider == "qwen":
         return QwenCodeProvider(config)
-    elif config.provider == "opencode":
-        return OpenCodeProvider(config)
+    elif config.provider == "local":
+        return LocalProvider(config)
     elif config.provider == "kimi":
         return KimiCodeProvider(config)
     elif config.provider == "mistral":

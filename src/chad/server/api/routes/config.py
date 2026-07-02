@@ -361,6 +361,36 @@ async def set_max_verification_attempts(
     return MaxVerificationAttemptsResponse(attempts=request.attempts)
 
 
+class LocalEndpointResponse(BaseModel):
+    """Response for local model endpoint."""
+
+    endpoint: str = Field(description="Base URL of the local OpenAI-compatible model server")
+
+
+class LocalEndpointUpdate(BaseModel):
+    """Request to set the local model endpoint."""
+
+    endpoint: str = Field(description="Base URL, e.g. http://localhost:8000")
+
+
+@router.get("/local-endpoint", response_model=LocalEndpointResponse)
+async def get_local_endpoint() -> LocalEndpointResponse:
+    """Get the base URL of the local OpenAI-compatible model server."""
+    config_mgr = get_config_manager()
+    return LocalEndpointResponse(endpoint=config_mgr.get_local_endpoint())
+
+
+@router.put("/local-endpoint", response_model=LocalEndpointResponse)
+async def set_local_endpoint(request: LocalEndpointUpdate) -> LocalEndpointResponse:
+    """Set the base URL of the local OpenAI-compatible model server."""
+    config_mgr = get_config_manager()
+    try:
+        config_mgr.set_local_endpoint(request.endpoint)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return LocalEndpointResponse(endpoint=config_mgr.get_local_endpoint())
+
+
 @router.get("/slack", response_model=SlackSettingsResponse)
 async def get_slack_settings() -> SlackSettingsResponse:
     """Get Slack integration settings."""
@@ -603,7 +633,7 @@ PROVIDER_TO_TOOL_KEY: dict[str, str] = {
     "openai": "codex",
     "gemini": "gemini",
     "qwen": "qwen",
-    "opencode": "opencode",
+    "local": "qwen",
     "kimi": "kimi",
     "mistral": "vibe",
 }

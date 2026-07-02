@@ -13,12 +13,14 @@ import pytest
 from chad.util.providers import (
     ModelConfig,
     create_provider,
+    build_local_env,
+    discover_local_models,
     ClaudeCodeProvider,
     GeminiCodeAssistProvider,
+    LocalProvider,
     OpenAICodexProvider,
     MistralVibeProvider,
     QwenCodeProvider,
-    OpenCodeProvider,
     KimiCodeProvider,
     MockProvider,
     MockProviderQuotaError,
@@ -48,31 +50,6 @@ class TestProviderLoginUtil:
         auth.parent.mkdir(parents=True, exist_ok=True)
         auth.write_text(json.dumps({"tokens": {}}), encoding="utf-8")
         assert provider_login.is_logged_in("openai", "acct") is False
-
-    def test_run_login_opencode_writes_api_key(self, tmp_path, monkeypatch):
-        from chad.util import provider_login
-        from chad.util.installer import AIToolInstaller
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
-        )
-        ok, _ = provider_login.run_login("opencode", "acct", "sk-test")
-        assert ok is True
-        auth = tmp_path / ".local" / "share" / "opencode" / "auth.json"
-        assert json.loads(auth.read_text())["opencode"]["key"] == "sk-test"
-
-    def test_run_login_opencode_requires_key(self, tmp_path, monkeypatch):
-        from chad.util import provider_login
-        from chad.util.installer import AIToolInstaller
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
-        )
-        ok, msg = provider_login.run_login("opencode", "acct", "")
-        assert ok is False
-        assert "API key" in msg
 
     def test_ensure_cli_delegates_to_installer(self, monkeypatch):
         from chad.util import provider_login
@@ -169,20 +146,117 @@ class TestCreateProvider:
         provider = create_provider(config)
         assert isinstance(provider, MistralVibeProvider)
 
-    def test_create_opencode_provider(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = create_provider(config)
-        assert isinstance(provider, OpenCodeProvider)
-
     def test_create_kimi_provider(self):
         config = ModelConfig(provider="kimi", model_name="default")
         provider = create_provider(config)
         assert isinstance(provider, KimiCodeProvider)
 
+    def test_create_local_provider(self):
+        config = ModelConfig(provider="local", model_name="default")
+        provider = create_provider(config)
+        assert isinstance(provider, LocalProvider)
+        assert isinstance(provider, QwenCodeProvider)
+
     def test_unsupported_provider(self):
         config = ModelConfig(provider="unsupported", model_name="model")
         with pytest.raises(ValueError, match="Unsupported provider"):
             create_provider(config)
+
+
+class TestLocalProvider:
+    """Tests for the local OpenAI-compatible server provider."""
+
+    def test_uses_openai_auth_cli_args(self):
+        provider = LocalProvider(ModelConfig(provider="local", model_name="default"))
+        assert provider.extra_cli_args == ["--auth-type", "openai"]
+
+    def test_no_usage_reporting(self):
+        provider = LocalProvider(ModelConfig(provider="local", model_name="default"))
+        assert provider.supports_usage_reporting() is False
+        assert provider.get_session_usage_percentage() is None
+
+    def test_build_local_env_with_pinned_model(self):
+        env = build_local_env("http://127.0.0.1:9999", "my-model")
+        assert env == {
+            "OPENAI_BASE_URL": "http://127.0.0.1:9999/v1",
+            "OPENAI_API_KEY": "local",
+            "OPENAI_MODEL": "my-model",
+        }
+
+    def test_build_local_env_discovers_served_model(self, monkeypatch):
+        import chad.util.providers as providers
+
+        monkeypatch.setattr(
+            providers, "discover_local_models", lambda endpoint: ["served-model"]
+        )
+        env = build_local_env("http://127.0.0.1:9999/", "default")
+        assert env["OPENAI_MODEL"] == "served-model"
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9999/v1"
+
+    def test_build_local_env_unreachable_server_keeps_default(self, monkeypatch):
+        import chad.util.providers as providers
+
+        def boom(endpoint):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(providers, "discover_local_models", boom)
+        env = build_local_env("http://127.0.0.1:9999", None)
+        assert env["OPENAI_MODEL"] == "default"
+
+    def test_discover_local_models_parses_openai_list(self, monkeypatch):
+        import io
+        import urllib.request
+
+        payload = json.dumps({"data": [{"id": "modelA"}, {"id": "modelB"}]}).encode()
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        captured = {}
+
+        def fake_urlopen(url, timeout=0):
+            captured["url"] = url
+            return FakeResponse(payload)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        assert discover_local_models("http://127.0.0.1:9999") == ["modelA", "modelB"]
+        assert captured["url"] == "http://127.0.0.1:9999/v1/models"
+
+    def test_runtime_env_uses_configured_endpoint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+        from chad.util.config_manager import ConfigManager
+
+        ConfigManager().set_local_endpoint("http://127.0.0.1:4242")
+        provider = LocalProvider(ModelConfig(provider="local", model_name="pinned"))
+        env = provider.runtime_env()
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:4242/v1"
+        assert env["OPENAI_MODEL"] == "pinned"
+
+    def test_local_endpoint_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+        from chad.util.config_manager import ConfigManager
+
+        assert ConfigManager().get_local_endpoint() == "http://localhost:8000"
+
+    def test_local_endpoint_normalizes_host_port(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+        from chad.util.config_manager import ConfigManager
+
+        ConfigManager().set_local_endpoint("localhost:9001")
+        assert ConfigManager().get_local_endpoint() == "http://localhost:9001"
+
+        with pytest.raises(ValueError):
+            ConfigManager().set_local_endpoint("  ")
+
+    def test_login_requires_no_credentials(self, monkeypatch):
+        from chad.util import provider_login
+
+        monkeypatch.setattr(provider_login, "_resolve_cli", lambda p: "/bin/qwen")
+        assert provider_login.is_logged_in("local", "my-local") is True
 
 
 def test_codex_start_session_ensures_cli_installed(monkeypatch, tmp_path):
@@ -1973,104 +2047,6 @@ class TestMistralVibeProvider:
         assert provider.current_message == "Hello"
 
 
-class TestOpenCodeProvider:
-    """Test cases for OpenCodeProvider."""
-
-    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
-    def test_start_session_success(self, mock_ensure):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        result = provider.start_session("/tmp/test_project")
-        assert result is True
-        assert provider.project_path == "/tmp/test_project"
-        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
-
-    @patch("chad.util.providers._ensure_cli_tool", return_value=(False, "CLI not found"))
-    def test_start_session_failure(self, mock_ensure):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        result = provider.start_session("/tmp/test_project")
-        assert result is False
-        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
-
-    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
-    def test_start_session_with_system_prompt(self, mock_ensure):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        result = provider.start_session("/tmp/test_project", system_prompt="Initial prompt")
-        assert result is True
-        assert provider.system_prompt == "Initial prompt"
-        # System prompt is prepended to messages when no session_id
-        provider.send_message("Test message")
-        assert "Initial prompt" in provider.current_message
-        assert "Test message" in provider.current_message
-
-    def test_send_message(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        provider.send_message("Hello")
-        assert provider.current_message == "Hello"
-
-    def test_send_message_without_system_prompt_on_continuation(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        provider.system_prompt = "System prompt"
-        provider.session_id = "ses_abc123"  # Session already established
-
-        provider.send_message("Follow-up message")
-        # Should not include system prompt since session_id is set
-        assert provider.current_message == "Follow-up message"
-
-    def test_is_alive_with_session_id(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        # Initially not alive
-        assert provider.is_alive() is False
-
-        # With session_id, should be alive
-        provider.session_id = "ses_abc123"
-        assert provider.is_alive() is True
-
-    def test_stop_session_clears_session_id(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        provider.session_id = "ses_abc123"
-
-        provider.stop_session()
-        assert provider.session_id is None
-
-    def test_supports_multi_turn(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        assert provider.supports_multi_turn() is True
-
-    def test_get_session_id(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        # Initially None
-        assert provider.get_session_id() is None
-
-        # After setting session_id
-        provider.session_id = "ses_xyz789"
-        assert provider.get_session_id() == "ses_xyz789"
-
-    def test_supports_usage_reporting(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        assert provider.supports_usage_reporting() is True
-
-    def test_get_response_no_message(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        assert provider.get_response(timeout=1) == ""
-
-
 class TestKimiCodeProvider:
     """Test cases for KimiCodeProvider."""
 
@@ -2615,18 +2591,6 @@ class TestProviderGetSessionId:
         provider = MistralVibeProvider(config)
         assert provider.get_session_id() is None
 
-    def test_opencode_provider_returns_session_id(self):
-        """OpenCode provider returns session_id when set."""
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-
-        # Initially None
-        assert provider.get_session_id() is None
-
-        # After setting session_id
-        provider.session_id = "ses_opencode_abc"
-        assert provider.get_session_id() == "ses_opencode_abc"
-
     def test_kimi_provider_returns_session_id(self):
         """Kimi provider returns session_id when set."""
         config = ModelConfig(provider="kimi", model_name="default")
@@ -2674,12 +2638,6 @@ class TestProviderUsageReporting:
         """Mistral provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
-        assert provider.supports_usage_reporting() is True
-
-    def test_opencode_provider_supports_usage_reporting(self):
-        """OpenCode provider supports usage percentage reporting via local session files."""
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
         assert provider.supports_usage_reporting() is True
 
     def test_kimi_provider_supports_usage_reporting(self):
@@ -2739,12 +2697,12 @@ class TestProviderQuotaDetection:
         """Every provider class has an is_quota_exhausted method."""
         from chad.util.providers import (
             ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
-            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         )
         provider_classes = [
             ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
-            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         ]
         for cls in provider_classes:
@@ -2754,12 +2712,12 @@ class TestProviderQuotaDetection:
         """Every provider class has a get_weekly_usage_percentage method."""
         from chad.util.providers import (
             ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
-            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         )
         provider_classes = [
             ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
-            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         ]
         for cls in provider_classes:
@@ -2771,7 +2729,6 @@ class TestProviderQuotaDetection:
             GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default")),
             QwenCodeProvider(ModelConfig(provider="qwen", model_name="default")),
             MistralVibeProvider(ModelConfig(provider="mistral", model_name="default")),
-            OpenCodeProvider(ModelConfig(provider="opencode", model_name="default")),
             KimiCodeProvider(ModelConfig(provider="kimi", model_name="default")),
             MockProvider(ModelConfig(provider="mock", model_name="default")),
         ]
@@ -3290,71 +3247,6 @@ class TestUsagePercentageCalculation:
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
             assert result == 100.0  # Capped at 100%
-
-    def test_opencode_usage_no_sessions(self, tmp_path):
-        """OpenCode returns 0% when no session files exist."""
-        from chad.util.providers import _get_opencode_usage_percentage
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_opencode_usage_percentage("")
-            assert result == 0.0
-
-    def test_opencode_usage_with_account_isolation(self, tmp_path):
-        """OpenCode returns 0% when using account-isolated data dir with no sessions."""
-        from chad.util.providers import _get_opencode_usage_percentage
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_opencode_usage_percentage("myaccount")
-            assert result == 0.0
-
-    def test_opencode_usage_counts_today_requests(self, tmp_path):
-        """OpenCode correctly counts today's requests from jsonl session files."""
-        import json
-        from datetime import datetime, timezone
-        from chad.util.providers import _get_opencode_usage_percentage
-
-        # Create session directory at ~/.local/share/opencode/sessions
-        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
-        data_dir.mkdir(parents=True)
-
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        yesterday = "2020-01-01T12:00:00.000Z"
-
-        # Write jsonl format (one JSON object per line)
-        lines = [
-            json.dumps({"type": "assistant", "timestamp": today}),
-            json.dumps({"type": "assistant", "timestamp": today}),
-            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
-            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
-        ]
-        (data_dir / "session.jsonl").write_text("\n".join(lines))
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_opencode_usage_percentage("testaccount")
-            # 2 requests today out of 2000 limit = 0.1%
-            assert result == pytest.approx(0.1, abs=0.01)
-
-    def test_opencode_usage_handles_malformed_jsonl(self, tmp_path):
-        """OpenCode gracefully handles malformed jsonl lines."""
-        import json
-        from datetime import datetime, timezone
-        from chad.util.providers import _get_opencode_usage_percentage
-
-        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
-        data_dir.mkdir(parents=True)
-
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        lines = [
-            "not valid json",
-            json.dumps({"type": "assistant", "timestamp": today}),
-            "{malformed",
-        ]
-        (data_dir / "session.jsonl").write_text("\n".join(lines))
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_opencode_usage_percentage("testaccount")
-            # Only 1 valid request counted
-            assert result == pytest.approx(0.05, abs=0.01)
 
     def test_kimi_usage_not_configured(self, tmp_path):
         """Kimi returns None when config doesn't exist."""

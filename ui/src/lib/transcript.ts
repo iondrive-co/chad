@@ -17,7 +17,7 @@ import type { TerminalChunk } from "../hooks/useStream.ts";
  *    individual tool calls from structured events instead.
  */
 
-export type TranscriptLineKind = "prose" | "tool";
+export type TranscriptLineKind = "prose" | "tool" | "user";
 
 export interface TranscriptLine {
   kind: TranscriptLineKind;
@@ -26,9 +26,9 @@ export interface TranscriptLine {
 
 interface Segment {
   seq: number;
-  /** Tie-break within the same seq: prose (0) sorts before its tool calls (1). */
+  /** Tie-break within the same seq: user prompt (-1) and prose (0) sort before tool calls (1). */
   rank: number;
-  kind: "text" | "tool";
+  kind: "text" | "tool" | "user";
   text: string;
 }
 
@@ -107,9 +107,16 @@ export function buildTranscript(
 
   for (const event of events) {
     const data = (event.data as Record<string, unknown>) || {};
+    const seq = typeof data.seq === "number" ? data.seq : event.seq ?? 0;
     if (data.type === "tool_call_started") {
-      const seq = typeof data.seq === "number" ? data.seq : event.seq ?? 0;
       segments.push({ seq, rank: 1, kind: "tool", text: formatToolLine(data) });
+    } else if (data.type === "user_message") {
+      // What the model was asked — shown so the panel isn't empty while the
+      // model works on its first response.
+      const content = truncate(String(data.content ?? ""), 300);
+      if (content) {
+        segments.push({ seq, rank: -1, kind: "user", text: content });
+      }
     }
   }
 
@@ -140,7 +147,7 @@ export function buildTranscript(
       buffer += segment.text;
     } else {
       flush();
-      lines.push({ kind: "tool", text: segment.text });
+      lines.push({ kind: segment.kind, text: segment.text });
     }
   }
   flush();

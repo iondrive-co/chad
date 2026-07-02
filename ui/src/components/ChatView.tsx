@@ -1109,6 +1109,10 @@ export function ChatView({
                 <div key={i} className="tline tool">
                   <span className="tool-glyph">●</span> {line.text}
                 </div>
+              ) : line.kind === "user" ? (
+                <div key={i} className="tline user">
+                  <span className="tool-glyph">❯</span> {line.text}
+                </div>
               ) : (
                 <div key={i} className="tline prose">
                   {line.text}

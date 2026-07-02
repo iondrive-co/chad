@@ -2,9 +2,9 @@
 
 Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
 
-Add one or more OpenAI Codex, Claude Code, Google Gemini, Alibaba Qwen, Mistral Vibe, Moonshot Kimi, or OpenCode coding 
-agents, decide what happens when you reach a limit (wait for the reset and continue, switch provider), ask for a coding 
-task, and Chad will ralph loop to deliver a one-shot result.
+Add one or more OpenAI Codex, Claude Code, Google Gemini, Alibaba Qwen, Mistral Vibe, Moonshot Kimi, or local
+OpenAI-compatible (llama.cpp, vLLM, Ollama) coding agents, decide what happens when you reach a limit (wait for the
+reset and continue, switch provider), ask for a coding task, and Chad will ralph loop to deliver a one-shot result.
 
 **The First Warning:** Chad was developed with...  Chad. Yes, this material writes itself. No, high quality robust code 
 this is not. 

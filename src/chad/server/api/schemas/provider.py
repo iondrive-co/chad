@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"]
+ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"]
 RoleType = Literal["CODING", "VERIFICATION"]
 
 
@@ -112,7 +112,7 @@ class AccountLoginRequest(BaseModel):
     """Request model for logging in / authorizing an account.
 
     For OAuth providers the api_key is ignored (a browser flow is launched).
-    For API-key providers (mistral, opencode) the key is required.
+    For API-key providers (mistral) the key is required.
     """
 
     api_key: str = Field(default="", description="API key for providers that require one")

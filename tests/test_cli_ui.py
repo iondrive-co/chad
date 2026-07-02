@@ -49,49 +49,6 @@ def _stub_installer(monkeypatch, result=None):
 class TestProviderOauthFlow:
     """Tests for CLI provider auth behavior (delegates to chad.util.provider_login)."""
 
-    def test_opencode_detects_existing_auth(self, monkeypatch, tmp_path):
-        """OpenCode should detect existing OAuth credentials."""
-        import json
-        from chad.ui.cli.app import _run_provider_oauth
-
-        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
-        auth_dir = tmp_path / ".local" / "share" / "opencode"
-        auth_dir.mkdir(parents=True)
-        (auth_dir / "auth.json").write_text(json.dumps({"token": "test"}))
-
-        success, message = _run_provider_oauth("opencode", "my-opencode")
-        assert success is True
-        assert "Already logged in" in message
-
-    def test_opencode_stores_api_key_from_prompt(self, monkeypatch, tmp_path):
-        """OpenCode should store an API key pasted by the user into auth.json."""
-        import json
-        from chad.ui.cli.app import _run_provider_oauth
-
-        _stub_installer(monkeypatch)
-        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("builtins.input", lambda _prompt="": "sk-test-key-123")
-
-        success, message = _run_provider_oauth("opencode", "my-opencode")
-
-        assert success is True
-        auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
-        assert auth_file.exists()
-        data = json.loads(auth_file.read_text())
-        assert data["opencode"]["key"] == "sk-test-key-123"
-
-    def test_opencode_fails_without_key(self, monkeypatch, tmp_path):
-        """OpenCode should fail when user skips API key entry."""
-        from chad.ui.cli.app import _run_provider_oauth
-
-        _stub_installer(monkeypatch)
-        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("builtins.input", lambda _prompt="": "")
-
-        success, message = _run_provider_oauth("opencode", "my-opencode")
-        assert success is False
-        assert "API key" in message
-
     def test_kimi_no_cli_reports_not_found(self, monkeypatch, tmp_path):
         """Kimi add should fail when the CLI cannot be installed."""
         from chad.ui.cli.app import _run_provider_oauth

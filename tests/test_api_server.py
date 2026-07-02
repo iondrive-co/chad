@@ -217,7 +217,7 @@ class TestProviderEndpoints:
         assert "anthropic" in provider_types
         assert "openai" in provider_types
         assert "gemini" in provider_types
-        assert "opencode" in provider_types
+        assert "local" in provider_types
         assert "kimi" in provider_types
 
         # Anthropic (Claude Code) and OpenAI (Codex) support a reasoning level.
@@ -225,7 +225,7 @@ class TestProviderEndpoints:
         assert by_type["anthropic"]["supports_reasoning"] is True
         assert by_type["openai"]["supports_reasoning"] is True
 
-    @pytest.mark.parametrize("provider", ["opencode", "kimi"])
+    @pytest.mark.parametrize("provider", ["local", "kimi"])
     def test_create_account_accepts_new_provider_types(self, client, provider):
         """Account create API should accept all provider types exposed in the setup UI."""
         config_mgr = get_config_manager()
@@ -350,18 +350,17 @@ class TestProviderLogin:
         """API-key providers authorize from the supplied key (install stubbed)."""
         _mock_installer(monkeypatch)
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed_account(client, monkeypatch, "my-oc", "opencode")
+        _seed_account(client, monkeypatch, "my-mistral", "mistral")
 
         from chad.server.api.routes import providers as providers_route
         monkeypatch.setattr(providers_route.threading, "Thread", _InlineThread)
 
-        resp = client.post("/api/v1/accounts/my-oc/login", json={"api_key": "sk-test"})
+        resp = client.post("/api/v1/accounts/my-mistral/login", json={"api_key": "sk-test"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["success"] is True
-        auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
-        assert auth_file.exists()
-        # Now reported ready.
-        assert client.get("/api/v1/accounts/my-oc").json()["ready"] is True
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-test" in env_file.read_text()
 
     def test_login_tty_provider_message_mentions_terminal(self, client, monkeypatch, tmp_path):
         """Claude/Gemini/Qwen/Kimi login tells the user to use the terminal window."""
@@ -381,9 +380,9 @@ class TestProviderLogin:
     def test_login_api_key_provider_requires_key(self, client, monkeypatch, tmp_path):
         """API-key providers reject login when no key is supplied."""
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed_account(client, monkeypatch, "my-oc", "opencode")
+        _seed_account(client, monkeypatch, "my-mistral", "mistral")
 
-        resp = client.post("/api/v1/accounts/my-oc/login", json={})
+        resp = client.post("/api/v1/accounts/my-mistral/login", json={})
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["success"] is False

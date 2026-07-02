@@ -760,6 +760,28 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("attempts", attempts)
 
+    def get_local_endpoint(self) -> str:
+        """Get the base URL of the local OpenAI-compatible model server."""
+        resp = self._client.get(self._url("/config/local-endpoint"))
+        resp.raise_for_status()
+        return resp.json()["endpoint"]
+
+    def set_local_endpoint(self, endpoint: str) -> str:
+        """Set the base URL of the local OpenAI-compatible model server.
+
+        Args:
+            endpoint: Base URL, e.g. http://localhost:8000
+
+        Returns:
+            The endpoint that was set
+        """
+        resp = self._client.put(
+            self._url("/config/local-endpoint"),
+            json={"endpoint": endpoint},
+        )
+        resp.raise_for_status()
+        return resp.json()["endpoint"]
+
     def get_slack_settings(self) -> dict:
         """Get Slack integration settings.
 

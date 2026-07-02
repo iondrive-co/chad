@@ -474,37 +474,6 @@ class TestBuildAgentCommand:
         prompt_arg = [arg for arg in cmd if "Custom exploration prompt" in arg]
         assert len(prompt_arg) == 1
 
-    def test_opencode_uses_run_with_json_format(self, tmp_path):
-        """OpenCode build_agent_command uses 'opencode run --format json'."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug"
-        )
-
-        assert "run" in cmd
-        assert "--format" in cmd
-        assert "json" in cmd
-        # Prompt is positional after 'run'
-        assert "Fix the bug" in cmd[-1]
-
-    def test_opencode_passes_model_flag(self, tmp_path):
-        """OpenCode passes -m with the model in provider/model format."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug",
-            model="openai/gpt-4o",
-        )
-
-        m_idx = cmd.index("-m")
-        assert cmd[m_idx + 1] == "openai/gpt-4o"
-
-    def test_opencode_default_model(self, tmp_path):
-        """OpenCode uses anthropic/claude-sonnet-4-5 as default model."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug"
-        )
-
-        m_idx = cmd.index("-m")
-        assert cmd[m_idx + 1] == "anthropic/claude-sonnet-4-5"
-
     def test_mistral_prompt_passed_via_p_flag(self, tmp_path):
         """Mistral provider should pass prompt via -p flag like MistralVibeProvider expects."""
         cmd, env, initial_input = build_agent_command(

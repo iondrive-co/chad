@@ -944,6 +944,13 @@ label {
   color: var(--accent);
 }
 
+/* The prompt sent to the model, shown before any agent output arrives. */
+.tline.user {
+  color: var(--text-dim, #999);
+  font-style: italic;
+  margin-bottom: 4px;
+}
+
 @media (min-width: 1100px) {
   .chat-body {
     flex-direction: row;

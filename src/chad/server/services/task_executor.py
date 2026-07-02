@@ -478,7 +478,7 @@ def build_agent_command(
     """Build CLI command and environment for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, mistral, mock)
+        provider: Provider type (anthropic, openai, gemini, qwen, local, mistral, mock)
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
@@ -596,6 +596,25 @@ def build_agent_command(
         if full_prompt:
             cmd.extend(["-p", full_prompt])
 
+    elif provider == "local":
+        # Local OpenAI-compatible server (llama.cpp, vLLM, ...) driven through the
+        # Qwen Code CLI's OpenAI-compatible auth. Endpoint comes from config.
+        from chad.util.config_manager import ConfigManager
+        from chad.util.providers import build_local_env
+
+        endpoint = ConfigManager().get_local_endpoint()
+        cmd = [
+            resolve_tool("qwen"),
+            "--auth-type",
+            "openai",
+            "-y",
+            "--output-format",
+            "stream-json",
+        ]
+        env.update(build_local_env(endpoint, model))
+        if full_prompt:
+            cmd.extend(["-p", full_prompt])
+
     elif provider == "mistral":
         # Vibe CLI (Mistral) - pass prompt via -p flag like MistralVibeProvider expects
         cmd = [resolve_tool("vibe"), "--output", "text"]
@@ -604,14 +623,6 @@ def build_agent_command(
         if full_prompt:
             cmd.extend(["-p", full_prompt])
             initial_input = None
-
-    elif provider == "opencode":
-        # OpenCode CLI v1.1+ — uses `opencode run` with --format json
-        oc_model = model if model and model != "default" else "anthropic/claude-sonnet-4-5"
-        cmd = [resolve_tool("opencode"), "run", "--format", "json"]
-        cmd.extend(["-m", oc_model])
-        if full_prompt:
-            cmd.append(full_prompt)
 
     elif provider == "kimi":
         # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
@@ -1060,7 +1071,7 @@ class TaskExecutor:
         use_stdin_pipe = coding_provider == "openai"
 
         # Create JSON parser for providers that use stream-json output
-        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "gemini", "kimi") else None
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "gemini", "kimi") else None
         # Codex prints its own rendered transcript; normalize it into clean prose
         # plus structured tool calls so the UI renders it like every other provider.
         codex_parser = CodexStreamParser() if coding_provider == "openai" else None

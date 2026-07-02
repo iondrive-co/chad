@@ -387,6 +387,14 @@ export class ChadAPI {
     return this.put("/api/v1/config/max-verification-attempts", { attempts });
   }
 
+  getLocalEndpoint(): Promise<{ endpoint: string }> {
+    return this.get("/api/v1/config/local-endpoint");
+  }
+
+  setLocalEndpoint(endpoint: string): Promise<{ endpoint: string }> {
+    return this.put("/api/v1/config/local-endpoint", { endpoint });
+  }
+
   // ── Config: Cleanup ──
 
   getCleanupSettings(): Promise<CleanupSettings> {

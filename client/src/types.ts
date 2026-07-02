@@ -91,8 +91,8 @@ export type ProviderType =
   | "openai"
   | "gemini"
   | "qwen"
+  | "local"
   | "mistral"
-  | "opencode"
   | "kimi"
   | "mock";
 

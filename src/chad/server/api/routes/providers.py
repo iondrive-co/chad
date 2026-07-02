@@ -84,15 +84,15 @@ async def list_providers() -> ProviderListResponse:
             supports_reasoning=False,
         ),
         ProviderInfo(
-            type="mistral",
-            name="Mistral (Vibe)",
-            description="Mistral models via Vibe CLI",
+            type="local",
+            name="Local (OpenAI-compatible)",
+            description="Local model server (llama.cpp, vLLM, ...) via Qwen Code CLI",
             supports_reasoning=False,
         ),
         ProviderInfo(
-            type="opencode",
-            name="OpenCode",
-            description="OpenCode models via OpenCode CLI",
+            type="mistral",
+            name="Mistral (Vibe)",
+            description="Mistral models via Vibe CLI",
             supports_reasoning=False,
         ),
         ProviderInfo(
@@ -183,7 +183,9 @@ async def login_account(name: str, request: AccountLoginRequest) -> AccountLogin
         daemon=True,
     ).start()
 
-    if provider in provider_login.API_KEY_PROVIDERS:
+    if provider == "local":
+        message = "Installing Qwen Code CLI…"
+    elif provider in provider_login.API_KEY_PROVIDERS:
         message = "Authorizing…"
     elif provider in provider_login.TTY_LOGIN_PROVIDERS:
         message = "Login started — finish signing in in the terminal window that opened."

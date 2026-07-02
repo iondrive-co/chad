@@ -14,6 +14,9 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+# Default base URL for the "local" provider's OpenAI-compatible model server.
+DEFAULT_LOCAL_ENDPOINT = "http://localhost:8000"
+
 # Base keys that may appear in the persisted config.
 CONFIG_BASE_KEYS: set[str] = {
     "password_hash",
@@ -35,6 +38,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
+    "local_endpoint",      # Base URL of the local OpenAI-compatible model server
 
 }
 
@@ -817,6 +821,30 @@ class ConfigManager:
             raise ValueError("cleanup_days must be at least 1")
         config = self.load_config()
         config["cleanup_days"] = days
+        self.save_config(config)
+
+    def get_local_endpoint(self) -> str:
+        """Get the base URL of the local OpenAI-compatible model server.
+
+        Returns:
+            Endpoint URL (default http://localhost:8000)
+        """
+        config = self.load_config()
+        return config.get("local_endpoint", DEFAULT_LOCAL_ENDPOINT)
+
+    def set_local_endpoint(self, endpoint: str) -> None:
+        """Set the base URL of the local OpenAI-compatible model server.
+
+        Args:
+            endpoint: Base URL or host:port, e.g. http://localhost:8000 or localhost:8000
+        """
+        endpoint = endpoint.strip().rstrip("/")
+        if not endpoint:
+            raise ValueError("local_endpoint must not be empty")
+        if not endpoint.startswith(("http://", "https://")):
+            endpoint = f"http://{endpoint}"
+        config = self.load_config()
+        config["local_endpoint"] = endpoint
         self.save_config(config)
 
     def get_ui_mode(self) -> str:

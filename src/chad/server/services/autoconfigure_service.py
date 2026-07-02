@@ -92,10 +92,14 @@ def _build_command(
         cmd = [_resolve_tool("gemini"), "-y", "-p", prompt]
     elif provider == "qwen":
         cmd = [_resolve_tool("qwen"), "-y", "-p", prompt]
+    elif provider == "local":
+        from chad.util.config_manager import ConfigManager
+        from chad.util.providers import build_local_env
+
+        env.update(build_local_env(ConfigManager().get_local_endpoint(), None))
+        cmd = [_resolve_tool("qwen"), "--auth-type", "openai", "-y", "-p", prompt]
     elif provider == "mistral":
         cmd = [_resolve_tool("vibe"), "--output", "text", "-p", prompt]
-    elif provider == "opencode":
-        cmd = [_resolve_tool("opencode"), "run", "--format", "json", prompt]
     elif provider == "kimi":
         cmd = [_resolve_tool("kimi"), "--print", "-p", prompt]
     elif provider == "mock":
