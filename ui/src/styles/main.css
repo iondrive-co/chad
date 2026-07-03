@@ -634,12 +634,6 @@ label {
   min-width: 180px;
 }
 
-.chat-status {
-  font-size: 16px;
-  color: var(--text-muted);
-  padding-top: 6px;
-}
-
 .chat-messages {
   flex: 1;
   min-height: 0;
@@ -925,6 +919,13 @@ label {
   line-height: 1.5;
   min-height: 200px;
   color: var(--text);
+}
+
+/* While scrolled (e.g. autoscroll following output), fade the half-clipped
+   first line at the top edge instead of cutting it off abruptly. */
+.terminal-output.clipped-top {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
 }
 
 /* One line/segment of the agent-harness transcript. */
@@ -1426,6 +1427,11 @@ label {
 
 .merge-btn:hover:not(:disabled) {
   background: #5eea90;
+}
+
+.merge-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .discard-btn {

@@ -72,6 +72,7 @@ class SessionEventLoop:
         self._session_limit_detected = False
         self._session_limit_lock = threading.Lock()
         self._session_limit_summary: str | None = None
+        self._context_overflow_detected = False
 
         # Usage threshold monitoring state
         self._get_session_usage_fn = get_session_usage_fn
@@ -137,6 +138,7 @@ class SessionEventLoop:
         "coding_complete": "Coding Complete",
         "session_limit_reached": "Session Limit",
         "weekly_limit_reached": "Weekly Limit",
+        "context_limit_reached": "Context Limit",
         "usage_threshold": "Usage Warning",
         "verification_started": "Verification",
         "verification_automated": "Automated Verification",
@@ -276,6 +278,18 @@ class SessionEventLoop:
         stripped = line.lstrip()
         return any(stripped.startswith(p) for p in SessionEventLoop._CODE_CONTENT_PREFIXES)
 
+    # ---- Context-window overflow detection ----
+    # A model/server rejecting an over-long request mid-run makes the CLI drop
+    # history and start over, silently losing work. Match the error formats of
+    # llama.cpp ("exceeds the available context size"), OpenAI-compatible
+    # servers ("maximum context length is N tokens"), and Anthropic
+    # ("prompt is too long: N tokens").
+    _CONTEXT_OVERFLOW_RE = re.compile(
+        r"exceeds the available context size"
+        r"|maximum context length is \d+ tokens"
+        r"|prompt is too long: \d+ tokens",
+    )
+
     # ---- Exploration marker detection ----
     _EXPLORATION_LINE_RE = re.compile(r"EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
     _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -287,6 +301,29 @@ class SessionEventLoop:
         "/bin/bash -lc",
         "exec ",
     )
+    # Step narration is not a finding. Weak models mark every "Let me read X"
+    # as an EXPLORATION_RESULT, flooding the chat panel with Discovery bubbles;
+    # milestones are reserved for what the agent LEARNED.
+    _NARRATION_PREFIXES = (
+        "i'll ",
+        "i will ",
+        "i need to ",
+        "i want to ",
+        "i'm going to ",
+        "i am going to ",
+        "now i",
+        "next ",
+        "next,",
+        "still ",
+        "checking ",
+        "reading ",
+        "looking ",
+        "examining ",
+        "exploring ",
+        "investigating ",
+        "analyzing ",
+    )
+    _NARRATION_SUBSTRINGS = ("let me ", "let's ", "lets ")
 
     def _sanitize_exploration_text(self, text: str) -> str:
         """Strip ANSI/control characters before parsing exploration markers."""
@@ -303,6 +340,12 @@ class SessionEventLoop:
             return None
         lower = cleaned.lower()
         if lower.startswith(self._INVALID_EXPLORATION_PREFIXES):
+            return None
+        # Drop step narration ("Let me read X", "Now I'll check Y") — only
+        # actual findings become Discovery milestones.
+        if lower.startswith(self._NARRATION_PREFIXES):
+            return None
+        if any(marker in lower for marker in self._NARRATION_SUBSTRINGS):
             return None
         return cleaned
 
@@ -333,6 +376,23 @@ class SessionEventLoop:
             self._seen_exploration_summaries.add(summary_key)
             self._emit_milestone("exploration", summary)
 
+    def _scan_context_overflow(self, new_text: str) -> None:
+        """Detect model context-window overflow errors and surface a milestone."""
+        if self._context_overflow_detected or not new_text:
+            return
+        match = self._CONTEXT_OVERFLOW_RE.search(new_text)
+        if not match:
+            return
+        self._context_overflow_detected = True
+        line_start = new_text.rfind("\n", 0, match.start()) + 1
+        line_end = new_text.find("\n", match.end())
+        line = new_text[line_start: line_end if line_end != -1 else len(new_text)].strip()
+        self._emit_milestone(
+            "context_limit_reached",
+            f"{line} — the model's context window overflowed mid-task, so earlier conversation "
+            "was dropped and work may repeat. For local servers, increase the served context size.",
+        )
+
     def _analyze_output(self, finalize: bool = False) -> None:
         """Scan output buffer for milestone markers."""
         with self._output_lock:
@@ -342,7 +402,9 @@ class SessionEventLoop:
             new_chunks = self._output_buffer[self._exploration_chunks_processed:]
             self._exploration_chunks_processed = len(self._output_buffer)
 
-        self._scan_exploration_markers("".join(new_chunks), finalize=finalize)
+        new_text = "".join(new_chunks)
+        self._scan_exploration_markers(new_text, finalize=finalize)
+        self._scan_context_overflow(new_text)
 
         # Scan for session/quota limit messages in the tail of output.
         # Only check the last few lines to avoid matching quota patterns in

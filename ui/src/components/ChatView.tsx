@@ -77,6 +77,9 @@ export function ChatView({
   // True once the user scrolls up off the bottom; suppresses terminal autoscroll
   // until they return to the bottom, just like a real terminal.
   const userScrolledUpRef = useRef(false);
+  // True when content is scrolled past the top edge, so the half-clipped first
+  // line gets a fade instead of looking abruptly cut off.
+  const [clippedTop, setClippedTop] = useState(false);
   const convoRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -429,6 +432,7 @@ export function ChatView({
     const el = e.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     userScrolledUpRef.current = distanceFromBottom > 24;
+    setClippedTop(el.scrollTop > 4);
   }, []);
 
   // Auto-scroll terminal transcript to the bottom as it grows, unless the user
@@ -443,6 +447,7 @@ export function ChatView({
   // Reset scroll-follow state when switching sessions.
   useEffect(() => {
     userScrolledUpRef.current = false;
+    setClippedTop(false);
   }, [sessionId]);
 
   // Auto-scroll conversation to bottom when new messages arrive
@@ -948,7 +953,6 @@ export function ChatView({
                   />
                 </div>
               </div>
-              <div className="chat-status">{taskActive ? "Running…" : hasRunTask ? "Ready for follow-up" : "Ready to start"}</div>
             </div>
 
             <div className="chat-messages" ref={convoRef}>
@@ -1101,7 +1105,7 @@ export function ChatView({
 
           <div
             ref={outputRef}
-            className="terminal-output"
+            className={`terminal-output${clippedTop ? " clipped-top" : ""}`}
             onScroll={handleTerminalScroll}
           >
             {transcript.map((line, i) =>

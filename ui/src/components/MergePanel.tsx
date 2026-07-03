@@ -288,6 +288,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   }
 
   // changes phase (or merging)
+  const nothingToMerge = filesChanged === 0 && insertions === 0 && deletions === 0;
   return (
     <div className="merge-panel">
       <div className="merge-header">Changes Ready to Merge</div>
@@ -298,7 +299,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {deletions > 0 && <span className="deletions">-{deletions}</span>}
       </div>
 
-      {filesChanged === 0 && insertions === 0 && deletions === 0 && worktreeHasChanges && (
+      {nothingToMerge && worktreeHasChanges && (
         <div className="error-text">
           These session changes are already present on "{targetBranch}", so there is nothing to
           merge into that branch. Choose a different target branch if you want to merge the same
@@ -365,7 +366,8 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         <button
           className="merge-btn"
           onClick={handleMerge}
-          disabled={phase === "merging" || loading}
+          disabled={phase === "merging" || loading || nothingToMerge}
+          title={nothingToMerge ? "No changes to merge into the selected branch" : undefined}
         >
           {phase === "merging" ? "Merging..." : "Accept & Merge"}
         </button>

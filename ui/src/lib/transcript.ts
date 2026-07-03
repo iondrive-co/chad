@@ -8,13 +8,15 @@ import type { TerminalChunk } from "../hooks/useStream.ts";
  * individual tool calls (rendered like `● Read(src/foo.py)`) interleaved with
  * the agent's prose, ordered by sequence number.
  *
- * Two things are deliberately filtered out so the panel reads like a real agent
- * harness and never gets clobbered by the agent's final output:
+ * Three things are deliberately filtered out so the panel reads like a real
+ * agent harness and never duplicates the chat panel:
  *  - The completion/progress JSON the prompt asks the agent to emit
  *    (e.g. ```json {"change_summary": ...}```). It is machine plumbing, not
  *    something a terminal user should see.
  *  - The parser's collapsed `• 3 files read` summary lines, since we render the
  *    individual tool calls from structured events instead.
+ *  - EXPLORATION_RESULT progress lines, which the chat panel already renders
+ *    as Discovery bubbles.
  */
 
 export type TranscriptLineKind = "prose" | "tool" | "user";
@@ -42,9 +44,33 @@ function truncate(value: string, max: number): string {
   return v.length > max ? `${v.slice(0, max - 1)}…` : v;
 }
 
+/**
+ * Gemini/Qwen-style snake_case tool names → canonical names. The server
+ * normalizes new events, but events logged by older servers (and any
+ * unnormalized CLI stream) must still render canonically.
+ */
+const TOOL_ALIASES: Record<string, string> = {
+  read_file: "Read",
+  read_many_files: "Read",
+  write_file: "Write",
+  replace: "Edit",
+  edit: "Edit",
+  run_shell_command: "Bash",
+  list_directory: "LS",
+  glob: "Glob",
+  grep: "Grep",
+  grep_search: "Grep",
+  search_file_content: "Grep",
+  web_search: "WebSearch",
+  google_web_search: "WebSearch",
+  web_fetch: "WebFetch",
+  task: "Task",
+};
+
 /** Format a tool_call_started event as a Claude-Code-style call line. */
 function formatToolLine(data: Record<string, unknown>): string {
-  const tool = String(data.tool || "tool");
+  const rawTool = String(data.tool || "tool");
+  const tool = TOOL_ALIASES[rawTool] ?? rawTool;
   const args = (data.args as Record<string, unknown>) || {};
   const path = data.path as string | undefined;
   const command = data.command as string | undefined;
@@ -53,9 +79,11 @@ function formatToolLine(data: Record<string, unknown>): string {
     case "Read":
     case "Write":
     case "Edit":
-      return `${tool}(${path ?? (args.file_path as string) ?? ""})`;
+      return `${tool}(${path ?? (args.file_path as string) ?? (args.absolute_path as string) ?? ""})`;
     case "Bash":
       return `Bash(${truncate(String(command ?? args.command ?? ""), 80)})`;
+    case "LS":
+      return `LS(${path ?? (args.path as string) ?? ""})`;
     case "Glob":
       return `Glob(${(args.pattern as string) ?? path ?? ""})`;
     case "Grep":
@@ -81,9 +109,14 @@ function formatToolLine(data: Record<string, unknown>): string {
  */
 function cleanProse(text: string): string {
   let t = stripAnsi(text);
-  // The EXPLORATION_RESULT: progress-protocol prefix (every provider's prompt asks
-  // for it) — keep the agent's summary text, drop the machine marker.
-  t = t.replace(/^[ \t]*EXPLORATION_RESULT:[ \t]*/gm, "");
+  // EXPLORATION_RESULT: progress lines (every provider's prompt asks for them)
+  // are rendered as Discovery bubbles in the chat panel — drop the whole line
+  // here so the same text is not shown twice.
+  t = t.replace(/^[ \t]*EXPLORATION_RESULT:.*$\n?/gm, "");
+  // Tool-call markup a model leaked as text (e.g. llama.cpp missing a
+  // <function=...> block): machine plumbing, never prose.
+  t = t.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "");
+  t = t.replace(/<\/?(?:function|parameter|tool_call)[^>]*>/g, "");
   // Fenced JSON blocks: ```json { ... } ``` or ``` { ... } ```
   t = t.replace(/```(?:json)?\s*\{[^`]*?\}\s*```/gi, "");
   // Bare completion JSON: {"change_summary": ...} / completion_status / files_changed

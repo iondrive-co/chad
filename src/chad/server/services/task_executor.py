@@ -38,6 +38,40 @@ from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmul
 _CLI_INSTALLER = AIToolInstaller()
 
 
+def _normalize_tool_call(name: str, inp: dict) -> tuple[str, dict]:
+    """Normalize Qwen/Gemini CLI tool calls to the canonical (Claude-style) names.
+
+    The Gemini CLI family emits snake_case tools with their own arg keys
+    (read_file({"absolute_path": ...}), run_shell_command({"command": ...,
+    "is_background": ...})). Mapping them here means every consumer — collapsed
+    summaries, ToolCallStartedEvents, and both UIs — renders one vocabulary
+    instead of leaking raw JSON args.
+    """
+    if name == "read_file":
+        return "Read", {"file_path": inp.get("absolute_path", "")}
+    if name == "read_many_files":
+        return "Read", {"file_path": ", ".join(inp.get("paths") or [])}
+    if name == "write_file":
+        return "Write", {"file_path": inp.get("file_path", "")}
+    if name in ("replace", "edit"):
+        return "Edit", {"file_path": inp.get("file_path", "")}
+    if name == "run_shell_command":
+        return "Bash", {"command": inp.get("command", "")}
+    if name == "list_directory":
+        return "LS", {"path": inp.get("path", "")}
+    if name == "glob":
+        return "Glob", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+    if name in ("grep", "grep_search", "search_file_content"):
+        return "Grep", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+    if name in ("web_search", "google_web_search"):
+        return "WebSearch", {"query": inp.get("query", "")}
+    if name == "web_fetch":
+        return "WebFetch", {"url": inp.get("url") or inp.get("prompt", "")}
+    if name == "task":
+        return "Task", inp
+    return name, inp
+
+
 class ClaudeStreamJsonParser:
     """Parses stream-json output from Claude Code and Qwen CLI.
 
@@ -160,8 +194,9 @@ class ClaudeStreamJsonParser:
                         parts.append(text)
 
                 elif item_type == "tool_use":
-                    tool_name = item.get("name", "unknown")
-                    tool_input = item.get("input", {})
+                    tool_name, tool_input = _normalize_tool_call(
+                        item.get("name", "unknown"), item.get("input", {})
+                    )
                     tool_id = item.get("id", "")
                     # Accumulate tool for collapsed summary instead of showing each one
                     self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
@@ -249,6 +284,10 @@ class ClaudeStreamJsonParser:
             pattern = input_data.get("pattern", "")
             return f"• Grep: {pattern}"
 
+        elif name == "LS":
+            path = input_data.get("path", "")
+            return f"• Listing {path}"
+
         elif name == "Task":
             desc = input_data.get("description", "")
             return f"• Task: {desc}"
@@ -286,8 +325,12 @@ class ClaudeStreamJsonParser:
         if edit_count:
             parts.append(f"{edit_count} edit{'s' if edit_count > 1 else ''}")
 
-        # Searches (Glob + Grep combined)
-        search_count = self._tool_counts.get("Glob", 0) + self._tool_counts.get("Grep", 0)
+        # Searches (Glob + Grep + LS combined)
+        search_count = (
+            self._tool_counts.get("Glob", 0)
+            + self._tool_counts.get("Grep", 0)
+            + self._tool_counts.get("LS", 0)
+        )
         if search_count:
             parts.append(f"{search_count} search{'es' if search_count > 1 else ''}")
 
@@ -307,7 +350,7 @@ class ClaudeStreamJsonParser:
             parts.append(f"{web_count} web request{'s' if web_count > 1 else ''}")
 
         # Other tools not in categories above
-        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "Bash", "Task", "WebSearch", "WebFetch"}
+        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "LS", "Bash", "Task", "WebSearch", "WebFetch"}
         other_tools = [(t, c) for t, c in self._tool_counts.items() if t not in categorized]
         if other_tools:
             # Show actual tool names instead of generic "X other"
@@ -371,6 +414,8 @@ def _tool_call_event(tc: dict) -> ToolCallStartedEvent:
         ev.path = inp.get("file_path")
     elif name == "Bash":
         ev.command = inp.get("command")
+    elif name == "LS":
+        ev.path = inp.get("path")
     elif name in ("Glob", "Grep"):
         ev.path = inp.get("path")
         ev.args = {"pattern": inp.get("pattern", "")}

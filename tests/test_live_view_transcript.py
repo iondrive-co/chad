@@ -58,13 +58,29 @@ def _write_synthetic_log(session_id: str, log_dir: Path) -> Path:
         )
     )
     log.log(ToolCallStartedEvent(tool_call_id="t1", tool="Read", path="src/bug.py"))
-    # An EXPLORATION_RESULT progress line (emitted by every provider). The panel
-    # should show the summary but strip the machine "EXPLORATION_RESULT:" prefix.
+    # An EXPLORATION_RESULT progress line (emitted by every provider). It is
+    # rendered as a Discovery bubble in the chat panel, so the live view must
+    # drop the whole line to avoid showing the same text twice.
     log.log(TerminalOutputEvent(data="EXPLORATION_RESULT: tracing the validate() ordering\n"))
     log.log(TerminalOutputEvent(data=f"{PROSE_MARKER}: the null check runs after validation.\n"))
     log.log(ToolCallStartedEvent(tool_call_id="t2", tool="Grep", args={"pattern": "validate"}))
     log.log(ToolCallStartedEvent(tool_call_id="t3", tool="Edit", path="src/bug.py"))
     log.log(ToolCallStartedEvent(tool_call_id="t4", tool="Bash", command="pytest tests/ -q"))
+    # Events logged by older servers keep gemini-style snake_case names; the
+    # client must still render them canonically instead of dumping JSON args.
+    log.log(ToolCallStartedEvent(
+        tool_call_id="t5", tool="read_file", args={"absolute_path": "src/legacy.py"},
+    ))
+    # A tool call the model leaked as TEXT (llama.cpp parser miss) — machine
+    # markup that must never render as prose.
+    log.log(
+        TerminalOutputEvent(
+            data=(
+                "<function=read_file>\n<parameter=absolute_path>\nsrc/bug.py\n"
+                "</parameter>\n</function>\n</tool_call>\n"
+            )
+        )
+    )
     # Prose that mixes in (a) the parser's collapsed tool summary and (b) the
     # completion JSON block — both must be filtered out of the rendered panel.
     log.log(
@@ -151,9 +167,19 @@ def test_live_view_renders_harness_transcript(tmp_path):
     assert COLLAPSED_SUMMARY_MARKER not in text, f"leaked collapsed summary; got:\n{text}"
     assert "```" not in text, f"leaked code fence; got:\n{text}"
 
-    # The EXPLORATION_RESULT: progress prefix is stripped, but its summary is kept.
+    # EXPLORATION_RESULT lines are dropped entirely — they already appear as
+    # Discovery bubbles in the chat panel, so keeping them here duplicates them.
     assert "EXPLORATION_RESULT:" not in text, f"leaked progress marker; got:\n{text}"
-    assert "tracing the validate() ordering" in text, f"dropped progress summary; got:\n{text}"
+    assert "tracing the validate() ordering" not in text, f"duplicated exploration line; got:\n{text}"
+
+    # Snake_case tool events from older logs render canonically.
+    assert "Read(src/legacy.py)" in text, f"snake_case tool not aliased; got:\n{text}"
+    assert "read_file({" not in text, f"raw tool JSON rendered; got:\n{text}"
+
+    # Tool-call markup the model leaked as text is stripped.
+    assert "<function=" not in text, f"leaked function markup; got:\n{text}"
+    assert "tool_call" not in text, f"leaked tool_call tag; got:\n{text}"
+    assert "<parameter=" not in text, f"leaked parameter tag; got:\n{text}"
 
     # Behaves like a terminal: scrollable and bottom-anchored on load.
     assert metrics["sh"] >= metrics["ch"], f"transcript not laid out: {metrics}"

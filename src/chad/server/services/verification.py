@@ -191,12 +191,18 @@ def run_verification(
     if not coding_output.strip():
         return None, "Verification aborted: coding agent output was empty."
 
+    coding_summary = extract_coding_summary(coding_output)
+    # Info-only tasks changed no files; linting/testing unchanged code would
+    # blame the agent for pre-existing project issues.
+    info_only = bool(coding_summary and coding_summary.files_changed == "info_only")
+
     # Step 1: Run automated verification (flake8/linting)
-    auto_passed, auto_feedback = _run_automated_verification(
-        project_path, on_activity, emit=emit, attempt=attempt,
-    )
-    if not auto_passed:
-        return False, auto_feedback or "Automated verification failed"
+    if not info_only:
+        auto_passed, auto_feedback = _run_automated_verification(
+            project_path, on_activity, emit=emit, attempt=attempt,
+        )
+        if not auto_passed:
+            return False, auto_feedback or "Automated verification failed"
 
     # Step 2: Run LLM verification via PTY
     if run_phase_fn is None:
@@ -213,7 +219,6 @@ def run_verification(
             attempt=attempt,
         )
 
-    coding_summary = extract_coding_summary(coding_output)
     change_summary = coding_summary.change_summary if coding_summary else None
     trimmed_output = _truncate_verification_output(coding_output)
     exploration_prompt = get_verification_exploration_prompt(
@@ -307,6 +312,7 @@ def _run_provider_verification(
 
     coding_summary = extract_coding_summary(coding_output)
     change_summary = coding_summary.change_summary if coding_summary else None
+    info_only = bool(coding_summary and coding_summary.files_changed == "info_only")
     trimmed_output = _truncate_verification_output(coding_output)
     exploration_prompt = get_verification_exploration_prompt(
         trimmed_output, task_description, change_summary, attempt=attempt,
@@ -347,7 +353,7 @@ def _run_provider_verification(
                 try:
                     passed, summary, issues = parse_verification_response(response)
                     if passed:
-                        if provider_type != "mock" and not check_verification_mentioned(coding_output):
+                        if provider_type != "mock" and not info_only and not check_verification_mentioned(coding_output):
                             verified, feedback = _run_automated_verification(project_path, on_activity)
                             if not verified:
                                 return False, feedback or "Verification failed"
