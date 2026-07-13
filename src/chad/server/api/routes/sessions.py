@@ -403,6 +403,7 @@ async def stream_session(
             since_seq=since_seq,
             include_terminal=include_terminal,
             include_events=include_events,
+            keep_polling_fn=lambda: executor.get_running_task_for_session(session_id) is not None,
         ):
             yield format_sse_event(event)
 

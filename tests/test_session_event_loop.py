@@ -776,6 +776,45 @@ class TestUsageThresholdMonitoring:
         assert terminated == [True]
         assert self._usage_milestones(emitted) == []
 
+    def test_no_checks_while_paused_awaiting_reset(self):
+        """While paused waiting for a reset, threshold checks are fully suppressed.
+
+        Reproduces session 447de784: a task started with session usage already at
+        100%. The terminal-text path triggered the session_usage await_reset rule
+        and entered _handle_await_reset's wait loop. Because run() clears
+        _pending_action before the wait, the background tick's _check_usage_thresholds
+        was no longer guarded, so it (a) fired the notify@90 rule — surfacing a
+        "Session usage reached 100%" warning that read like a failure — and
+        (b) re-crossed the await_reset@100 rule, leaving a stale pending action that
+        caused a phantom second pause once the wait resumed.
+
+        With loop._paused set (as _handle_await_reset does for the wait), a tick must
+        emit nothing and set no pending action.
+        """
+        terminated = []
+        # The user's real config: notify + await_reset on the same metric.
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: 100.0,
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Simulate being inside _handle_await_reset's wait loop.
+        loop._paused = True
+        loop._check_usage_thresholds()
+
+        assert self._usage_milestones(emitted) == []
+        assert loop._pending_action is None
+        assert terminated == []
+
+        # Once the wait ends, checks resume normally and the crossing is detected.
+        loop._paused = False
+        loop._check_usage_thresholds()
+        assert len(self._usage_milestones(emitted)) == 1
+
     def test_milestone_logged_to_event_log(self):
         """Usage threshold milestone should appear in the EventLog."""
         pct = [80.0]

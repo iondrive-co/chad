@@ -91,6 +91,11 @@ class SessionEventLoop:
         self._pending_action: dict | None = None
         self._pending_action_lock = threading.Lock()
 
+        # True while _handle_await_reset is blocked waiting for a limit to reset.
+        # Suppresses background threshold checks so they don't re-fire during the
+        # wait (see _check_usage_thresholds).
+        self._paused = False
+
         # Slack threading: first Slack message ts is reused so all milestones stay in one thread
         self._slack_thread_ts: str | None = None
 
@@ -485,6 +490,15 @@ class SessionEventLoop:
 
     def _check_usage_thresholds(self) -> None:
         """Check provider usage metrics for threshold crossings based on action_settings."""
+        # While paused awaiting a reset, suppress all threshold checks. The user is
+        # already told "Paused, waiting for <metric> reset"; re-firing here would
+        # (a) emit a redundant "<metric> usage reached 100%" warning that reads like
+        # a failure and (b) re-cross the await_reset rule, leaving a stale pending
+        # action that triggers a phantom second pause once this wait resumes.
+        # _pending_action can't guard this because run() clears it before handing
+        # off to _handle_await_reset.
+        if self._paused:
+            return
         with self._pending_action_lock:
             if self._pending_action is not None:
                 return
@@ -931,6 +945,11 @@ class SessionEventLoop:
                 except Exception:
                     pass
 
+            # Suppress background threshold checks for the duration of the wait.
+            # Set before emitting the milestone so a concurrent tick can't slip a
+            # redundant "usage reached 100%" warning in between.
+            self._paused = True
+
             self._emit_milestone(
                 "usage_threshold",
                 f"Paused, waiting for {label} reset{eta_str}",
@@ -957,7 +976,8 @@ class SessionEventLoop:
                     resume_reason = f"{label.title()} reset detected"
                     break
 
-            # Clear paused flag
+            # Clear paused flags — threshold checks resume for the continuation run.
+            self._paused = False
             if session is not None:
                 session.paused = False
 

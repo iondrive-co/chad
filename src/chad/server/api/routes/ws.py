@@ -159,6 +159,7 @@ async def websocket_endpoint(
                     since_seq=current_since_seq,
                     include_terminal=True,
                     include_events=True,
+                    keep_polling_fn=lambda: executor.get_running_task_for_session(session_id) is not None,
                 ):
                     message = {
                         "type": event.type,

@@ -10,11 +10,18 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 if TYPE_CHECKING:
     from chad.util.event_log import EventLog
     from chad.server.services.pty_stream import PTYStreamService
+
+
+# How long the EventLog poll loops keep running once the task is no longer alive
+# (no PTY, keep_polling_fn reporting done) before giving up on an orphaned stream.
+# While the task IS alive the deadline is pushed forward, so a paused await_reset
+# task can wait hours/days without tripping it.
+POLL_TIMEOUT_SECONDS = 45 * 60
 
 
 @dataclass
@@ -142,6 +149,7 @@ class EventMultiplexer:
         pty_service: "PTYStreamService",
         include_terminal: bool = True,
         include_events: bool = True,
+        keep_polling_fn: "Callable[[], bool] | None" = None,
     ) -> AsyncIterator[MuxEvent]:
         """Stream events from PTY and EventLog in unified order.
 
@@ -149,6 +157,13 @@ class EventMultiplexer:
             pty_service: PTY streaming service
             include_terminal: Include raw PTY output events
             include_events: Include structured EventLog events
+            keep_polling_fn: Optional predicate returning True while the task is
+                still alive. When a PTY dies mid-task (e.g. the agent is paused
+                waiting for a usage-limit reset), the poll loops fall back to a
+                45-minute wall-clock timeout. A session reset can take hours and a
+                weekly reset days, so without this predicate the mux emits a
+                premature `complete` mid-pause and the UI freezes as "Completed".
+                While it returns True the timeout is pushed forward indefinitely.
 
         Yields:
             MuxEvent objects in sequence order
@@ -337,17 +352,19 @@ class EventMultiplexer:
                 )
                 return
 
-            # Safety timeout: stop polling after 45 minutes to prevent infinite hangs
-            poll_deadline = datetime.now(timezone.utc).timestamp() + 45 * 60
+            # Safety timeout: stop polling after POLL_TIMEOUT_SECONDS of the task
+            # being gone, to prevent orphaned streams hanging forever. While the task
+            # is still alive (keep_polling_fn), push the deadline forward — a paused
+            # await_reset task legitimately produces no PTY for hours/days. The
+            # timeout is evaluated at the end of the loop so real progress (a new PTY
+            # or a drained session_ended) always wins over a spurious timeout.
+            poll_deadline = datetime.now(timezone.utc).timestamp() + POLL_TIMEOUT_SECONDS
 
             while True:
-                if datetime.now(timezone.utc).timestamp() > poll_deadline:
-                    yield MuxEvent(
-                        type="complete",
-                        data={"exit_code": exit_code, "timeout": True},
-                        seq=self._next_seq(),
-                    )
-                    return
+                now_ts = datetime.now(timezone.utc).timestamp()
+                alive = keep_polling_fn() if keep_polling_fn is not None else None
+                if alive:
+                    poll_deadline = now_ts + POLL_TIMEOUT_SECONDS
 
                 # Check if a new PTY session has started (continuation phase)
                 new_pty_session = pty_service.get_session_by_session_id(self.session_id)
@@ -465,23 +482,32 @@ class EventMultiplexer:
                             )
                             return
 
+                # Give up only if the task is gone and no progress was made in time.
+                if alive is not True and now_ts > poll_deadline:
+                    yield MuxEvent(
+                        type="complete",
+                        data={"exit_code": exit_code, "timeout": True},
+                        seq=self._next_seq(),
+                    )
+                    return
+
                 if self._should_ping():
                     yield self._create_ping()
 
                 await asyncio.sleep(0.1)
 
         else:
-            # Fallback path: Poll EventLog only (no active PTY)
-            poll_deadline = datetime.now(timezone.utc).timestamp() + 45 * 60
+            # Fallback path: Poll EventLog only (no active PTY). Same deadline
+            # handling as above — a task paused awaiting a reset has no PTY yet, so
+            # keep polling while keep_polling_fn reports it alive. The timeout is
+            # checked after draining so a real session_ended always wins.
+            poll_deadline = datetime.now(timezone.utc).timestamp() + POLL_TIMEOUT_SECONDS
 
             while True:
-                if datetime.now(timezone.utc).timestamp() > poll_deadline:
-                    yield MuxEvent(
-                        type="complete",
-                        data={"exit_code": None, "timeout": True},
-                        seq=self._next_seq(),
-                    )
-                    return
+                now_ts = datetime.now(timezone.utc).timestamp()
+                alive = keep_polling_fn() if keep_polling_fn is not None else None
+                if alive:
+                    poll_deadline = now_ts + POLL_TIMEOUT_SECONDS
                 if include_events or include_terminal:
                     events = self._drain_event_log(skip_terminal=not include_terminal)
                     for event in events:
@@ -495,6 +521,15 @@ class EventMultiplexer:
                             )
                             return
 
+                # Give up only if the task is gone and no progress was made in time.
+                if alive is not True and now_ts > poll_deadline:
+                    yield MuxEvent(
+                        type="complete",
+                        data={"exit_code": None, "timeout": True},
+                        seq=self._next_seq(),
+                    )
+                    return
+
                 # Send ping if needed
                 if self._should_ping():
                     yield self._create_ping()
@@ -507,6 +542,7 @@ class EventMultiplexer:
         since_seq: int = 0,
         include_terminal: bool = True,
         include_events: bool = True,
+        keep_polling_fn: "Callable[[], bool] | None" = None,
     ) -> AsyncIterator[MuxEvent]:
         """Stream events, optionally resuming from a sequence number.
 
@@ -518,6 +554,8 @@ class EventMultiplexer:
             since_seq: Only return events after this sequence
             include_terminal: Include raw PTY output events
             include_events: Include structured EventLog events
+            keep_polling_fn: See stream_events — keeps the poll loops alive while
+                the task is paused awaiting a usage-limit reset.
 
         Yields:
             MuxEvent objects after since_seq
@@ -567,6 +605,7 @@ class EventMultiplexer:
             pty_service,
             include_terminal=include_terminal,
             include_events=include_events,
+            keep_polling_fn=keep_polling_fn,
         ):
             yield event
 
