@@ -281,6 +281,66 @@ def test_codex_start_session_ensures_cli_installed(monkeypatch, tmp_path):
     assert ("cli", "codex") in calls
 
 
+class TestDiscoverClaudeModels:
+    """Live discovery of Claude models from the Anthropic Models API."""
+
+    def test_parses_models_api_response(self, monkeypatch):
+        import requests
+        import chad.util.providers as providers
+
+        monkeypatch.setattr(providers, "_claude_oauth_token", lambda name: "tok")
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "data": [
+                        {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+                        {"id": "claude-sonnet-5"},
+                        {"display_name": "no id -> skipped"},
+                    ]
+                }
+
+        def fake_get(url, headers=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            return FakeResponse()
+
+        monkeypatch.setattr(requests, "get", fake_get)
+
+        models = providers.discover_claude_models("claude-work")
+
+        assert models == ["claude-opus-4-8", "claude-sonnet-5"]
+        assert captured["url"].startswith("https://api.anthropic.com/v1/models")
+        assert captured["headers"]["Authorization"] == "Bearer tok"
+
+    def test_returns_empty_without_credentials(self, monkeypatch):
+        import chad.util.providers as providers
+
+        monkeypatch.setattr(providers, "_claude_oauth_token", lambda name: None)
+
+        assert providers.discover_claude_models("claude-work") == []
+
+    def test_returns_empty_on_error_status(self, monkeypatch):
+        import requests
+        import chad.util.providers as providers
+
+        monkeypatch.setattr(providers, "_claude_oauth_token", lambda name: "tok")
+
+        class FakeResponse:
+            status_code = 401
+
+            def json(self):
+                return {}
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse())
+
+        assert providers.discover_claude_models("claude-work") == []
+
+
 class TestParseCodexOutput:
     """Test cases for parse_codex_output function."""
 

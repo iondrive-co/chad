@@ -794,7 +794,8 @@ label {
   margin-bottom: 8px;
 }
 
-.reasoning-select {
+.reasoning-select,
+.model-select {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-muted);
@@ -805,12 +806,14 @@ label {
   transition: border-color 0.2s, color 0.2s;
 }
 
-.reasoning-select:hover:not(:disabled) {
+.reasoning-select:hover:not(:disabled),
+.model-select:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.reasoning-select:disabled {
+.reasoning-select:disabled,
+.model-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

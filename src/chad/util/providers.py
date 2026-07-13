@@ -795,16 +795,13 @@ def _refresh_claude_token(creds_file: Path, oauth_data: dict) -> str | None:
         return None
 
 
-def _fetch_claude_usage_data(account_name: str) -> dict | None:
-    """Fetch all Claude usage data from Anthropic API in a single request.
+def _claude_oauth_token(account_name: str) -> str | None:
+    """Return a valid Claude OAuth access token for an account.
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Parsed JSON response dict, or None if unavailable.
+    Reads the account's credentials (falling back to the default ``~/.claude``
+    login) and refreshes the token if it has expired. Returns None when no
+    usable credentials are available.
     """
-    import requests
     from datetime import datetime, timezone
 
     creds_file = _find_claude_credentials(account_name)
@@ -829,6 +826,27 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
                 if refreshed:
                     access_token = refreshed
 
+        return access_token
+    except Exception:
+        return None
+
+
+def _fetch_claude_usage_data(account_name: str) -> dict | None:
+    """Fetch all Claude usage data from Anthropic API in a single request.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Parsed JSON response dict, or None if unavailable.
+    """
+    import requests
+
+    access_token = _claude_oauth_token(account_name)
+    if not access_token:
+        return None
+
+    try:
         response = requests.get(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -847,6 +865,41 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
 
     except Exception:
         return None
+
+
+def discover_claude_models(account_name: str) -> list[str]:
+    """Return current Claude model ids from the Anthropic Models API.
+
+    Uses the account's OAuth token (refreshing if needed) so the model list
+    always reflects what Anthropic currently offers, rather than a hardcoded
+    list that goes stale. Returns [] when the account has no usable credentials
+    or the API is unreachable.
+    """
+    import requests
+
+    access_token = _claude_oauth_token(account_name)
+    if not access_token:
+        return []
+
+    try:
+        response = requests.get(
+            "https://api.anthropic.com/v1/models?limit=100",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/2.0.32",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        return [str(m["id"]) for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
 
 
 def _get_claude_usage_percentage(account_name: str) -> float | None:

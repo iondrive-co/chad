@@ -42,11 +42,9 @@ class ModelCatalog:
     # (ChatGPT accounts vs API accounts have different available models)
     # User's actual available models are discovered from config/session files
     OPENAI_FALLBACK: tuple[str, ...] = ("default",)
-    ANTHROPIC_FALLBACK: tuple[str, ...] = (
-        "claude-sonnet-4-20250514",
-        "claude-opus-4-20250514",
-        "default",
-    )
+    # Claude models are discovered live from the Anthropic Models API (see
+    # _claude_models), so no hardcoded list is kept here to go stale.
+    ANTHROPIC_FALLBACK: tuple[str, ...] = ("default",)
     GEMINI_FALLBACK: tuple[str, ...] = (
         "gemini-2.5-pro",
         "gemini-2.5-flash",
@@ -84,6 +82,9 @@ class ModelCatalog:
         if provider == "openai":
             models |= self._codex_config_models(account_name)
             models |= self._codex_session_models(account_name)
+
+        if provider == "anthropic":
+            models |= self._claude_models(account_name)
 
         if provider == "local":
             models |= self._local_models()
@@ -182,6 +183,20 @@ class ModelCatalog:
             pass
 
         return models
+
+    def _claude_models(self, account_name: str | None) -> set[str]:
+        """Discover current Claude models from the Anthropic Models API.
+
+        Keeps the anthropic dropdown current automatically instead of relying on
+        a hardcoded list. Falls back to an empty set (leaving just the account's
+        stored model and "default") when the account has no usable credentials.
+        """
+        if not account_name:
+            return set()
+
+        from chad.util.providers import discover_claude_models
+
+        return set(discover_claude_models(account_name))
 
     def _local_models(self) -> set[str]:
         """Discover models served by the configured local OpenAI-compatible endpoint."""

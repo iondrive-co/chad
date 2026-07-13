@@ -113,7 +113,10 @@ def test_mock_provider_filters_cross_provider_stored_model(tmp_path):
     assert models == ["default"]
 
 
-def test_anthropic_provider_keeps_claude_stored_model(tmp_path):
+def test_anthropic_provider_keeps_claude_stored_model(monkeypatch, tmp_path):
+    # Isolate the home so credential lookup can't reach a real ~/.claude login
+    # (and therefore can't make a live Models API call from a unit test).
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
     api_client = Mock()
     api_client.get_account.return_value = Mock(provider="anthropic", model="claude-sonnet-4-5")
     api_client.get_account_model.return_value = "claude-sonnet-4-5"
@@ -122,6 +125,42 @@ def test_anthropic_provider_keeps_claude_stored_model(tmp_path):
     models = catalog.get_models("anthropic", "claude-pro")
 
     assert "claude-sonnet-4-5" in models
+
+
+def test_anthropic_models_discovered_live_from_api(monkeypatch, tmp_path):
+    """The anthropic dropdown is populated from live discovery, not a stale list."""
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    import chad.util.providers as providers
+
+    monkeypatch.setattr(
+        providers,
+        "discover_claude_models",
+        lambda account_name: ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    )
+
+    catalog = ModelCatalog(home_dir=tmp_path, cache_ttl=0)
+    models = catalog.get_models("anthropic", "claude-work")
+
+    assert "claude-opus-4-8" in models
+    assert "claude-sonnet-5" in models
+    assert "claude-haiku-4-5-20251001" in models
+    assert "default" in models
+    # The old hardcoded fallback models must not resurface once discovery runs.
+    assert "claude-opus-4-20250514" not in models
+    assert "claude-sonnet-4-20250514" not in models
+
+
+def test_anthropic_models_fall_back_to_default_without_credentials(monkeypatch, tmp_path):
+    """With no usable credentials, discovery yields nothing and only 'default' remains."""
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    import chad.util.providers as providers
+
+    monkeypatch.setattr(providers, "discover_claude_models", lambda account_name: [])
+
+    catalog = ModelCatalog(home_dir=tmp_path, cache_ttl=0)
+    models = catalog.get_models("anthropic", "claude-work")
+
+    assert models == ["default"]
 
 
 def test_openai_provider_filters_claude_stored_model(tmp_path):

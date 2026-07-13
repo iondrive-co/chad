@@ -64,6 +64,10 @@ export function ChatView({
   // reasoning level) and the reasoning level chosen for the next answer.
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [codingReasoning, setCodingReasoning] = useState("");
+  // Models available for the selected coding agent and the per-message override
+  // chosen for the next answer ("" = use the account's configured model).
+  const [codingModels, setCodingModels] = useState<string[]>([]);
+  const [codingModel, setCodingModel] = useState("");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
@@ -315,6 +319,22 @@ export function ChatView({
       .catch(() => { if (!cancelled) setProviders([]); });
     return () => { cancelled = true; };
   }, [api]);
+
+  // Load the models the selected coding agent can run so the composer can offer
+  // a per-message model override. Reset the override when the agent changes so a
+  // stale selection can't leak onto a different account.
+  useEffect(() => {
+    setCodingModel("");
+    if (!codingAccount) {
+      setCodingModels([]);
+      return;
+    }
+    let cancelled = false;
+    api.getAccountModels(codingAccount.name)
+      .then((r) => { if (!cancelled) setCodingModels(r.models); })
+      .catch(() => { if (!cancelled) setCodingModels([]); });
+    return () => { cancelled = true; };
+  }, [api, codingAccount]);
 
   // Load verification settings and default verification agent
   useEffect(() => {
@@ -682,6 +702,7 @@ export function ChatView({
       project_path: projectPath,
       task_description: message,
       coding_agent: codingAccount.name,
+      coding_model: codingModel || undefined,
       coding_reasoning: codingReasoning || undefined,
       verification_agent: verificationAllowed ? verificationAccount.name : undefined,
       is_followup: isFollowup,
@@ -693,6 +714,7 @@ export function ChatView({
     api,
     sessionId,
     codingAccount,
+    codingModel,
     codingReasoning,
     verificationAccount,
     verificationSettings,
@@ -1035,6 +1057,25 @@ export function ChatView({
                 <div className="composer-right">
                   {uploading && <span className="running-indicator">Uploading…</span>}
                   {taskActive && <span className="running-indicator">Running…</span>}
+                  {codingModels.length > 1 && (
+                    <select
+                      className="model-select"
+                      value={codingModel}
+                      onChange={(e) => setCodingModel(e.target.value)}
+                      disabled={sending}
+                      aria-label="Model"
+                      title="Model to use for the answer"
+                    >
+                      <option value="">Model: default</option>
+                      {codingModels
+                        .filter((m) => m !== "default")
+                        .map((m) => (
+                          <option key={m} value={m}>
+                            {`Model: ${m}`}
+                          </option>
+                        ))}
+                    </select>
+                  )}
                   {codingSupportsReasoning && (
                     <select
                       className="reasoning-select"
