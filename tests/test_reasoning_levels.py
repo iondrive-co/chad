@@ -44,11 +44,10 @@ def test_get_reasoning_levels_are_provider_specific():
     anthropic = get_reasoning_levels("anthropic")
     openai = get_reasoning_levels("openai")
 
-    # Claude Code offers more graduations than a flat low/medium/high.
+    # Claude Code offers more graduations than a flat low/medium/high; these
+    # mirror the CLI's own tiers.
+    assert anthropic == ["low", "medium", "high", "xHigh", "Max", "Ultracode"]
     assert len(anthropic) > 3, anthropic
-    assert "minimal" in anthropic and "max" in anthropic
-    for level in ("low", "medium", "high"):
-        assert level in anthropic
 
     # Codex uses OpenAI's reasoning effort values, including "minimal".
     assert openai == ["minimal", "low", "medium", "high"]

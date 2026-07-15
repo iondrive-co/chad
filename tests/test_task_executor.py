@@ -1218,6 +1218,15 @@ class TestModelPassThrough:
         # Higher reasoning levels request larger thinking budgets.
         assert budgets["low"] < budgets["medium"] < budgets["high"]
 
+    def test_anthropic_upper_reasoning_tiers_thinking_tokens(self, tmp_path):
+        """The CLI's upper tiers (xHigh/Max/Ultracode) also set a budget."""
+        for level in ("xHigh", "Max", "Ultracode"):
+            _, env, _ = build_agent_command(
+                "anthropic", "test", tmp_path, "fix bug", reasoning_effort=level
+            )
+            assert "MAX_THINKING_TOKENS" in env, f"missing thinking budget for {level}"
+            assert int(env["MAX_THINKING_TOKENS"]) > 0
+
     def test_anthropic_no_reasoning_no_thinking_budget(self, tmp_path):
         """Anthropic omits MAX_THINKING_TOKENS when no reasoning level is set."""
         _, env, _ = build_agent_command("anthropic", "test", tmp_path, "fix bug")

@@ -370,13 +370,9 @@ export function ChatView({
   // session runs with, restore its saved model; otherwise clear the override so
   // a stale selection can't leak onto a different account.
   useEffect(() => {
-<<<<<<< Updated upstream
-    setCodingModel("");
     // Reasoning levels differ per provider, so a level chosen for one agent may
     // not exist for the next — reset to the provider default on agent change.
     setCodingReasoning("");
-=======
->>>>>>> Stashed changes
     if (!codingAccount) {
       setCodingModel("");
       setCodingModels([]);

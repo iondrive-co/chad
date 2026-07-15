@@ -296,13 +296,15 @@ class ModelConfig:
 
 # Claude Code's extended-thinking budgets keyed by reasoning level, ordered from
 # least to most thinking. Set via the MAX_THINKING_TOKENS env var the CLI reads.
-# 1024 is the CLI's minimum; ~32k mirrors its "ultrathink" tier.
+# These mirror the CLI's own graduations (low/medium/high/xHigh/Max/Ultracode);
+# 31999 is the CLI's cap, so the top tiers converge on it.
 CLAUDE_THINKING_BUDGETS: dict[str, int] = {
-    "minimal": 1024,
     "low": 4000,
     "medium": 10000,
     "high": 21000,
-    "max": 31999,
+    "xHigh": 28000,
+    "Max": 31999,
+    "Ultracode": 31999,
 }
 
 # Reasoning effort levels selectable per provider type. Different providers offer
