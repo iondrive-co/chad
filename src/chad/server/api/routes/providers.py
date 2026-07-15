@@ -22,6 +22,7 @@ from chad.server.api.schemas import (
 )
 from chad.server.state import get_config_manager, get_model_catalog
 from chad.util import provider_login
+from chad.util.providers import get_reasoning_levels
 
 router = APIRouter()
 
@@ -57,51 +58,30 @@ def _account_to_response(
 
 @router.get("/providers", response_model=ProviderListResponse)
 async def list_providers() -> ProviderListResponse:
-    """List all supported provider types."""
-    providers = [
-        ProviderInfo(
-            type="anthropic",
-            name="Anthropic (Claude Code)",
-            description="Claude AI models via Claude Code CLI",
-            supports_reasoning=True,
-        ),
-        ProviderInfo(
-            type="openai",
-            name="OpenAI (Codex)",
-            description="OpenAI models via Codex CLI",
-            supports_reasoning=True,
-        ),
-        ProviderInfo(
-            type="gemini",
-            name="Google (Gemini)",
-            description="Google Gemini models",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="qwen",
-            name="Alibaba (Qwen)",
-            description="Qwen models via Qwen Code CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="local",
-            name="Local (OpenAI-compatible)",
-            description="Local model server (llama.cpp, vLLM, ...) via Qwen Code CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="mistral",
-            name="Mistral (Vibe)",
-            description="Mistral models via Vibe CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="kimi",
-            name="Moonshot (Kimi Code)",
-            description="Kimi models via Kimi Code CLI",
-            supports_reasoning=False,
-        ),
+    """List all supported provider types.
+
+    Each provider reports the reasoning effort levels it supports so the UI can
+    render a selector with the right graduations (some providers have none).
+    """
+    provider_meta = [
+        ("anthropic", "Anthropic (Claude Code)", "Claude AI models via Claude Code CLI"),
+        ("openai", "OpenAI (Codex)", "OpenAI models via Codex CLI"),
+        ("gemini", "Google (Gemini)", "Google Gemini models"),
+        ("qwen", "Alibaba (Qwen)", "Qwen models via Qwen Code CLI"),
+        ("local", "Local (OpenAI-compatible)", "Local model server (llama.cpp, vLLM, ...) via Qwen Code CLI"),
+        ("mistral", "Mistral (Vibe)", "Mistral models via Vibe CLI"),
+        ("kimi", "Moonshot (Kimi Code)", "Kimi models via Kimi Code CLI"),
     ]
+    providers = []
+    for provider_type, name, description in provider_meta:
+        levels = get_reasoning_levels(provider_type)
+        providers.append(ProviderInfo(
+            type=provider_type,
+            name=name,
+            description=description,
+            supports_reasoning=bool(levels),
+            reasoning_levels=levels,
+        ))
     return ProviderListResponse(providers=providers)
 
 

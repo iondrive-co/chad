@@ -294,6 +294,36 @@ class ModelConfig:
     reasoning_effort: str | None = None
 
 
+# Claude Code's extended-thinking budgets keyed by reasoning level, ordered from
+# least to most thinking. Set via the MAX_THINKING_TOKENS env var the CLI reads.
+# 1024 is the CLI's minimum; ~32k mirrors its "ultrathink" tier.
+CLAUDE_THINKING_BUDGETS: dict[str, int] = {
+    "minimal": 1024,
+    "low": 4000,
+    "medium": 10000,
+    "high": 21000,
+    "max": 31999,
+}
+
+# Reasoning effort levels selectable per provider type. Different providers offer
+# different graduations; an empty list means the provider has no reasoning knob
+# and the UI should not show a reasoning selector at all.
+REASONING_LEVELS: dict[str, list[str]] = {
+    # Claude Code maps these onto its extended-thinking token budgets.
+    "anthropic": list(CLAUDE_THINKING_BUDGETS),
+    # Codex's model_reasoning_effort accepts these values.
+    "openai": ["minimal", "low", "medium", "high"],
+}
+
+
+def get_reasoning_levels(provider: str) -> list[str]:
+    """Return the reasoning effort levels a provider supports.
+
+    An empty list means the provider does not expose a reasoning selector.
+    """
+    return list(REASONING_LEVELS.get(provider, []))
+
+
 # Callback type for activity updates: (activity_type, detail)
 # activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
 ActivityCallback = Callable[[str, str], None] | None

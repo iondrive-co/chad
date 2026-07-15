@@ -30,6 +30,7 @@ from chad.util.prompts import (
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
+from chad.util.providers import CLAUDE_THINKING_BUDGETS
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
@@ -501,10 +502,10 @@ def _strip_binary_garbage(text: str) -> str:
     return _BINARY_GARBAGE_RE.sub('', text)
 
 
-# Claude Code's extended-thinking budgets, mirroring its own "think" (4k),
-# "megathink" (10k), and "ultrathink" (~32k) keyword tiers. Set via the
-# MAX_THINKING_TOKENS env var the CLI reads.
-_CLAUDE_THINKING_BUDGETS = {"low": 4000, "medium": 10000, "high": 31999}
+# Claude Code's extended-thinking budgets, keyed by reasoning level and set via
+# the MAX_THINKING_TOKENS env var the CLI reads. Defined in the provider layer so
+# the selectable reasoning levels and their budgets stay in sync.
+_CLAUDE_THINKING_BUDGETS = CLAUDE_THINKING_BUDGETS
 
 
 def build_agent_command(
@@ -876,6 +877,7 @@ class TaskExecutor:
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
         # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -897,6 +899,8 @@ class TaskExecutor:
             verification_account: Optional account for verification
             verification_model: Optional model override for verification
             verification_reasoning: Optional reasoning level for verification
+            notify_slack: Whether to post milestone notifications to Slack for
+                this task (only has effect when Slack is configured)
 
         Returns:
             The created Task object
@@ -993,6 +997,7 @@ class TaskExecutor:
                 override_prompt,
                 verification_config,
                 is_followup,
+                notify_slack,
             ),
             daemon=True,
         )
@@ -1358,6 +1363,7 @@ class TaskExecutor:
         override_prompt: str | None = None,
         verification_config: dict | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1504,7 +1510,7 @@ class TaskExecutor:
                 get_account_info_fn=get_account_info,
                 get_session_reset_eta_fn=_check_provider.get_session_reset_eta if _check_provider else None,
                 get_weekly_reset_eta_fn=_check_provider.get_weekly_reset_eta if _check_provider else None,
-                notify_slack=True,
+                notify_slack=notify_slack,
             )
             task._session_event_loop = event_loop
 

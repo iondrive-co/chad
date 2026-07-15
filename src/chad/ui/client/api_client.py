@@ -372,6 +372,7 @@ class APIClient:
         screenshots: list[str] | None = None,
         override_prompt: str | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
         # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -412,6 +413,8 @@ class APIClient:
             data["override_prompt"] = effective_prompt
         if is_followup:
             data["is_followup"] = True
+        if not notify_slack:
+            data["notify_slack"] = False
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),

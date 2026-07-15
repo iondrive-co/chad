@@ -62,6 +62,7 @@ export interface TaskCreate {
   screenshots?: string[] | null;
   override_prompt?: string | null;
   is_followup?: boolean;
+  notify_slack?: boolean;
 }
 
 export interface TaskStatus {
@@ -103,6 +104,7 @@ export interface ProviderInfo {
   name: string;
   description: string;
   supports_reasoning: boolean;
+  reasoning_levels: string[];
 }
 
 export interface ProviderList {

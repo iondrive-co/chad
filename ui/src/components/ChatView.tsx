@@ -30,8 +30,6 @@ interface Props {
 
 const NEW_PROJECT_VALUE = "__new_project__";
 
-const REASONING_OPTIONS = ["", "low", "medium", "high"];
-
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
@@ -64,6 +62,10 @@ export function ChatView({
   // reasoning level) and the reasoning level chosen for the next answer.
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [codingReasoning, setCodingReasoning] = useState("");
+  // Whether Slack integration is configured (controls the "post to Slack"
+  // toggle) and whether the next task should post its milestones to Slack.
+  const [slackEnabled, setSlackEnabled] = useState(false);
+  const [postToSlack, setPostToSlack] = useState(true);
   // Models available for the selected coding agent and the per-message override
   // chosen for the next answer ("" = use the account's configured model).
   const [codingModels, setCodingModels] = useState<string[]>([]);
@@ -320,11 +322,24 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api]);
 
+  // Learn whether Slack is configured so the composer can offer (or grey out)
+  // the per-task "post to Slack" toggle.
+  useEffect(() => {
+    let cancelled = false;
+    api.getSlackSettings()
+      .then((s) => { if (!cancelled) setSlackEnabled(s.enabled); })
+      .catch(() => { if (!cancelled) setSlackEnabled(false); });
+    return () => { cancelled = true; };
+  }, [api]);
+
   // Load the models the selected coding agent can run so the composer can offer
   // a per-message model override. Reset the override when the agent changes so a
   // stale selection can't leak onto a different account.
   useEffect(() => {
     setCodingModel("");
+    // Reasoning levels differ per provider, so a level chosen for one agent may
+    // not exist for the next — reset to the provider default on agent change.
+    setCodingReasoning("");
     if (!codingAccount) {
       setCodingModels([]);
       return;
@@ -707,6 +722,7 @@ export function ChatView({
       verification_agent: verificationAllowed ? verificationAccount.name : undefined,
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
+      notify_slack: slackEnabled && postToSlack,
     });
 
     handleTaskStart(message, isFollowup);
@@ -721,6 +737,8 @@ export function ChatView({
     currentProjectPath,
     defaultProjectPath,
     handleTaskStart,
+    slackEnabled,
+    postToSlack,
   ]);
 
   const handleSendMessage = useCallback(async () => {
@@ -869,9 +887,11 @@ export function ChatView({
   const showNewProjectForm = creatingProject || projects.length === 0;
 
   // The reasoning-level dropdown only makes sense for coding agents whose
-  // provider supports it (e.g. Codex). Other providers ignore the level.
-  const codingSupportsReasoning =
-    providers.find((p) => p.type === codingAccount?.provider)?.supports_reasoning ?? false;
+  // provider supports it, and the available levels vary per provider (Codex has
+  // four, Claude Code has more, others have none).
+  const codingReasoningLevels =
+    providers.find((p) => p.type === codingAccount?.provider)?.reasoning_levels ?? [];
+  const codingSupportsReasoning = codingReasoningLevels.length > 0;
 
   return (
     <div className="chat-view">
@@ -1085,13 +1105,28 @@ export function ChatView({
                       aria-label="Reasoning level"
                       title="Reasoning level to use for the answer"
                     >
-                      {REASONING_OPTIONS.map((r) => (
+                      {["", ...codingReasoningLevels].map((r) => (
                         <option key={r} value={r}>
                           {r ? `Reasoning: ${r}` : "Reasoning: default"}
                         </option>
                       ))}
                     </select>
                   )}
+                  <label
+                    className="slack-toggle"
+                    title={slackEnabled
+                      ? "Post milestone updates for this task to Slack"
+                      : "Enable Slack in Settings to post task updates"}
+                  >
+                    <input
+                      type="checkbox"
+                      className="slack-toggle-checkbox"
+                      checked={slackEnabled && postToSlack}
+                      disabled={sending || !slackEnabled}
+                      onChange={(e) => setPostToSlack(e.target.checked)}
+                    />
+                    Slack
+                  </label>
                   {!taskActive && (
                     <button
                       type="button"

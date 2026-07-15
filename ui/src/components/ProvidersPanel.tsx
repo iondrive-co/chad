@@ -300,7 +300,7 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </select>
                 </div>
 
-                {providers.find((p) => p.type === a.provider)?.supports_reasoning && (
+                {(providers.find((p) => p.type === a.provider)?.reasoning_levels ?? []).length > 0 && (
                   <div className="account-field">
                     <span className="field-label">Reasoning:</span>
                     <select
@@ -309,9 +309,11 @@ export function ProvidersPanel({ api, connected }: Props) {
                       disabled={dis}
                     >
                       <option value="">Default</option>
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
+                      {(providers.find((p) => p.type === a.provider)?.reasoning_levels ?? []).map((level) => (
+                        <option key={level} value={level}>
+                          {level.charAt(0).toUpperCase() + level.slice(1)}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 )}

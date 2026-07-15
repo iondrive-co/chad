@@ -15,6 +15,10 @@ class ProviderInfo(BaseModel):
     name: str = Field(description="Human-readable provider name")
     description: str = Field(description="Provider description")
     supports_reasoning: bool = Field(default=False, description="Whether provider supports reasoning levels")
+    reasoning_levels: list[str] = Field(
+        default_factory=list,
+        description="Reasoning effort levels this provider supports (empty if none)",
+    )
 
 
 class ProviderListResponse(BaseModel):

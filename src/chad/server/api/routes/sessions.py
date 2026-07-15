@@ -319,6 +319,7 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             verification_model=request.verification_model,
             verification_reasoning=request.verification_reasoning,
             is_followup=request.is_followup,
+            notify_slack=request.notify_slack,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

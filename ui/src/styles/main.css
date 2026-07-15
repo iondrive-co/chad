@@ -870,6 +870,29 @@ label {
   cursor: not-allowed;
 }
 
+.slack-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.slack-toggle .slack-toggle-checkbox {
+  cursor: pointer;
+}
+
+.slack-toggle:has(.slack-toggle-checkbox:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.slack-toggle .slack-toggle-checkbox:disabled {
+  cursor: not-allowed;
+}
+
 .attach-btn {
   background: transparent;
   border: 1px solid var(--border);
