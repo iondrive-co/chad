@@ -301,6 +301,137 @@ class TestToolCallEvent:
         assert ev.path is None
         assert ev.command is None
 
+    def test_ls_maps_path(self):
+        ev = _tool_call_event({"id": "t6", "name": "LS", "input": {"path": "/proj/src"}})
+        assert ev.tool == "LS"
+        assert ev.path == "/proj/src"
+        assert ev.command is None
+
+
+class TestGeminiToolNormalization:
+    """Qwen/Gemini CLI tool names must normalize to canonical tool events.
+
+    Without this, the live view renders raw JSON like
+    read_file({"absolute_path": "..."}) instead of Read(path).
+    """
+
+    def _feed_tool_use(self, name, tool_input):
+        parser = ClaudeStreamJsonParser()
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": name, "input": tool_input}
+                ]
+            },
+        }
+        parser.feed((json.dumps(event) + "\n").encode())
+        assert len(parser.pending_tool_calls) == 1
+        return parser.pending_tool_calls[0]
+
+    def test_read_file_normalizes_to_read(self):
+        tc = self._feed_tool_use("read_file", {"absolute_path": "/proj/src/main.py"})
+        assert tc["name"] == "Read"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "Read"
+        assert ev.path == "/proj/src/main.py"
+
+    def test_read_many_files_normalizes_to_read(self):
+        tc = self._feed_tool_use("read_many_files", {"paths": ["/a.py", "/b.py"]})
+        assert tc["name"] == "Read"
+        ev = _tool_call_event(tc)
+        assert ev.path == "/a.py, /b.py"
+
+    def test_write_file_normalizes_to_write(self):
+        tc = self._feed_tool_use("write_file", {"file_path": "/proj/out.md", "content": "x"})
+        assert tc["name"] == "Write"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "Write"
+        assert ev.path == "/proj/out.md"
+
+    def test_replace_normalizes_to_edit(self):
+        tc = self._feed_tool_use(
+            "replace", {"file_path": "/proj/a.py", "old_string": "x", "new_string": "y"}
+        )
+        assert tc["name"] == "Edit"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "Edit"
+        assert ev.path == "/proj/a.py"
+
+    def test_run_shell_command_normalizes_to_bash(self):
+        tc = self._feed_tool_use(
+            "run_shell_command", {"command": "cd /proj && ls", "is_background": False}
+        )
+        assert tc["name"] == "Bash"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "Bash"
+        assert ev.command == "cd /proj && ls"
+        # Internal flags like is_background must not leak into the event
+        assert ev.args is None
+
+    def test_list_directory_normalizes_to_ls(self):
+        tc = self._feed_tool_use("list_directory", {"path": "/proj/ui"})
+        assert tc["name"] == "LS"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "LS"
+        assert ev.path == "/proj/ui"
+
+    def test_search_file_content_normalizes_to_grep(self):
+        tc = self._feed_tool_use("search_file_content", {"pattern": "TODO", "path": "/proj"})
+        assert tc["name"] == "Grep"
+        ev = _tool_call_event(tc)
+        assert ev.tool == "Grep"
+        assert ev.args == {"pattern": "TODO"}
+
+    def test_qwen_grep_normalizes_to_grep(self):
+        """Qwen names its search tool `grep` rather than gemini's search_file_content."""
+        tc = self._feed_tool_use("grep", {"pattern": "TODO"})
+        assert tc["name"] == "Grep"
+
+    def test_qwen_web_search_normalizes_to_websearch(self):
+        tc = self._feed_tool_use("web_search", {"query": "fastapi sse"})
+        assert tc["name"] == "WebSearch"
+
+    def test_glob_normalizes_case(self):
+        tc = self._feed_tool_use("glob", {"pattern": "**/*.py"})
+        assert tc["name"] == "Glob"
+        ev = _tool_call_event(tc)
+        assert ev.args == {"pattern": "**/*.py"}
+
+    def test_google_web_search_normalizes_to_websearch(self):
+        tc = self._feed_tool_use("google_web_search", {"query": "fastapi sse"})
+        assert tc["name"] == "WebSearch"
+
+    def test_web_fetch_normalizes_to_webfetch(self):
+        tc = self._feed_tool_use("web_fetch", {"url": "https://example.com"})
+        assert tc["name"] == "WebFetch"
+
+    def test_claude_names_pass_through_unchanged(self):
+        tc = self._feed_tool_use("Read", {"file_path": "/proj/x.py"})
+        assert tc["name"] == "Read"
+        ev = _tool_call_event(tc)
+        assert ev.path == "/proj/x.py"
+
+    def test_normalized_names_feed_collapsed_summaries(self):
+        """Tool counting for collapsed summaries uses the normalized names."""
+        parser = ClaudeStreamJsonParser()
+        for name, tool_input in [
+            ("read_file", {"absolute_path": "/a.py"}),
+            ("run_shell_command", {"command": "ls"}),
+        ]:
+            event = {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "t", "name": name, "input": tool_input}
+                    ]
+                },
+            }
+            parser.feed((json.dumps(event) + "\n").encode())
+        summary = parser.get_tool_summary()
+        assert "1 file read" in summary
+        assert "1 command" in summary
+
 
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
@@ -473,37 +604,6 @@ class TestBuildAgentCommand:
         assert initial_input is None
         prompt_arg = [arg for arg in cmd if "Custom exploration prompt" in arg]
         assert len(prompt_arg) == 1
-
-    def test_opencode_uses_run_with_json_format(self, tmp_path):
-        """OpenCode build_agent_command uses 'opencode run --format json'."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug"
-        )
-
-        assert "run" in cmd
-        assert "--format" in cmd
-        assert "json" in cmd
-        # Prompt is positional after 'run'
-        assert "Fix the bug" in cmd[-1]
-
-    def test_opencode_passes_model_flag(self, tmp_path):
-        """OpenCode passes -m with the model in provider/model format."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug",
-            model="openai/gpt-4o",
-        )
-
-        m_idx = cmd.index("-m")
-        assert cmd[m_idx + 1] == "openai/gpt-4o"
-
-    def test_opencode_default_model(self, tmp_path):
-        """OpenCode uses anthropic/claude-sonnet-4-5 as default model."""
-        cmd, env, initial_input = build_agent_command(
-            "opencode", "test-oc", tmp_path, "Fix the bug"
-        )
-
-        m_idx = cmd.index("-m")
-        assert cmd[m_idx + 1] == "anthropic/claude-sonnet-4-5"
 
     def test_mistral_prompt_passed_via_p_flag(self, tmp_path):
         """Mistral provider should pass prompt via -p flag like MistralVibeProvider expects."""
@@ -802,6 +902,55 @@ class TestChatUILayoutSource:
         assert "Math.max(0, latestStartSeq - 1)" in chat_view
         assert "streamSinceSeqRef.current = getSessionActivationSinceSeq(" in chat_view
 
+    def test_transcript_formats_ls_tool_calls(self):
+        """Normalized LS tool events render as LS(path), not raw JSON args."""
+        transcript = Path("ui/src/lib/transcript.ts").read_text(encoding="utf-8")
+        assert 'case "LS":' in transcript
+
+    def test_transcript_aliases_snake_case_tool_names(self):
+        """Events logged by older servers / gemini-style CLIs (read_file,
+        run_shell_command, ...) must render canonically, not as raw JSON."""
+        transcript = Path("ui/src/lib/transcript.ts").read_text(encoding="utf-8")
+        for alias in ("read_file", "run_shell_command", "list_directory", "web_search"):
+            assert alias in transcript, f"missing tool alias for {alias}"
+
+    def test_transcript_strips_leaked_function_markup(self):
+        """Models sometimes emit tool calls as text (<function=read_file>...);
+        that machine markup must never render as prose."""
+        transcript = Path("ui/src/lib/transcript.ts").read_text(encoding="utf-8")
+        assert "<function=" in transcript, "cleanProse must strip <function=...> markup"
+        assert "tool_call" in transcript, "cleanProse must strip stray <tool_call> tags"
+
+    def test_transcript_drops_exploration_lines(self):
+        """EXPLORATION_RESULT lines already render as Discovery bubbles; the live
+        view must drop the whole line, not just the prefix, to avoid duplication."""
+        transcript = Path("ui/src/lib/transcript.ts").read_text(encoding="utf-8")
+        assert re.search(r"EXPLORATION_RESULT:[^\n]*\.\*", transcript), (
+            "cleanProse must remove the entire EXPLORATION_RESULT line"
+        )
+
+    def test_no_redundant_chat_status_label(self):
+        """Task state is shown once (terminal header), not duplicated in the chat header."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "chat-status" not in chat_view
+        assert "Ready for follow-up" not in chat_view
+
+    def test_merge_button_disabled_when_nothing_to_merge(self):
+        """Accept & Merge must be inert when the diff against the target is empty."""
+        merge_panel = Path("ui/src/components/MergePanel.tsx").read_text(encoding="utf-8")
+        assert "nothingToMerge" in merge_panel
+        assert re.search(
+            r"disabled=\{[^}]*nothingToMerge[^}]*\}", merge_panel
+        ), "merge button must include nothingToMerge in its disabled condition"
+
+    def test_terminal_output_fades_clipped_top_line(self):
+        """When autoscrolled, the half-clipped top line gets a fade treatment."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "clipped-top" in chat_view
+        css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
+        assert ".terminal-output.clipped-top" in css
+        assert "mask-image" in css
+
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     """Event log should include coding status events."""
@@ -1055,6 +1204,37 @@ class TestModelPassThrough:
         idx_c = cmd.index("-c")
         assert "model_reasoning_effort" in cmd[idx_c + 1]
         assert "high" in cmd[idx_c + 1]
+
+    def test_anthropic_reasoning_thinking_tokens(self, tmp_path):
+        """Anthropic maps reasoning levels onto the MAX_THINKING_TOKENS budget."""
+        budgets = {}
+        for level in ("low", "medium", "high"):
+            _, env, _ = build_agent_command(
+                "anthropic", "test", tmp_path, "fix bug", reasoning_effort=level
+            )
+            assert "MAX_THINKING_TOKENS" in env, f"missing thinking budget for {level}"
+            budgets[level] = int(env["MAX_THINKING_TOKENS"])
+            assert budgets[level] > 0
+        # Higher reasoning levels request larger thinking budgets.
+        assert budgets["low"] < budgets["medium"] < budgets["high"]
+
+    def test_anthropic_upper_reasoning_tiers_thinking_tokens(self, tmp_path):
+        """The CLI's upper tiers (xHigh/Max/Ultracode) also set a budget."""
+        for level in ("xHigh", "Max", "Ultracode"):
+            _, env, _ = build_agent_command(
+                "anthropic", "test", tmp_path, "fix bug", reasoning_effort=level
+            )
+            assert "MAX_THINKING_TOKENS" in env, f"missing thinking budget for {level}"
+            assert int(env["MAX_THINKING_TOKENS"]) > 0
+
+    def test_anthropic_no_reasoning_no_thinking_budget(self, tmp_path):
+        """Anthropic omits MAX_THINKING_TOKENS when no reasoning level is set."""
+        _, env, _ = build_agent_command("anthropic", "test", tmp_path, "fix bug")
+        assert "MAX_THINKING_TOKENS" not in env
+        _, env_default, _ = build_agent_command(
+            "anthropic", "test", tmp_path, "fix bug", reasoning_effort="default"
+        )
+        assert "MAX_THINKING_TOKENS" not in env_default
 
     def test_gemini_model_flag(self, tmp_path):
         """Gemini provider passes -m flag."""

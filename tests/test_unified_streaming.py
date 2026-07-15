@@ -18,7 +18,14 @@ from chad.server.services.pty_stream import reset_pty_stream_service
 from chad.server.state import reset_state
 from chad.ui.client.stream_client import StreamClient, decode_terminal_data
 from chad.ui.terminal_emulator import TerminalEmulator
-from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, StatusEvent, TerminalOutputEvent
+from chad.util.event_log import (
+    EventLog,
+    MilestoneEvent,
+    SessionEndedEvent,
+    SessionStartedEvent,
+    StatusEvent,
+    TerminalOutputEvent,
+)
 
 _skip_windows = pytest.mark.skipif(
     sys.platform == "win32",
@@ -2143,6 +2150,105 @@ class TestEventMultiplexer:
         pty_service.cleanup_session(first_stream)
         pty_service.cleanup_session(second_stream)
         reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_times_out_when_task_gone(self, tmp_path, monkeypatch):
+        """The fallback poll loop gives up after POLL_TIMEOUT_SECONDS once the task is gone."""
+        from chad.server.services import event_mux
+        from chad.server.services.event_mux import EventMultiplexer
+
+        monkeypatch.setattr(event_mux, "POLL_TIMEOUT_SECONDS", 0.05)
+
+        log = EventLog("mux-timeout", base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="t", project_path="/tmp",
+            coding_provider="mock", coding_account="test",
+        ))
+        mux = EventMultiplexer("mux-timeout", log)
+
+        class DummyPTY:
+            @staticmethod
+            def get_session_by_session_id(session_id):
+                return None
+
+        events = []
+        async for event in mux.stream_events(
+            DummyPTY(), include_terminal=False, include_events=True,
+            keep_polling_fn=lambda: False,
+        ):
+            events.append(event)
+            if event.type == "complete":
+                break
+
+        assert events[-1].type == "complete"
+        assert events[-1].data.get("timeout") is True
+
+    @pytest.mark.asyncio
+    async def test_mux_keeps_polling_while_task_paused_awaiting_reset(self, tmp_path, monkeypatch):
+        """A task paused awaiting a usage reset must not trip the poll timeout.
+
+        Regression for session 447de784: the agent hit its session limit and paused
+        with ETA 1h56m. The mux's 45-minute poll deadline fired ~73 min before the
+        reset, emitting a premature `complete`, so the UI froze as "Completed" and
+        never showed the resumed exploration/coding work. While keep_polling_fn
+        reports the task alive the deadline is pushed forward, and completion only
+        comes from a real session_ended — carrying the resumed events with it.
+        """
+        from chad.server.services import event_mux
+        from chad.server.services.event_mux import EventMultiplexer
+
+        # Tiny timeout: without the fix the loop would emit a timeout `complete`
+        # long before the (simulated) reset resumes the task.
+        monkeypatch.setattr(event_mux, "POLL_TIMEOUT_SECONDS", 0.05)
+
+        log = EventLog("mux-await-reset", base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="t", project_path="/tmp",
+            coding_provider="mock", coding_account="test",
+        ))
+        log.log(MilestoneEvent(
+            milestone_type="usage_threshold", title="Usage Warning",
+            summary="Paused, waiting for session reset", details={},
+        ))
+        mux = EventMultiplexer("mux-await-reset", log)
+
+        class DummyPTY:
+            @staticmethod
+            def get_session_by_session_id(session_id):
+                return None
+
+        alive = {"v": True}
+
+        async def resume_after_pause():
+            # Well past the tiny timeout — a premature timeout would have fired by now.
+            await asyncio.sleep(0.4)
+            log.log(MilestoneEvent(
+                milestone_type="coding_complete", title="Coding Complete",
+                summary="Built the thing", details={},
+            ))
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+            alive["v"] = False
+
+        resume_task = asyncio.create_task(resume_after_pause())
+        events = []
+        try:
+            async for event in mux.stream_events(
+                DummyPTY(), include_terminal=False, include_events=True,
+                keep_polling_fn=lambda: alive["v"],
+            ):
+                events.append(event)
+                if event.type == "complete":
+                    break
+        finally:
+            await resume_task
+
+        # Exactly one completion, and it is a real session_ended — not a timeout.
+        completes = [e for e in events if e.type == "complete"]
+        assert len(completes) == 1
+        assert completes[0].data.get("timeout") is not True
+        # The resumed work was actually streamed to the client.
+        summaries = [e.data.get("summary") for e in events if e.type == "event"]
+        assert "Built the thing" in summaries
 
     @_skip_windows
     @pytest.mark.asyncio

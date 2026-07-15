@@ -42,11 +42,9 @@ class ModelCatalog:
     # (ChatGPT accounts vs API accounts have different available models)
     # User's actual available models are discovered from config/session files
     OPENAI_FALLBACK: tuple[str, ...] = ("default",)
-    ANTHROPIC_FALLBACK: tuple[str, ...] = (
-        "claude-sonnet-4-20250514",
-        "claude-opus-4-20250514",
-        "default",
-    )
+    # Claude models are discovered live from the Anthropic Models API (see
+    # _claude_models), so no hardcoded list is kept here to go stale.
+    ANTHROPIC_FALLBACK: tuple[str, ...] = ("default",)
     GEMINI_FALLBACK: tuple[str, ...] = (
         "gemini-2.5-pro",
         "gemini-2.5-flash",
@@ -57,12 +55,8 @@ class ModelCatalog:
         "qwen3-coder",
         "default",
     )
+    LOCAL_FALLBACK: tuple[str, ...] = ("default",)
     MISTRAL_FALLBACK: tuple[str, ...] = ("default",)
-    OPENCODE_FALLBACK: tuple[str, ...] = (
-        "anthropic/claude-sonnet-4-5",
-        "openai/gpt-4o",
-        "default",
-    )
     KIMI_FALLBACK: tuple[str, ...] = (
         "kimi-k2.5",
         "default",
@@ -72,7 +66,7 @@ class ModelCatalog:
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"}
+        return {"anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -88,6 +82,12 @@ class ModelCatalog:
         if provider == "openai":
             models |= self._codex_config_models(account_name)
             models |= self._codex_session_models(account_name)
+
+        if provider == "anthropic":
+            models |= self._claude_models(account_name)
+
+        if provider == "local":
+            models |= self._local_models()
 
         models = {str(m).strip() for m in models if m}
         models = {m for m in models if m}
@@ -107,8 +107,8 @@ class ModelCatalog:
             "openai": self.OPENAI_FALLBACK,
             "gemini": self.GEMINI_FALLBACK,
             "qwen": self.QWEN_FALLBACK,
+            "local": self.LOCAL_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
-            "opencode": self.OPENCODE_FALLBACK,
             "kimi": self.KIMI_FALLBACK,
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))
@@ -139,8 +139,6 @@ class ModelCatalog:
             return normalized.startswith("kimi")
         if provider == "mistral":
             return normalized.startswith(("mistral", "codestral", "ministral", "open-mistral", "pixtral"))
-        if provider == "opencode":
-            return "/" in normalized
         if provider == "openai":
             foreign_prefixes = (
                 "claude-",
@@ -185,6 +183,39 @@ class ModelCatalog:
             pass
 
         return models
+
+    def _claude_models(self, account_name: str | None) -> set[str]:
+        """Discover current Claude models from the Anthropic Models API.
+
+        Keeps the anthropic dropdown current automatically instead of relying on
+        a hardcoded list. Falls back to an empty set (leaving just the account's
+        stored model and "default") when the account has no usable credentials.
+        """
+        if not account_name:
+            return set()
+
+        from chad.util.providers import discover_claude_models
+
+        return set(discover_claude_models(account_name))
+
+    def _local_models(self) -> set[str]:
+        """Discover models served by the configured local OpenAI-compatible endpoint."""
+        from chad.util.config_manager import DEFAULT_LOCAL_ENDPOINT
+        from chad.util.providers import discover_local_models
+
+        endpoint = None
+        try:
+            if self.api_client:
+                endpoint = self.api_client.get_local_endpoint()
+        except Exception:
+            endpoint = None
+        if not isinstance(endpoint, str) or not endpoint.startswith("http"):
+            endpoint = DEFAULT_LOCAL_ENDPOINT
+
+        try:
+            return set(discover_local_models(endpoint))
+        except (OSError, ValueError):
+            return set()
 
     def _codex_config_models(self, account_name: str | None) -> set[str]:
         if tomllib is None:

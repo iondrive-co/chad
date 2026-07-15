@@ -217,10 +217,15 @@ class TestProviderEndpoints:
         assert "anthropic" in provider_types
         assert "openai" in provider_types
         assert "gemini" in provider_types
-        assert "opencode" in provider_types
+        assert "local" in provider_types
         assert "kimi" in provider_types
 
-    @pytest.mark.parametrize("provider", ["opencode", "kimi"])
+        # Anthropic (Claude Code) and OpenAI (Codex) support a reasoning level.
+        by_type = {p["type"]: p for p in providers}
+        assert by_type["anthropic"]["supports_reasoning"] is True
+        assert by_type["openai"]["supports_reasoning"] is True
+
+    @pytest.mark.parametrize("provider", ["local", "kimi"])
     def test_create_account_accepts_new_provider_types(self, client, provider):
         """Account create API should accept all provider types exposed in the setup UI."""
         config_mgr = get_config_manager()
@@ -248,6 +253,31 @@ class TestProviderEndpoints:
         data = response.json()
         assert data["total"] == 0
         assert data["accounts"] == []
+
+
+class TestAccountUsageEndpoint:
+    """The usage endpoint surfaces the snapshot's age for staleness display."""
+
+    def test_usage_response_includes_as_of(self, client, monkeypatch):
+        """The response carries the snapshot timestamp so the UI can show how
+        stale a Codex usage reading is."""
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "my-codex", "openai")
+
+        monkeypatch.setattr(
+            "chad.util.providers.OpenAICodexProvider.get_weekly_usage_percentage",
+            lambda self: 100.0,
+        )
+        monkeypatch.setattr(
+            "chad.util.providers.OpenAICodexProvider.get_usage_as_of",
+            lambda self: "2026-06-25T09:30:00+00:00",
+        )
+
+        resp = client.get("/api/v1/accounts/my-codex/usage")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["usage_as_of"] == "2026-06-25T09:30:00+00:00"
+        assert data["weekly_usage_pct"] == 100.0
 
 
 class _InlineThread:
@@ -320,18 +350,17 @@ class TestProviderLogin:
         """API-key providers authorize from the supplied key (install stubbed)."""
         _mock_installer(monkeypatch)
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed_account(client, monkeypatch, "my-oc", "opencode")
+        _seed_account(client, monkeypatch, "my-mistral", "mistral")
 
         from chad.server.api.routes import providers as providers_route
         monkeypatch.setattr(providers_route.threading, "Thread", _InlineThread)
 
-        resp = client.post("/api/v1/accounts/my-oc/login", json={"api_key": "sk-test"})
+        resp = client.post("/api/v1/accounts/my-mistral/login", json={"api_key": "sk-test"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["success"] is True
-        auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
-        assert auth_file.exists()
-        # Now reported ready.
-        assert client.get("/api/v1/accounts/my-oc").json()["ready"] is True
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-test" in env_file.read_text()
 
     def test_login_tty_provider_message_mentions_terminal(self, client, monkeypatch, tmp_path):
         """Claude/Gemini/Qwen/Kimi login tells the user to use the terminal window."""
@@ -351,9 +380,9 @@ class TestProviderLogin:
     def test_login_api_key_provider_requires_key(self, client, monkeypatch, tmp_path):
         """API-key providers reject login when no key is supplied."""
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed_account(client, monkeypatch, "my-oc", "opencode")
+        _seed_account(client, monkeypatch, "my-mistral", "mistral")
 
-        resp = client.post("/api/v1/accounts/my-oc/login", json={})
+        resp = client.post("/api/v1/accounts/my-mistral/login", json={})
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["success"] is False
@@ -524,6 +553,51 @@ class TestUIServing:
         assert built["called"] is True
         assert index == project_root / "ui" / "dist" / "index.html"
         assert assets == project_root / "ui" / "dist" / "assets"
+
+    def test_ui_resolver_autobuilds_when_repo_dist_is_stale(self, tmp_path, monkeypatch):
+        """A stale ``ui/dist`` (older than source) must trigger a rebuild.
+
+        Regression: the resolver served an existing ``ui/dist`` directly and only
+        autobuilt when it was *absent*. So a stale bundle (e.g. after a git
+        checkout/merge that predates a source change) was served forever and
+        never rebuilt, which is why new UI (reasoning levels, Slack toggle) never
+        reached the browser no matter how many times chad was restarted.
+        """
+        project_root = tmp_path / "project"
+        ui_src = project_root / "ui" / "src"
+        ui_src.mkdir(parents=True)
+        (project_root / "client" / "src").mkdir(parents=True)
+
+        # A stale build: dist exists but its index.html is OLDER than the source.
+        dist = project_root / "ui" / "dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        (dist / "index.html").write_text("<div id='root'></div>", encoding="utf-8")
+        (assets / "stale.js").write_text("console.log('stale')", encoding="utf-8")
+
+        import os
+        import time
+        old = time.time() - 1000
+        os.utime(dist / "index.html", (old, old))
+        os.utime(assets / "stale.js", (old, old))
+        # Source file is newer than the built bundle.
+        (ui_src / "main.tsx").write_text("export {};", encoding="utf-8")
+
+        built = {"called": False}
+
+        def fake_autobuild(root):
+            built["called"] = True
+            (assets / "fresh.js").write_text("console.log('fresh')", encoding="utf-8")
+
+        monkeypatch.setattr("chad.server.main._source_project_root", lambda: project_root)
+        monkeypatch.setattr("chad.server.main._package_ui_paths", lambda: (None, None))
+        monkeypatch.setattr("chad.server.main._autobuild_ui_from_source", fake_autobuild)
+
+        index, assets_dir = _resolve_ui_paths()
+
+        assert built["called"] is True, "stale ui/dist should have triggered a rebuild"
+        assert index == dist / "index.html"
+        assert assets_dir == assets
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

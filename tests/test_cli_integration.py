@@ -268,6 +268,27 @@ class TestProviderCommandGeneration:
 
         assert any("vibe" in c for c in cmd)
 
+    def test_local_command_targets_configured_endpoint(self, tmp_path, monkeypatch):
+        """Local provider drives the Qwen CLI at the configured OpenAI endpoint."""
+        from chad.server.services.task_executor import build_agent_command
+        from chad.util.config_manager import ConfigManager
+
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+        ConfigManager().set_local_endpoint("http://127.0.0.1:5555")
+
+        cmd, env, _ = build_agent_command(
+            "local", "test", Path("/tmp"), model="pinned-model"
+        )
+
+        assert any("qwen" in c for c in cmd)
+        assert "--auth-type" in cmd
+        assert "openai" in cmd
+        assert "-y" in cmd
+        assert "stream-json" in cmd
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:5555/v1"
+        assert env["OPENAI_API_KEY"] == "local"
+        assert env["OPENAI_MODEL"] == "pinned-model"
+
 
 class TestConfigPersistence:
     """Tests for configuration persistence across operations."""

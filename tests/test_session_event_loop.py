@@ -776,6 +776,45 @@ class TestUsageThresholdMonitoring:
         assert terminated == [True]
         assert self._usage_milestones(emitted) == []
 
+    def test_no_checks_while_paused_awaiting_reset(self):
+        """While paused waiting for a reset, threshold checks are fully suppressed.
+
+        Reproduces session 447de784: a task started with session usage already at
+        100%. The terminal-text path triggered the session_usage await_reset rule
+        and entered _handle_await_reset's wait loop. Because run() clears
+        _pending_action before the wait, the background tick's _check_usage_thresholds
+        was no longer guarded, so it (a) fired the notify@90 rule — surfacing a
+        "Session usage reached 100%" warning that read like a failure — and
+        (b) re-crossed the await_reset@100 rule, leaving a stale pending action that
+        caused a phantom second pause once the wait resumed.
+
+        With loop._paused set (as _handle_await_reset does for the wait), a tick must
+        emit nothing and set no pending action.
+        """
+        terminated = []
+        # The user's real config: notify + await_reset on the same metric.
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: 100.0,
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Simulate being inside _handle_await_reset's wait loop.
+        loop._paused = True
+        loop._check_usage_thresholds()
+
+        assert self._usage_milestones(emitted) == []
+        assert loop._pending_action is None
+        assert terminated == []
+
+        # Once the wait ends, checks resume normally and the crossing is detected.
+        loop._paused = False
+        loop._check_usage_thresholds()
+        assert len(self._usage_milestones(emitted)) == 1
+
     def test_milestone_logged_to_event_log(self):
         """Usage threshold milestone should appear in the EventLog."""
         pct = [80.0]
@@ -2061,3 +2100,187 @@ class TestNegativeExitCodeWithPendingAction:
 
         # Final output includes both continuations
         assert "second continuation output" in result
+
+
+class TestContextOverflowDetection:
+    """Tests for model context-window overflow detection in _analyze_output.
+
+    Local OpenAI-compatible servers (llama.cpp, vLLM) reject over-long requests
+    mid-run; the CLI recovers by truncating history, silently losing work. The
+    loop must surface this as a first-class milestone so users see why.
+    """
+
+    def _make_loop(self):
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+        )
+        return loop, event_log, emitted
+
+    def _context_milestones(self, emitted):
+        return [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "context_limit_reached"
+        ]
+
+    def test_detects_llamacpp_context_overflow(self):
+        """Detects llama.cpp's 'exceeds the available context size' error."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("Reading project files...\n")
+        loop.feed_output(
+            "[API Error: 400 request (47078 tokens) exceeds the available context "
+            "size (32768 tokens), try increasing it]\n"
+        )
+        loop._analyze_output()
+
+        milestones = self._context_milestones(emitted)
+        assert len(milestones) == 1
+        assert milestones[0][1]["title"] == "Context Limit"
+        assert "47078" in milestones[0][1]["summary"]
+
+    def test_detects_openai_style_context_overflow(self):
+        """Detects OpenAI/vLLM 'maximum context length' errors."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output(
+            "Error: This model's maximum context length is 32768 tokens. "
+            "However, you requested 40000 tokens.\n"
+        )
+        loop._analyze_output()
+
+        assert len(self._context_milestones(emitted)) == 1
+
+    def test_detects_anthropic_prompt_too_long(self):
+        """Detects Anthropic 'prompt is too long' errors."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("API Error: prompt is too long: 210042 tokens > 200000 maximum\n")
+        loop._analyze_output()
+
+        assert len(self._context_milestones(emitted)) == 1
+
+    def test_context_overflow_emitted_once(self):
+        """Repeated overflow errors emit a single milestone."""
+        loop, event_log, emitted = self._make_loop()
+
+        error = "[API Error: 400 request (47078 tokens) exceeds the available context size (32768 tokens), try increasing it]\n"
+        loop.feed_output(error)
+        loop._analyze_output()
+        loop.feed_output(error)
+        loop._analyze_output()
+
+        assert len(self._context_milestones(emitted)) == 1
+
+    def test_context_overflow_logged_to_event_log(self):
+        """Overflow milestone is persisted to the EventLog."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output(
+            "[API Error: 400 request (47078 tokens) exceeds the available context "
+            "size (32768 tokens), try increasing it]\n"
+        )
+        loop._analyze_output()
+
+        logged = [
+            e for e in event_log.events
+            if getattr(e, "milestone_type", None) == "context_limit_reached"
+        ]
+        assert len(logged) == 1
+
+    def test_no_false_positive_on_normal_prose(self):
+        """Ordinary discussion of context windows doesn't trigger detection."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("The context size is configurable in settings.\n")
+        loop.feed_output("Increasing the maximum context helps large files.\n")
+        loop._analyze_output()
+
+        assert len(self._context_milestones(emitted)) == 0
+
+
+class TestExplorationNarrationFilter:
+    """Narration ("Let me read X...") must not become Discovery milestones.
+
+    Regression: a summary task produced 13 Discovery bubbles, every one of them
+    step-narration rather than a finding. Milestones are for what the agent
+    LEARNED; narration belongs in the live view prose only.
+    """
+
+    # Verbatim spam observed in the field (local Qwen run, 2026-07-02)
+    NARRATION_LINES = [
+        "I need to understand what this project is about by reading the documentation files.",
+        "I see the project has several documentation files and directories. "
+        "Let me read the README.md first to understand what this project is about.",
+        "Now I'll read the CLAUDE.md file to get more information about the project.",
+        "Let me read the AGENTS.md file since that's what was referenced in the previous session.",
+        "I'll now look at the Roadmap.md file to understand the project's future direction.",
+        "Let me check the pyproject.toml to understand dependencies and project structure.",
+        "Let's look at the main source directory structure to understand how the code is organized.",
+        "Let's examine the main chad package structure.",
+        "Now let's look at the server directory which seems to be the core of the application.",
+        "Let's check the util directory which was mentioned in the AGENTS.md as containing important components.",
+        "Let's also check the UI directory structure to understand the frontend components.",
+        "Let me read the main entry point to understand how the application starts.",
+        "Let me also check the requirements files to understand dependencies.",
+        "still investigating the session manager",
+        "Looking at the project directory structure to understand what this project is about.",
+    ]
+
+    def _make_loop(self):
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+        )
+        return loop, event_log, emitted
+
+    def test_narration_lines_do_not_emit_milestones(self):
+        loop, event_log, emitted = self._make_loop()
+
+        for line in self.NARRATION_LINES:
+            loop.feed_output(f"EXPLORATION_RESULT: {line}\n")
+        loop._analyze_output()
+
+        exploration = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert exploration == [], (
+            f"narration became Discovery bubbles: {[e[1]['summary'] for e in exploration]}"
+        )
+
+    def test_genuine_findings_still_emit(self):
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output(
+            "EXPLORATION_RESULT: The project is a multi-provider AI coding assistant "
+            "with a FastAPI backend and React UI\n"
+        )
+        loop.feed_output("EXPLORATION_RESULT: The auth logic is in src/auth.py using JWT tokens\n")
+        loop._analyze_output()
+
+        exploration = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration) == 2

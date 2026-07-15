@@ -1,5 +1,6 @@
 """Generic AI provider interface for supporting multiple models."""
 
+import base64
 import glob
 import os
 import re
@@ -291,6 +292,38 @@ class ModelConfig:
     account_name: str | None = None  # Account identifier (not an API key)
     base_url: str | None = None
     reasoning_effort: str | None = None
+
+
+# Claude Code's extended-thinking budgets keyed by reasoning level, ordered from
+# least to most thinking. Set via the MAX_THINKING_TOKENS env var the CLI reads.
+# These mirror the CLI's own graduations (low/medium/high/xHigh/Max/Ultracode);
+# 31999 is the CLI's cap, so the top tiers converge on it.
+CLAUDE_THINKING_BUDGETS: dict[str, int] = {
+    "low": 4000,
+    "medium": 10000,
+    "high": 21000,
+    "xHigh": 28000,
+    "Max": 31999,
+    "Ultracode": 31999,
+}
+
+# Reasoning effort levels selectable per provider type. Different providers offer
+# different graduations; an empty list means the provider has no reasoning knob
+# and the UI should not show a reasoning selector at all.
+REASONING_LEVELS: dict[str, list[str]] = {
+    # Claude Code maps these onto its extended-thinking token budgets.
+    "anthropic": list(CLAUDE_THINKING_BUDGETS),
+    # Codex's model_reasoning_effort accepts these values.
+    "openai": ["minimal", "low", "medium", "high"],
+}
+
+
+def get_reasoning_levels(provider: str) -> list[str]:
+    """Return the reasoning effort levels a provider supports.
+
+    An empty list means the provider does not expose a reasoning selector.
+    """
+    return list(REASONING_LEVELS.get(provider, []))
 
 
 # Callback type for activity updates: (activity_type, detail)
@@ -794,16 +827,13 @@ def _refresh_claude_token(creds_file: Path, oauth_data: dict) -> str | None:
         return None
 
 
-def _fetch_claude_usage_data(account_name: str) -> dict | None:
-    """Fetch all Claude usage data from Anthropic API in a single request.
+def _claude_oauth_token(account_name: str) -> str | None:
+    """Return a valid Claude OAuth access token for an account.
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Parsed JSON response dict, or None if unavailable.
+    Reads the account's credentials (falling back to the default ``~/.claude``
+    login) and refreshes the token if it has expired. Returns None when no
+    usable credentials are available.
     """
-    import requests
     from datetime import datetime, timezone
 
     creds_file = _find_claude_credentials(account_name)
@@ -828,6 +858,27 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
                 if refreshed:
                     access_token = refreshed
 
+        return access_token
+    except Exception:
+        return None
+
+
+def _fetch_claude_usage_data(account_name: str) -> dict | None:
+    """Fetch all Claude usage data from Anthropic API in a single request.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Parsed JSON response dict, or None if unavailable.
+    """
+    import requests
+
+    access_token = _claude_oauth_token(account_name)
+    if not access_token:
+        return None
+
+    try:
         response = requests.get(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -846,6 +897,41 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
 
     except Exception:
         return None
+
+
+def discover_claude_models(account_name: str) -> list[str]:
+    """Return current Claude model ids from the Anthropic Models API.
+
+    Uses the account's OAuth token (refreshing if needed) so the model list
+    always reflects what Anthropic currently offers, rather than a hardcoded
+    list that goes stale. Returns [] when the account has no usable credentials
+    or the API is unreachable.
+    """
+    import requests
+
+    access_token = _claude_oauth_token(account_name)
+    if not access_token:
+        return []
+
+    try:
+        response = requests.get(
+            "https://api.anthropic.com/v1/models?limit=100",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/2.0.32",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        return [str(m["id"]) for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
 
 
 def _get_claude_usage_percentage(account_name: str) -> float | None:
@@ -899,137 +985,225 @@ def _get_claude_reset_eta(account_name: str, period_key: str) -> str | None:
     return _parse_reset_eta(resets_at)
 
 
-def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
-    """Get Codex weekly usage percentage from session files.
+def _codex_home_dir(account_name: str) -> Path:
+    """Isolated Codex HOME directory for an account (or the real HOME if unset).
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
+    ``safe_home()`` returns a flavor-safe Path, so we avoid wrapping in ``Path()``
+    (which would force a WindowsPath on non-Windows test runs under ``os.name``
+    patching).
     """
     base_home = safe_home()
     if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
-    else:
-        codex_home = Path(base_home)
+        return base_home / ".chad" / "codex-homes" / account_name
+    return base_home
 
-    if account_name and not codex_home.exists():
+
+def _codex_account_id(home: Path) -> str | None:
+    """OpenAI account id from a Codex home's ``auth.json`` (``<home>/.codex/auth.json``).
+
+    Decodes the id_token JWT payload to read ``chatgpt_account_id``. Returns None
+    if the home isn't logged in or the token can't be read.
+    """
+    auth = home / ".codex" / "auth.json"
+    if not auth.exists():
+        return None
+    try:
+        data = json.loads(auth.read_text(encoding="utf-8"))
+        token = (data.get("tokens") or {}).get("id_token")
+        if not token:
+            return None
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+    except Exception:
         return None
 
-    sessions_dir = codex_home / ".codex" / "sessions"
-    if not sessions_dir.exists():
-        return 0.0
 
-    # Find the most recent session file
-    session_files: list[tuple[float, Path]] = []
-    for root, _, files in os.walk(sessions_dir):
-        for filename in files:
-            if filename.endswith(".jsonl"):
-                path = platform_path(root) / filename
-                try:
-                    session_files.append((path.stat().st_mtime, path))
-                except OSError:
-                    pass
+def _codex_candidate_homes(account_name: str) -> list[Path]:
+    """Codex HOME dirs holding usage for the same OpenAI account as ``account_name``.
 
-    if not session_files:
-        return 0.0
+    Codex rate limits are enforced per-account on the server, so a snapshot
+    written by *any* client on the same account — the standalone ``codex`` CLI's
+    ``~/.codex``, or another Chad account home — is an equally valid and often
+    fresher reading than this account's isolated home alone. (This is exactly the
+    common case: the user runs the same account in both Chad and the CLI, and the
+    CLI's usage is invisible to Chad's isolated home.) We match candidates by the
+    account id in each home's ``auth.json``.
+    """
+    target = _codex_home_dir(account_name)
+    homes = [target]
 
-    session_files.sort(reverse=True)
-    latest_session = session_files[0][1]
+    target_id = _codex_account_id(target)
+    if not target_id:
+        # Not logged in / unknown identity — only trust our own home, since we
+        # can't prove another home belongs to the same account.
+        return homes
 
+    base = safe_home()
+    candidates = [base]  # the real ~/.codex (auth/sessions under base/.codex)
+    codex_homes_root = base / ".chad" / "codex-homes"
+    if codex_homes_root.exists():
+        try:
+            candidates.extend(child for child in codex_homes_root.iterdir() if child.is_dir())
+        except OSError:
+            pass
+
+    for cand in candidates:
+        if cand == target:
+            continue
+        if _codex_account_id(cand) == target_id:
+            homes.append(cand)
+    return homes
+
+
+def _latest_populated_rate_limits(path: Path) -> dict | None:
+    """Last token_count ``rate_limits`` in a session file that carries window data.
+
+    A trivial turn can return a snapshot whose ``primary``/``secondary`` windows
+    are null (a different limit bucket that doesn't report the 5h/weekly pools);
+    such snapshots are skipped so they never clobber a real reading.
+    """
+    found = None
     try:
-        rate_limits = None
-        with open(latest_session, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 if "rate_limits" in line:
                     data = json.loads(line.strip())
                     if data.get("type") == "event_msg":
                         payload = data.get("payload", {})
                         if payload.get("type") == "token_count":
-                            rate_limits = payload.get("rate_limits")
+                            rate_limits = payload.get("rate_limits") or {}
+                            if rate_limits.get("primary") or rate_limits.get("secondary"):
+                                found = rate_limits
+    except Exception:
+        return None
+    return found
 
-        if rate_limits:
-            secondary = rate_limits.get("secondary", {})
-            if secondary:
-                util = secondary.get("used_percent")
-                if util is not None:
+
+def _read_codex_rate_limits(account_name: str) -> tuple[dict | None, float | None]:
+    """Read the freshest populated Codex ``rate_limits`` snapshot for an account.
+
+    Scans session files across every home belonging to the same account (see
+    ``_codex_candidate_homes``) and returns the most recently written snapshot
+    that actually carries window data, plus that file's modification time (used
+    to surface staleness).
+
+    Returns ``(rate_limits, snapshot_mtime)`` or ``(None, None)``.
+    """
+    session_files: list[tuple[float, Path]] = []
+    for home in _codex_candidate_homes(account_name):
+        sessions_dir = home / ".codex" / "sessions"
+        if not sessions_dir.exists():
+            continue
+        for root, _, files in os.walk(sessions_dir):
+            for filename in files:
+                if filename.endswith(".jsonl"):
+                    path = platform_path(root) / filename
                     try:
-                        return float(util)
-                    except (ValueError, TypeError):
+                        session_files.append((path.stat().st_mtime, path))
+                    except OSError:
                         pass
 
-    except Exception:
-        pass
+    session_files.sort(reverse=True)
 
-    return 0.0
+    for mtime, path in session_files:
+        rate_limits = _latest_populated_rate_limits(path)
+        if rate_limits:
+            return rate_limits, mtime
+
+    return None, None
+
+
+def _codex_window_used_percent(window: dict | None) -> float | None:
+    """Current used-percent for a Codex rate-limit window, honoring its reset.
+
+    ``used_percent`` is a point-in-time snapshot. If the window's ``resets_at``
+    (unix seconds) has already passed, the window has rolled over since the
+    snapshot was taken, so current usage in the new window is 0 — reporting the
+    stale percentage would wrongly show a maxed-out window as still maxed.
+    """
+    if not window:
+        return None
+    used = window.get("used_percent")
+    if used is None:
+        return None
+    resets_at = window.get("resets_at")
+    if resets_at is not None:
+        try:
+            if time.time() >= float(resets_at):
+                return 0.0
+        except (ValueError, TypeError):
+            pass
+    try:
+        return float(used)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_unix_reset_eta(resets_at: object) -> str | None:
+    """Human-readable ETA (e.g. ``"2h 15m"``) from a unix-seconds reset time."""
+    if resets_at is None:
+        return None
+    try:
+        total_seconds = max(0, int(float(resets_at) - time.time()))
+    except (ValueError, TypeError):
+        return None
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _get_codex_reset_eta(account_name: str, window_key: str) -> str | None:
+    """Reset ETA for a Codex window (``"primary"`` 5h or ``"secondary"`` weekly)."""
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
+        return None
+    window = rate_limits.get(window_key) or {}
+    return _parse_unix_reset_eta(window.get("resets_at"))
+
+
+def _get_codex_usage_as_of(account_name: str) -> str | None:
+    """ISO-8601 timestamp of the most recent Codex usage snapshot, or None.
+
+    Lets the UI label a reading as possibly stale (the snapshot only reflects
+    usage from the last turn Chad itself ran, not usage from the standalone CLI
+    or web on the same account).
+    """
+    _, mtime = _read_codex_rate_limits(account_name)
+    if mtime is None:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+
+
+def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
+    """Get Codex weekly (secondary window) usage percentage from session files.
+
+    Returns the percentage (0-100), or None if the account home is missing.
+    """
+    if account_name and not _codex_home_dir(account_name).exists():
+        return None
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
+        return 0.0
+    pct = _codex_window_used_percent(rate_limits.get("secondary"))
+    return pct if pct is not None else 0.0
 
 
 def _get_codex_usage_percentage(account_name: str) -> float | None:
-    """Get Codex usage percentage from session files.
+    """Get Codex 5-hour (primary window) usage percentage from session files.
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
+    Returns the percentage (0-100), or None if the account home is missing.
     """
-    # Get the isolated home directory for this account
-    base_home = safe_home()
-    if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
-    else:
-        codex_home = Path(base_home)
-
-    if account_name and not codex_home.exists():
+    if account_name and not _codex_home_dir(account_name).exists():
         return None
-
-    sessions_dir = codex_home / ".codex" / "sessions"
-    if not sessions_dir.exists():
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
         return 0.0
-
-    # Find the most recent session file
-    session_files: list[tuple[float, Path]] = []
-    for root, _, files in os.walk(sessions_dir):
-        for filename in files:
-            if filename.endswith(".jsonl"):
-                path = platform_path(root) / filename
-                try:
-                    session_files.append((path.stat().st_mtime, path))
-                except OSError:
-                    pass
-
-    if not session_files:
-        return 0.0
-
-    session_files.sort(reverse=True)
-    latest_session = session_files[0][1]
-
-    try:
-        rate_limits = None
-        with open(latest_session, encoding="utf-8") as f:
-            for line in f:
-                if "rate_limits" in line:
-                    data = json.loads(line.strip())
-                    if data.get("type") == "event_msg":
-                        payload = data.get("payload", {})
-                        if payload.get("type") == "token_count":
-                            rate_limits = payload.get("rate_limits")
-
-        if rate_limits:
-            primary = rate_limits.get("primary", {})
-            if primary:
-                util = primary.get("used_percent")
-                if util is not None:
-                    try:
-                        return float(util)
-                    except (ValueError, TypeError):
-                        pass
-
-    except Exception:
-        pass
-
-    return 0.0
+    pct = _codex_window_used_percent(rate_limits.get("primary"))
+    return pct if pct is not None else 0.0
 
 
 def _gemini_usage_path() -> Path:
@@ -1264,63 +1438,6 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
 
     # Free tier: ~1000 requests/day (conservative estimate for Mistral API)
     daily_limit = 1000
-    return min((today_requests / daily_limit) * 100, 100.0)
-
-
-def _get_opencode_usage_percentage(account_name: str) -> float | None:
-    """Get OpenCode usage percentage by counting today's requests.
-
-    OpenCode supports multiple backends (Anthropic, OpenAI, etc.) and stores
-    session data in XDG_DATA_HOME/opencode/sessions/.
-
-    Args:
-        account_name: The account name for isolated data directory
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
-    """
-    from datetime import datetime, timezone
-
-    # OpenCode v1.1+ stores session data at ~/.local/share/opencode
-    base_home = safe_home()
-    data_dir = Path(base_home) / ".local" / "share" / "opencode"
-
-    sessions_dir = data_dir / "sessions"
-    if not sessions_dir.exists():
-        return 0.0  # No sessions yet
-
-    # Count today's requests from session files (JSONL format)
-    today_requests = 0
-    today = datetime.now(timezone.utc).date()
-
-    for session_file in sessions_dir.glob("*.jsonl"):
-        try:
-            with open(session_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                        # Count assistant responses
-                        if event.get("type") == "assistant":
-                            timestamp = event.get("timestamp", "")
-                            if timestamp:
-                                try:
-                                    msg_date = datetime.fromisoformat(
-                                        timestamp.replace("Z", "+00:00")
-                                    ).date()
-                                    if msg_date == today:
-                                        today_requests += 1
-                                except (ValueError, AttributeError):
-                                    pass
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            continue
-
-    # Default daily limit (varies by backend provider)
-    daily_limit = 2000
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
@@ -1864,11 +1981,12 @@ class OpenAICodexProvider(AIProvider):
         self.last_event_info: dict | None = None
 
     def _get_isolated_home(self) -> str:
-        """Get the isolated HOME directory for this account."""
-        base_home = safe_home()
-        if self.config.account_name:
-            return str(base_home / ".chad" / "codex-homes" / self.config.account_name)
-        return str(base_home)
+        """Get the isolated HOME directory for this account.
+
+        Shares ``_codex_home_dir`` with the usage readers so the directory Codex
+        writes its session snapshots into is exactly the one the readers scan.
+        """
+        return str(_codex_home_dir(self.config.account_name))
 
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
@@ -2438,6 +2556,18 @@ class OpenAICodexProvider(AIProvider):
         """Get Codex weekly usage percentage from session files."""
         return _get_codex_weekly_usage_percentage(self.config.account_name)
 
+    def get_session_reset_eta(self) -> str | None:
+        """Time until the Codex 5-hour window resets, from the latest snapshot."""
+        return _get_codex_reset_eta(self.config.account_name, "primary")
+
+    def get_weekly_reset_eta(self) -> str | None:
+        """Time until the Codex weekly window resets, from the latest snapshot."""
+        return _get_codex_reset_eta(self.config.account_name, "secondary")
+
+    def get_usage_as_of(self) -> str | None:
+        """ISO-8601 time of the snapshot the usage reading is derived from."""
+        return _get_codex_usage_as_of(self.config.account_name)
+
     def is_quota_exhausted(self, output_tail: str) -> str | None:
         """Check if Codex output indicates quota exhaustion."""
         from chad.util.handoff import is_quota_exhaustion_error
@@ -2630,6 +2760,38 @@ class GeminiCodeAssistProvider(AIProvider):
         return _get_gemini_usage_percentage(self.config.account_name)
 
 
+def discover_local_models(endpoint: str, timeout: float = 3.0) -> list[str]:
+    """Return model ids served by an OpenAI-compatible endpoint (GET /v1/models)."""
+    import json
+    import urllib.request
+
+    url = endpoint.rstrip("/") + "/v1/models"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return [str(m["id"]) for m in data.get("data", []) if m.get("id")]
+
+
+def build_local_env(endpoint: str, model: str | None) -> dict[str, str]:
+    """Environment variables that point the Qwen Code CLI at a local server.
+
+    The CLI's OpenAI-compatible auth reads OPENAI_BASE_URL / OPENAI_API_KEY /
+    OPENAI_MODEL. When no model is pinned, the served model is discovered from
+    the endpoint (servers like llama.cpp accept any name, vLLM requires the
+    exact id).
+    """
+    if not model or model == "default":
+        try:
+            models = discover_local_models(endpoint)
+            model = models[0] if models else "default"
+        except (OSError, ValueError):
+            model = "default"
+    return {
+        "OPENAI_BASE_URL": endpoint.rstrip("/") + "/v1",
+        "OPENAI_API_KEY": "local",
+        "OPENAI_MODEL": model,
+    }
+
+
 class QwenCodeProvider(AIProvider):
     """Provider for Qwen Code CLI with multi-turn support.
 
@@ -2649,6 +2811,11 @@ class QwenCodeProvider(AIProvider):
         self.process: object | None = None
         self.master_fd: int | None = None
         self.session_id: str | None = None  # For multi-turn support
+        self.extra_cli_args: list[str] = []
+
+    def runtime_env(self) -> dict[str, str]:
+        """Extra environment variables for the CLI process."""
+        return {}
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("qwen", self._notify_activity)
@@ -2684,6 +2851,7 @@ class QwenCodeProvider(AIProvider):
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls (required for non-interactive)
+                *self.extra_cli_args,
                 "--resume",
                 self.session_id,
                 "-p", self.current_message,
@@ -2694,6 +2862,7 @@ class QwenCodeProvider(AIProvider):
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls
+                *self.extra_cli_args,
                 "-p", self.current_message,
             ]
             if self.config.model_name and self.config.model_name != "default":
@@ -2702,6 +2871,7 @@ class QwenCodeProvider(AIProvider):
         try:
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
+            env.update(self.runtime_env())
 
             json_events = []
             response_parts = []
@@ -2823,180 +2993,30 @@ class QwenCodeProvider(AIProvider):
         return _get_qwen_usage_percentage(self.config.account_name)
 
 
-class OpenCodeProvider(AIProvider):
-    """Provider for OpenCode CLI with multi-turn support.
+class LocalProvider(QwenCodeProvider):
+    """Provider for a local OpenAI-compatible model server (llama.cpp, vLLM, ...).
 
-    Uses the `opencode` command-line interface with JSON output format
-    for real-time streaming. Supports multi-turn via `--session <id>` or `--continue`.
-
-    OpenCode is an open-source AI coding agent supporting multiple backends
-    (Anthropic, OpenAI, Gemini, etc.) with session persistence.
-    Model format: provider/model (e.g., anthropic/claude-sonnet-4-5)
+    Drives the Qwen Code CLI with its OpenAI-compatible auth pointed at the
+    endpoint configured via ConfigManager.get_local_endpoint() (default
+    http://localhost:8000). No login or quota tracking applies.
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
-        self.project_path: str | None = None
-        self.system_prompt: str | None = None
-        self.current_message: str | None = None
-        self.process: object | None = None
-        self.master_fd: int | None = None
-        self.session_id: str | None = None  # For multi-turn support
+        self.extra_cli_args = ["--auth-type", "openai"]
 
-    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
-        ok, detail = _ensure_cli_tool("opencode", self._notify_activity)
-        if not ok:
-            return False
+    def runtime_env(self) -> dict[str, str]:
+        from chad.util.config_manager import ConfigManager
 
-        self.project_path = project_path
-        self.system_prompt = system_prompt
-        self.cli_path = detail
-        return True
-
-    def send_message(self, message: str) -> None:
-        # Only prepend system prompt on first message (no session_id yet)
-        if self.system_prompt and not self.session_id:
-            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
-        else:
-            self.current_message = message
-
-    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
-        import json
-
-        if not self.current_message:
-            return ""
-
-        opencode_cli = getattr(self, "cli_path", None) or find_cli_executable("opencode")
-
-        # Build command - use `opencode run` with --format json
-        cmd = [opencode_cli, "run", "--format", "json"]
-        if self.session_id:
-            cmd.extend(["--session", self.session_id])
-        elif self.config.model_name and self.config.model_name != "default":
-            cmd.extend(["-m", self.config.model_name])
-        cmd.append(self.current_message)
-
-        try:
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            # No need to set XDG_DATA_HOME; OpenCode v1.1+ uses ~/.local/share/opencode
-
-            json_events = []
-            response_parts = []
-            final_result = [None]  # Store final result from result event
-
-            def handle_chunk(decoded: str) -> None:
-                # Stream raw output for live display
-                self._notify_activity("stream", decoded)
-                # Parse JSON lines
-                for line in decoded.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                        if not isinstance(event, dict):
-                            continue
-                        json_events.append(event)
-                        # Extract session_id from system/init event or session event
-                        if event.get("type") == "system" and "session_id" in event:
-                            self.session_id = event["session_id"]
-                        elif event.get("type") == "session" and "id" in event:
-                            self.session_id = event["id"]
-                        # Handle assistant type with content blocks
-                        if event.get("type") == "assistant":
-                            message = event.get("message", {})
-                            content_blocks = message.get("content", [])
-                            for block in content_blocks:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    text = block.get("text", "")
-                                    if text:
-                                        response_parts.append(text)
-                                        self._notify_activity("text", text[:80])
-                        # Capture final result from result event
-                        if event.get("type") == "result" and "result" in event:
-                            final_result[0] = event["result"]
-                    except json.JSONDecodeError:
-                        # Non-JSON line (warnings, etc.) - just notify
-                        if line and len(line) > 10:
-                            self._notify_activity("text", line[:80])
-
-            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
-
-            # Close stdin immediately - prompt is passed via -p argument
-            if self.process.stdin:
-                self.process.stdin.close()
-
-            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
-
-            self.current_message = None
-            self.process = None
-            self.master_fd = None
-
-            if idle_stalled:
-                return f"Error: OpenCode execution stalled (no output for {int(timeout)}s)"
-            if timed_out:
-                return f"Error: OpenCode execution timed out ({int(timeout / 60)} minutes)"
-
-            # Prefer final result from result event (most reliable)
-            if final_result[0]:
-                return str(final_result[0]).strip()
-
-            # Return collected response parts if any
-            if response_parts:
-                return "".join(response_parts).strip()
-
-            # Fallback to raw output
-            output = _strip_ansi_codes(output)
-            return output.strip() if output else "No response from OpenCode"
-
-        except FileNotFoundError:
-            self.current_message = None
-            self.process = None
-            _close_master_fd(self.master_fd)
-            self.master_fd = None
-            return (
-                "Failed to run OpenCode: command not found\n\n"
-                "Install with: curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install | bash"
-            )
-        except (PermissionError, OSError) as exc:
-            self.current_message = None
-            self.process = None
-            _close_master_fd(self.master_fd)
-            self.master_fd = None
-            return f"Failed to run OpenCode: {exc}"
-
-    def stop_session(self) -> None:
-        self.current_message = None
-        self.session_id = None  # Clear session_id to end multi-turn
-        _close_master_fd(self.master_fd)
-        self.master_fd = None
-        if self.process:
-            try:
-                self.process.kill()
-                self.process.wait(timeout=5)
-            except Exception:
-                pass
-            self.process = None
-
-    def is_alive(self) -> bool:
-        # Session is "alive" if we have a session_id for resuming
-        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
-
-    def supports_multi_turn(self) -> bool:
-        return True
-
-    def get_session_id(self) -> str | None:
-        """Get the OpenCode session_id for native resume."""
-        return self.session_id
+        endpoint = ConfigManager().get_local_endpoint()
+        return build_local_env(endpoint, self.config.model_name)
 
     def supports_usage_reporting(self) -> bool:
-        """OpenCode supports usage reporting via local session files."""
-        return True
+        """A local server has no usage limits to report."""
+        return False
 
     def get_session_usage_percentage(self) -> float | None:
-        """Get OpenCode usage percentage from local session files."""
-        return _get_opencode_usage_percentage(self.config.account_name)
+        return None
 
 
 class KimiCodeProvider(AIProvider):
@@ -3716,8 +3736,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return GeminiCodeAssistProvider(config)
     elif config.provider == "qwen":
         return QwenCodeProvider(config)
-    elif config.provider == "opencode":
-        return OpenCodeProvider(config)
+    elif config.provider == "local":
+        return LocalProvider(config)
     elif config.provider == "kimi":
         return KimiCodeProvider(config)
     elif config.provider == "mistral":

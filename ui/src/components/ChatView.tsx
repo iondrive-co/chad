@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, DragEvent, UIEvent } from "react";
-import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
+import type { ChadAPI, ConversationItem, Account, ProviderInfo, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import type { TerminalChunk } from "../hooks/useStream.ts";
 import { buildTranscript } from "../lib/transcript.ts";
@@ -18,6 +18,7 @@ interface Props {
   api: ChadAPI;
   sessionId: string;
   onSessionChange: () => void;
+  onProjectsChange?: () => Promise<void> | void;
   defaultProjectPath?: string;
   apiBaseUrl?: string;
   token?: string;
@@ -26,6 +27,8 @@ interface Props {
   /** Available projects for the project dropdown. */
   projects?: ProjectSettings[];
 }
+
+const NEW_PROJECT_VALUE = "__new_project__";
 
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
@@ -44,6 +47,7 @@ export function ChatView({
   api,
   sessionId,
   onSessionChange,
+  onProjectsChange,
   defaultProjectPath = "",
   apiBaseUrl,
   token,
@@ -54,6 +58,24 @@ export function ChatView({
   const [sending, setSending] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [codingAccount, setCodingAccount] = useState<Account | null>(null);
+  // Provider metadata (used to decide whether the coding agent supports a
+  // reasoning level) and the reasoning level chosen for the next answer.
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [codingReasoning, setCodingReasoning] = useState("");
+  // Whether Slack integration is configured (controls the "post to Slack"
+  // toggle) and whether the next task should post its milestones to Slack.
+  const [slackEnabled, setSlackEnabled] = useState(false);
+  const [postToSlack, setPostToSlack] = useState(true);
+  // Models available for the selected coding agent and the per-message override
+  // chosen for the next answer ("" = use the account's configured model).
+  const [codingModels, setCodingModels] = useState<string[]>([]);
+  const [codingModel, setCodingModel] = useState("");
+  // The agent + model this session already runs its tasks with. Used to seed
+  // the composer so continuing a session (including after a server restart)
+  // reuses its own agent instead of a global default. Null for a brand-new
+  // session that has not run a task yet.
+  const [sessionCodingAgent, setSessionCodingAgent] = useState<string | null>(null);
+  const [sessionCodingModel, setSessionCodingModel] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
@@ -67,6 +89,9 @@ export function ChatView({
   // True once the user scrolls up off the bottom; suppresses terminal autoscroll
   // until they return to the bottom, just like a real terminal.
   const userScrolledUpRef = useRef(false);
+  // True when content is scrolled past the top edge, so the half-clipped first
+  // line gets a fade instead of looking abruptly cut off.
+  const [clippedTop, setClippedTop] = useState(false);
   const convoRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -87,11 +112,18 @@ export function ChatView({
 
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [newProjectPath, setNewProjectPath] = useState("");
+  const [savingProject, setSavingProject] = useState(false);
+  const [projectCreateError, setProjectCreateError] = useState<string | null>(null);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
 
   // Sync when parent changes defaultProjectPath (e.g. selecting a session tab)
   useEffect(() => {
-    if (defaultProjectPath) setCurrentProjectPath(defaultProjectPath);
+    if (defaultProjectPath) {
+      setCurrentProjectPath(defaultProjectPath);
+      setCreatingProject(false);
+    }
   }, [defaultProjectPath]);
 
   // Preview
@@ -260,11 +292,38 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
+  // Load this session's own coding agent/model (set once it has run a task)
+  // so the composer can reuse it instead of a global default.
+  useEffect(() => {
+    let cancelled = false;
+    setSessionCodingAgent(null);
+    setSessionCodingModel(null);
+    api.getSession(sessionId)
+      .then((s) => {
+        if (cancelled) return;
+        setSessionCodingAgent(s.coding_account);
+        setSessionCodingModel(s.coding_model);
+      })
+      .catch(() => { /* new/unknown session: fall back to defaults */ });
+    return () => { cancelled = true; };
+  }, [api, sessionId]);
+
   // Load default coding account, using project's preferred agent if available
   useEffect(() => {
     let cancelled = false;
     api.listAccounts().then((res) => {
       if (cancelled) return;
+
+      // Reuse the agent this session already runs with, so continuing a
+      // session keeps its own agent rather than resetting to a global default.
+      if (sessionCodingAgent) {
+        const sessionAccount = res.accounts.find((a) => a.name === sessionCodingAgent);
+        if (sessionAccount) {
+          setCodingAccount(sessionAccount);
+          return;
+        }
+      }
+
       // Find the project's preferred coding agent if a project is selected
       const currentProject = projects?.find((p) => p.project_path === currentProjectPath);
       const preferredAgentName = currentProject?.preferred_coding_agent;
@@ -285,7 +344,49 @@ export function ChatView({
       if (!cancelled) setCodingAccount(null);
     });
     return () => { cancelled = true; };
-  }, [api, currentProjectPath, projects]);
+  }, [api, currentProjectPath, projects, sessionCodingAgent]);
+
+  // Load provider metadata so we know which coding agents support a reasoning level.
+  useEffect(() => {
+    let cancelled = false;
+    api.listProviders()
+      .then((r) => { if (!cancelled) setProviders(r.providers); })
+      .catch(() => { if (!cancelled) setProviders([]); });
+    return () => { cancelled = true; };
+  }, [api]);
+
+  // Learn whether Slack is configured so the composer can offer (or grey out)
+  // the per-task "post to Slack" toggle.
+  useEffect(() => {
+    let cancelled = false;
+    api.getSlackSettings()
+      .then((s) => { if (!cancelled) setSlackEnabled(s.enabled); })
+      .catch(() => { if (!cancelled) setSlackEnabled(false); });
+    return () => { cancelled = true; };
+  }, [api]);
+
+  // Load the models the selected coding agent can run so the composer can offer
+  // a per-message model override. When the selected agent is the one this
+  // session runs with, restore its saved model; otherwise clear the override so
+  // a stale selection can't leak onto a different account.
+  useEffect(() => {
+    // Reasoning levels differ per provider, so a level chosen for one agent may
+    // not exist for the next — reset to the provider default on agent change.
+    setCodingReasoning("");
+    if (!codingAccount) {
+      setCodingModel("");
+      setCodingModels([]);
+      return;
+    }
+    setCodingModel(
+      sessionCodingAgent === codingAccount.name ? (sessionCodingModel ?? "") : "",
+    );
+    let cancelled = false;
+    api.getAccountModels(codingAccount.name)
+      .then((r) => { if (!cancelled) setCodingModels(r.models); })
+      .catch(() => { if (!cancelled) setCodingModels([]); });
+    return () => { cancelled = true; };
+  }, [api, codingAccount, sessionCodingAgent, sessionCodingModel]);
 
   // Load verification settings and default verification agent
   useEffect(() => {
@@ -403,6 +504,7 @@ export function ChatView({
     const el = e.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     userScrolledUpRef.current = distanceFromBottom > 24;
+    setClippedTop(el.scrollTop > 4);
   }, []);
 
   // Auto-scroll terminal transcript to the bottom as it grows, unless the user
@@ -417,6 +519,7 @@ export function ChatView({
   // Reset scroll-follow state when switching sessions.
   useEffect(() => {
     userScrolledUpRef.current = false;
+    setClippedTop(false);
   }, [sessionId]);
 
   // Auto-scroll conversation to bottom when new messages arrive
@@ -580,6 +683,40 @@ export function ChatView({
     setDragOver(false);
   }, []);
 
+  const handleProjectSelect = useCallback((value: string) => {
+    setProjectCreateError(null);
+    if (value === NEW_PROJECT_VALUE) {
+      setCreatingProject(true);
+      setCurrentProjectPath("");
+      return;
+    }
+    setCreatingProject(false);
+    setNewProjectPath("");
+    setCurrentProjectPath(value);
+  }, []);
+
+  const handleAddProjectFromChat = useCallback(async () => {
+    const path = newProjectPath.trim();
+    if (!path) {
+      setProjectCreateError("Enter a project path");
+      return;
+    }
+
+    setSavingProject(true);
+    setProjectCreateError(null);
+    try {
+      const settings = await api.setProjectSettings({ project_path: path });
+      await onProjectsChange?.();
+      setCurrentProjectPath(settings.project_path);
+      setCreatingProject(false);
+      setNewProjectPath("");
+    } catch {
+      setProjectCreateError("Failed to add project");
+    } finally {
+      setSavingProject(false);
+    }
+  }, [api, newProjectPath, onProjectsChange]);
+
   const removeScreenshot = useCallback((index: number) => {
     setScreenshots((prev) => {
       const removed = prev[index];
@@ -617,9 +754,12 @@ export function ChatView({
       project_path: projectPath,
       task_description: message,
       coding_agent: codingAccount.name,
+      coding_model: codingModel || undefined,
+      coding_reasoning: codingReasoning || undefined,
       verification_agent: verificationAllowed ? verificationAccount.name : undefined,
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
+      notify_slack: slackEnabled && postToSlack,
     });
 
     handleTaskStart(message, isFollowup);
@@ -627,11 +767,15 @@ export function ChatView({
     api,
     sessionId,
     codingAccount,
+    codingModel,
+    codingReasoning,
     verificationAccount,
     verificationSettings,
     currentProjectPath,
     defaultProjectPath,
     handleTaskStart,
+    slackEnabled,
+    postToSlack,
   ]);
 
   const handleSendMessage = useCallback(async () => {
@@ -776,6 +920,16 @@ export function ChatView({
     }).catch(() => {});
   }, [api, currentProjectPath]);
 
+  const projectSelectorValue = creatingProject ? NEW_PROJECT_VALUE : currentProjectPath;
+  const showNewProjectForm = creatingProject || projects.length === 0;
+
+  // The reasoning-level dropdown only makes sense for coding agents whose
+  // provider supports it, and the available levels vary per provider (Codex has
+  // four, Claude Code has more, others have none).
+  const codingReasoningLevels =
+    providers.find((p) => p.type === codingAccount?.provider)?.reasoning_levels ?? [];
+  const codingSupportsReasoning = codingReasoningLevels.length > 0;
+
   return (
     <div className="chat-view">
       {/* Worktree and session info bar */}
@@ -812,27 +966,48 @@ export function ChatView({
       )}
 
       {/* Project selector - shown when no task has been run yet */}
-      {!hasRunTask && projects.length > 0 && (
+      {!hasRunTask && (
         <div className="project-selector-bar">
-          <label>
-            Project
-            <select
-              value={currentProjectPath}
-              onChange={(e) => setCurrentProjectPath(e.target.value)}
+          {projects.length > 0 ? (
+            <label>
+              Project
+              <select
+                value={projectSelectorValue}
+                onChange={(e) => handleProjectSelect(e.target.value)}
+              >
+                <option value="">-- Select a project --</option>
+                {projects.map((p) => (
+                  <option key={p.project_path} value={p.project_path}>
+                    {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
+                  </option>
+                ))}
+                <option value={NEW_PROJECT_VALUE}>New project</option>
+              </select>
+            </label>
+          ) : (
+            <span className="project-selector-label">Project</span>
+          )}
+          {showNewProjectForm && (
+            <form
+              className="project-selector-new"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleAddProjectFromChat();
+              }}
             >
-              <option value="">-- Select a project --</option>
-              {projects.map((p) => (
-                <option key={p.project_path} value={p.project_path}>
-                  {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-      {!hasRunTask && projects.length === 0 && (
-        <div className="project-selector-bar">
-          <span className="no-projects-hint">No projects configured. Go to the Projects tab to add one.</span>
+              <input
+                value={newProjectPath}
+                onChange={(e) => setNewProjectPath(e.target.value)}
+                placeholder="/path/to/project"
+                aria-label="New project path"
+                disabled={savingProject}
+              />
+              <button type="submit" disabled={savingProject || !newProjectPath.trim()}>
+                {savingProject ? "Adding..." : "Add"}
+              </button>
+              {projectCreateError && <span className="project-selector-error">{projectCreateError}</span>}
+            </form>
+          )}
         </div>
       )}
 
@@ -844,7 +1019,7 @@ export function ChatView({
               <div className="chat-agent-pickers">
                 <div className="chat-agent-picker">
                   <span className="field-label">Coding Agent</span>
-                  <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
+                  <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} autoSelect={false} />
                 </div>
                 <div className="chat-verification-picker">
                   <span className="field-label">Verification Agent</span>
@@ -857,7 +1032,6 @@ export function ChatView({
                   />
                 </div>
               </div>
-              <div className="chat-status">{taskActive ? "Running…" : hasRunTask ? "Ready for follow-up" : "Ready to start"}</div>
             </div>
 
             <div className="chat-messages" ref={convoRef}>
@@ -940,6 +1114,56 @@ export function ChatView({
                 <div className="composer-right">
                   {uploading && <span className="running-indicator">Uploading…</span>}
                   {taskActive && <span className="running-indicator">Running…</span>}
+                  {codingModels.length > 1 && (
+                    <select
+                      className="model-select"
+                      value={codingModel}
+                      onChange={(e) => setCodingModel(e.target.value)}
+                      disabled={sending}
+                      aria-label="Model"
+                      title="Model to use for the answer"
+                    >
+                      <option value="">Model: default</option>
+                      {codingModels
+                        .filter((m) => m !== "default")
+                        .map((m) => (
+                          <option key={m} value={m}>
+                            {`Model: ${m}`}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                  {codingSupportsReasoning && (
+                    <select
+                      className="reasoning-select"
+                      value={codingReasoning}
+                      onChange={(e) => setCodingReasoning(e.target.value)}
+                      disabled={sending}
+                      aria-label="Reasoning level"
+                      title="Reasoning level to use for the answer"
+                    >
+                      {["", ...codingReasoningLevels].map((r) => (
+                        <option key={r} value={r}>
+                          {r ? `Reasoning: ${r}` : "Reasoning: default"}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <label
+                    className="slack-toggle"
+                    title={slackEnabled
+                      ? "Post milestone updates for this task to Slack"
+                      : "Enable Slack in Settings to post task updates"}
+                  >
+                    <input
+                      type="checkbox"
+                      className="slack-toggle-checkbox"
+                      checked={slackEnabled && postToSlack}
+                      disabled={sending || !slackEnabled}
+                      onChange={(e) => setPostToSlack(e.target.checked)}
+                    />
+                    Slack
+                  </label>
                   {!taskActive && (
                     <button
                       type="button"
@@ -994,13 +1218,17 @@ export function ChatView({
 
           <div
             ref={outputRef}
-            className="terminal-output"
+            className={`terminal-output${clippedTop ? " clipped-top" : ""}`}
             onScroll={handleTerminalScroll}
           >
             {transcript.map((line, i) =>
               line.kind === "tool" ? (
                 <div key={i} className="tline tool">
                   <span className="tool-glyph">●</span> {line.text}
+                </div>
+              ) : line.kind === "user" ? (
+                <div key={i} className="tline user">
+                  <span className="tool-glyph">❯</span> {line.text}
                 </div>
               ) : (
                 <div key={i} className="tline prose">

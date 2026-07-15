@@ -30,12 +30,47 @@ from chad.util.prompts import (
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
+from chad.util.providers import CLAUDE_THINKING_BUDGETS
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
 
 
 _CLI_INSTALLER = AIToolInstaller()
+
+
+def _normalize_tool_call(name: str, inp: dict) -> tuple[str, dict]:
+    """Normalize Qwen/Gemini CLI tool calls to the canonical (Claude-style) names.
+
+    The Gemini CLI family emits snake_case tools with their own arg keys
+    (read_file({"absolute_path": ...}), run_shell_command({"command": ...,
+    "is_background": ...})). Mapping them here means every consumer — collapsed
+    summaries, ToolCallStartedEvents, and both UIs — renders one vocabulary
+    instead of leaking raw JSON args.
+    """
+    if name == "read_file":
+        return "Read", {"file_path": inp.get("absolute_path", "")}
+    if name == "read_many_files":
+        return "Read", {"file_path": ", ".join(inp.get("paths") or [])}
+    if name == "write_file":
+        return "Write", {"file_path": inp.get("file_path", "")}
+    if name in ("replace", "edit"):
+        return "Edit", {"file_path": inp.get("file_path", "")}
+    if name == "run_shell_command":
+        return "Bash", {"command": inp.get("command", "")}
+    if name == "list_directory":
+        return "LS", {"path": inp.get("path", "")}
+    if name == "glob":
+        return "Glob", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+    if name in ("grep", "grep_search", "search_file_content"):
+        return "Grep", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+    if name in ("web_search", "google_web_search"):
+        return "WebSearch", {"query": inp.get("query", "")}
+    if name == "web_fetch":
+        return "WebFetch", {"url": inp.get("url") or inp.get("prompt", "")}
+    if name == "task":
+        return "Task", inp
+    return name, inp
 
 
 class ClaudeStreamJsonParser:
@@ -160,8 +195,9 @@ class ClaudeStreamJsonParser:
                         parts.append(text)
 
                 elif item_type == "tool_use":
-                    tool_name = item.get("name", "unknown")
-                    tool_input = item.get("input", {})
+                    tool_name, tool_input = _normalize_tool_call(
+                        item.get("name", "unknown"), item.get("input", {})
+                    )
                     tool_id = item.get("id", "")
                     # Accumulate tool for collapsed summary instead of showing each one
                     self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
@@ -249,6 +285,10 @@ class ClaudeStreamJsonParser:
             pattern = input_data.get("pattern", "")
             return f"• Grep: {pattern}"
 
+        elif name == "LS":
+            path = input_data.get("path", "")
+            return f"• Listing {path}"
+
         elif name == "Task":
             desc = input_data.get("description", "")
             return f"• Task: {desc}"
@@ -286,8 +326,12 @@ class ClaudeStreamJsonParser:
         if edit_count:
             parts.append(f"{edit_count} edit{'s' if edit_count > 1 else ''}")
 
-        # Searches (Glob + Grep combined)
-        search_count = self._tool_counts.get("Glob", 0) + self._tool_counts.get("Grep", 0)
+        # Searches (Glob + Grep + LS combined)
+        search_count = (
+            self._tool_counts.get("Glob", 0)
+            + self._tool_counts.get("Grep", 0)
+            + self._tool_counts.get("LS", 0)
+        )
         if search_count:
             parts.append(f"{search_count} search{'es' if search_count > 1 else ''}")
 
@@ -307,7 +351,7 @@ class ClaudeStreamJsonParser:
             parts.append(f"{web_count} web request{'s' if web_count > 1 else ''}")
 
         # Other tools not in categories above
-        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "Bash", "Task", "WebSearch", "WebFetch"}
+        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "LS", "Bash", "Task", "WebSearch", "WebFetch"}
         other_tools = [(t, c) for t, c in self._tool_counts.items() if t not in categorized]
         if other_tools:
             # Show actual tool names instead of generic "X other"
@@ -371,6 +415,8 @@ def _tool_call_event(tc: dict) -> ToolCallStartedEvent:
         ev.path = inp.get("file_path")
     elif name == "Bash":
         ev.command = inp.get("command")
+    elif name == "LS":
+        ev.path = inp.get("path")
     elif name in ("Glob", "Grep"):
         ev.path = inp.get("path")
         ev.args = {"pattern": inp.get("pattern", "")}
@@ -456,6 +502,12 @@ def _strip_binary_garbage(text: str) -> str:
     return _BINARY_GARBAGE_RE.sub('', text)
 
 
+# Claude Code's extended-thinking budgets, keyed by reasoning level and set via
+# the MAX_THINKING_TOKENS env var the CLI reads. Defined in the provider layer so
+# the selectable reasoning levels and their budgets stay in sync.
+_CLAUDE_THINKING_BUDGETS = CLAUDE_THINKING_BUDGETS
+
+
 def build_agent_command(
     provider: str,
     account_name: str,
@@ -472,7 +524,7 @@ def build_agent_command(
     """Build CLI command and environment for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, mistral, mock)
+        provider: Provider type (anthropic, openai, gemini, qwen, local, mistral, mock)
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
@@ -538,6 +590,12 @@ def build_agent_command(
         if model and model != "default":
             cmd.extend(["--model", model])
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        # Claude Code reads MAX_THINKING_TOKENS to enable extended thinking with a
+        # token budget. Map the shared low/medium/high reasoning levels onto the
+        # CLI's own "think"/"megathink"/"ultrathink" budgets.
+        thinking_budget = _CLAUDE_THINKING_BUDGETS.get(reasoning_effort or "")
+        if thinking_budget:
+            env["MAX_THINKING_TOKENS"] = str(thinking_budget)
         # Provide prompt as positional argument (required with -p when stdin is a TTY)
         if full_prompt:
             cmd.append(full_prompt)
@@ -584,6 +642,25 @@ def build_agent_command(
         if full_prompt:
             cmd.extend(["-p", full_prompt])
 
+    elif provider == "local":
+        # Local OpenAI-compatible server (llama.cpp, vLLM, ...) driven through the
+        # Qwen Code CLI's OpenAI-compatible auth. Endpoint comes from config.
+        from chad.util.config_manager import ConfigManager
+        from chad.util.providers import build_local_env
+
+        endpoint = ConfigManager().get_local_endpoint()
+        cmd = [
+            resolve_tool("qwen"),
+            "--auth-type",
+            "openai",
+            "-y",
+            "--output-format",
+            "stream-json",
+        ]
+        env.update(build_local_env(endpoint, model))
+        if full_prompt:
+            cmd.extend(["-p", full_prompt])
+
     elif provider == "mistral":
         # Vibe CLI (Mistral) - pass prompt via -p flag like MistralVibeProvider expects
         cmd = [resolve_tool("vibe"), "--output", "text"]
@@ -592,14 +669,6 @@ def build_agent_command(
         if full_prompt:
             cmd.extend(["-p", full_prompt])
             initial_input = None
-
-    elif provider == "opencode":
-        # OpenCode CLI v1.1+ — uses `opencode run` with --format json
-        oc_model = model if model and model != "default" else "anthropic/claude-sonnet-4-5"
-        cmd = [resolve_tool("opencode"), "run", "--format", "json"]
-        cmd.extend(["-m", oc_model])
-        if full_prompt:
-            cmd.append(full_prompt)
 
     elif provider == "kimi":
         # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
@@ -808,6 +877,7 @@ class TaskExecutor:
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
         # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -829,6 +899,8 @@ class TaskExecutor:
             verification_account: Optional account for verification
             verification_model: Optional model override for verification
             verification_reasoning: Optional reasoning level for verification
+            notify_slack: Whether to post milestone notifications to Slack for
+                this task (only has effect when Slack is configured)
 
         Returns:
             The created Task object
@@ -925,6 +997,7 @@ class TaskExecutor:
                 override_prompt,
                 verification_config,
                 is_followup,
+                notify_slack,
             ),
             daemon=True,
         )
@@ -1048,7 +1121,7 @@ class TaskExecutor:
         use_stdin_pipe = coding_provider == "openai"
 
         # Create JSON parser for providers that use stream-json output
-        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "gemini", "kimi") else None
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "gemini", "kimi") else None
         # Codex prints its own rendered transcript; normalize it into clean prose
         # plus structured tool calls so the UI renders it like every other provider.
         codex_parser = CodexStreamParser() if coding_provider == "openai" else None
@@ -1158,6 +1231,8 @@ class TaskExecutor:
         session.active = True
         session.status = "active"
         session.coding_account = coding_account
+        session.coding_model = coding_model
+        session.provider_type = coding_provider
         session.task_description = task_description
 
         # Send initial input if needed
@@ -1290,6 +1365,7 @@ class TaskExecutor:
         override_prompt: str | None = None,
         verification_config: dict | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1436,7 +1512,7 @@ class TaskExecutor:
                 get_account_info_fn=get_account_info,
                 get_session_reset_eta_fn=_check_provider.get_session_reset_eta if _check_provider else None,
                 get_weekly_reset_eta_fn=_check_provider.get_weekly_reset_eta if _check_provider else None,
-                notify_slack=True,
+                notify_slack=notify_slack,
             )
             task._session_event_loop = event_loop
 

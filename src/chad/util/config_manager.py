@@ -14,6 +14,9 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+# Default base URL for the "local" provider's OpenAI-compatible model server.
+DEFAULT_LOCAL_ENDPOINT = "http://localhost:8000"
+
 # Base keys that may appear in the persisted config.
 CONFIG_BASE_KEYS: set[str] = {
     "password_hash",
@@ -35,6 +38,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
+    "local_endpoint",      # Base URL of the local OpenAI-compatible model server
 
 }
 
@@ -638,7 +642,14 @@ class ConfigManager:
             self.save_config(config)
 
     def delete_account(self, account_name: str) -> None:
-        """Delete an account and any role assignments using it.
+        """Delete an account and all settings referencing it.
+
+        This cleans up:
+        - The account entry itself
+        - Role assignments referencing the account
+        - Mock settings (remaining_usage, run_duration, session_reset_time)
+        - verification_agent if it points to this account
+        - action_settings entries with target_account pointing to this account
 
         Args:
             account_name: Account name to delete
@@ -654,6 +665,25 @@ class ConfigManager:
             roles_to_clear = [role for role, acct in config["role_assignments"].items() if acct == account_name]
             for role in roles_to_clear:
                 del config["role_assignments"][role]
+
+        # Remove mock settings for this account
+        if "mock_remaining_usage" in config:
+            config["mock_remaining_usage"].pop(account_name, None)
+        if "mock_run_duration_seconds" in config:
+            config["mock_run_duration_seconds"].pop(account_name, None)
+        if "mock_session_reset_time" in config:
+            config["mock_session_reset_time"].pop(account_name, None)
+
+        # Clear verification_agent if it points to the deleted account
+        if config.get("verification_agent") == account_name:
+            del config["verification_agent"]
+
+        # Remove action_settings entries that reference this account as target_account
+        if "action_settings" in config:
+            config["action_settings"] = [
+                s for s in config["action_settings"]
+                if s.get("target_account") != account_name
+            ]
 
         self.save_config(config)
 
@@ -791,6 +821,30 @@ class ConfigManager:
             raise ValueError("cleanup_days must be at least 1")
         config = self.load_config()
         config["cleanup_days"] = days
+        self.save_config(config)
+
+    def get_local_endpoint(self) -> str:
+        """Get the base URL of the local OpenAI-compatible model server.
+
+        Returns:
+            Endpoint URL (default http://localhost:8000)
+        """
+        config = self.load_config()
+        return config.get("local_endpoint", DEFAULT_LOCAL_ENDPOINT)
+
+    def set_local_endpoint(self, endpoint: str) -> None:
+        """Set the base URL of the local OpenAI-compatible model server.
+
+        Args:
+            endpoint: Base URL or host:port, e.g. http://localhost:8000 or localhost:8000
+        """
+        endpoint = endpoint.strip().rstrip("/")
+        if not endpoint:
+            raise ValueError("local_endpoint must not be empty")
+        if not endpoint.startswith(("http://", "https://")):
+            endpoint = f"http://{endpoint}"
+        config = self.load_config()
+        config["local_endpoint"] = endpoint
         self.save_config(config)
 
     def get_ui_mode(self) -> str:

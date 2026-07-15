@@ -28,6 +28,7 @@ UI: React (ui/) or app.py (CLI), both use server API
 | OpenAICodexProvider | OpenAI Codex CLI. Isolated HOME per account, reasoning effort levels. |
 | GeminiCodeAssistProvider | Google Gemini CLI in YOLO mode. |
 | QwenCodeProvider | Alibaba Qwen CLI. Stream-json output like Claude. |
+| LocalProvider | Local OpenAI-compatible server (llama.cpp, vLLM, Ollama) driven through the Qwen CLI. Endpoint from `local_endpoint` config (default http://localhost:8000). |
 | MistralVibeProvider | Mistral Vibe CLI. |
 | MockProvider | Test provider simulating agent behavior with ANSI output. |
 

@@ -421,6 +421,47 @@ class TestGitWorktreeManager:
         assert "uncommitted.txt" in names
         assert "committed.txt" in names
 
+    def test_diff_stats_count_untracked_files(self, git_repo):
+        """An agent-written untracked file must count in the numeric diff stats.
+
+        Regression: the UI reported "0 files changed" (and suggested the changes
+        were already merged) when the only change was a new untracked file,
+        because stats were parsed from `git diff --stat`, which ignores
+        untracked files.
+        """
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7e"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "summary.md").write_text("line one\nline two\n")
+
+        files_changed, insertions, deletions = mgr.get_diff_stats(task_id)
+        assert files_changed == 1
+        assert insertions == 2
+        assert deletions == 0
+
+    def test_diff_stats_combine_tracked_and_untracked(self, git_repo):
+        """Stats cover modified tracked files plus new untracked files."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7f"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "README.md").write_text("# Test Repository\nExtra line\n")
+        (worktree_path / "new.txt").write_text("new\n")
+
+        files_changed, insertions, deletions = mgr.get_diff_stats(task_id)
+        assert files_changed == 2
+        assert insertions == 2
+        assert deletions == 0
+
+    def test_diff_stats_empty_when_no_changes(self, git_repo):
+        """A clean worktree reports zero stats."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7g"
+
+        mgr.create_worktree(task_id)
+        assert mgr.get_diff_stats(task_id) == (0, 0, 0)
+
     def test_parsed_diff_can_compare_against_target_branch_tip(self, git_repo):
         """Comparing against a target branch should only show worktree-side changes."""
         mgr = GitWorktreeManager(git_repo)

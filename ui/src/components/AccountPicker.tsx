@@ -11,6 +11,12 @@ interface Props {
   placeholder?: string;
   /** Whether to allow "None" option (not auto-selecting) */
   allowNone?: boolean;
+  /**
+   * Whether to auto-select a default account on mount. Off when the parent
+   * already drives the selection (e.g. the coding agent, which is seeded from
+   * the session's own agent) so this picker can't clobber that choice.
+   */
+  autoSelect?: boolean;
 }
 
 export function AccountPicker({
@@ -20,6 +26,7 @@ export function AccountPicker({
   disabled = false,
   placeholder = "Select an account...",
   allowNone = false,
+  autoSelect = true,
 }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const didAutoSelect = useRef(false);
@@ -31,8 +38,8 @@ export function AccountPicker({
       .then((r) => {
         setAccounts(r.accounts);
         // Auto-select: prefer CODING role, then first ready account
-        // Skip auto-select if allowNone is true (e.g., for optional verification agent)
-        if (!allowNone && !didAutoSelect.current && r.accounts.length > 0) {
+        // Skip when allowNone (optional pickers) or when the parent owns the selection.
+        if (autoSelect && !allowNone && !didAutoSelect.current && r.accounts.length > 0) {
           didAutoSelect.current = true;
           const coding = r.accounts.find((a) => a.ready && a.role === "CODING");
           const ready = coding ?? r.accounts.find((a) => a.ready);
@@ -40,7 +47,7 @@ export function AccountPicker({
         }
       })
       .catch(() => setAccounts([]));
-  }, [api, allowNone]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [api, allowNone, autoSelect]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <select

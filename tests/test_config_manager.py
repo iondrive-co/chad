@@ -597,6 +597,82 @@ class TestConfigManager:
 
         mgr.delete_account("nonexistent")
 
+    def test_delete_account_clears_all_associated_settings(self, tmp_path):
+        """delete_account should clean up all settings referencing the account.
+
+        This includes:
+        - mock_remaining_usage
+        - mock_run_duration_seconds
+        - mock_session_reset_time
+        - verification_agent (if it points to the deleted account)
+        - action_settings with target_account pointing to the deleted account
+        """
+        import base64
+        import bcrypt
+
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+        password = "testpassword"
+
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        # Create two accounts
+        mgr.store_account("to-delete", "mock", "key1", password)
+        mgr.store_account("keep", "mock", "key2", password)
+
+        # Set up all account-specific settings for the account to delete
+        mgr.set_mock_remaining_usage("to-delete", 0.2)
+        mgr.set_mock_run_duration_seconds("to-delete", 120)
+        mgr.set_mock_session_reset_time("to-delete", "2025-01-01T00:00:00Z")
+        mgr.set_verification_agent("to-delete")
+        mgr.set_action_settings([
+            {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "to-delete"},
+            {"event": "weekly_usage", "threshold": 80, "action": "switch_provider", "target_account": "keep"},
+        ])
+
+        # Also set settings for the "keep" account
+        mgr.set_mock_remaining_usage("keep", 0.8)
+        mgr.set_mock_run_duration_seconds("keep", 60)
+        mgr.set_mock_session_reset_time("keep", "2025-06-01T00:00:00Z")
+
+        # Verify settings are set before deletion
+        assert mgr.get_mock_remaining_usage("to-delete") == 0.2
+        assert mgr.get_mock_run_duration_seconds("to-delete") == 120
+        assert mgr.get_mock_session_reset_time("to-delete") == "2025-01-01T00:00:00Z"
+        assert mgr.get_verification_agent() == "to-delete"
+        action_settings = mgr.get_action_settings()
+        assert any(s.get("target_account") == "to-delete" for s in action_settings)
+
+        # Delete the account
+        mgr.delete_account("to-delete")
+
+        # Verify account is gone
+        assert not mgr.has_account("to-delete")
+
+        # Verify mock settings are cleaned up (should return defaults)
+        assert mgr.get_mock_remaining_usage("to-delete") == 0.5  # default
+        assert mgr.get_mock_run_duration_seconds("to-delete") == 0  # default
+        assert mgr.get_mock_session_reset_time("to-delete") is None  # default
+
+        # Verify verification_agent is cleared when it points to deleted account
+        assert mgr.get_verification_agent() is None
+
+        # Verify action_settings entries with target_account are removed
+        action_settings = mgr.get_action_settings()
+        deleted_refs = [s for s in action_settings if s.get("target_account") == "to-delete"]
+        assert len(deleted_refs) == 0, f"Found stale refs to deleted account: {deleted_refs}"
+
+        # Verify settings for 'keep' account are untouched
+        assert mgr.has_account("keep")
+        assert mgr.get_mock_remaining_usage("keep") == 0.8
+        assert mgr.get_mock_run_duration_seconds("keep") == 60
+        assert mgr.get_mock_session_reset_time("keep") == "2025-06-01T00:00:00Z"
+        # The action_setting for 'keep' should still exist
+        keep_refs = [s for s in action_settings if s.get("target_account") == "keep"]
+        assert len(keep_refs) == 1
+
     def test_save_and_load_preferences(self, tmp_path):
         """Test saving and loading user preferences."""
         config_path = tmp_path / "test.conf"
@@ -1223,6 +1299,7 @@ class TestConfigUIParity:
         "slack_enabled",
         "slack_bot_token",
         "slack_channel",
+        "local_endpoint",
     }
 
     # Keys that are only in web UI (makes sense for web-only settings)
@@ -1269,6 +1346,7 @@ class TestConfigUIParity:
         "slack_enabled": ["slack_enabled", "slack_enable", "slack_settings", "slack integration"],
         "slack_bot_token": ["slack_bot_token", "slack_token", "bot_token", "slack_settings"],
         "slack_channel": ["slack_channel", "slack_settings", "channel id"],
+        "local_endpoint": ["local_endpoint", "local-endpoint", "local model endpoint"],
     }
 
     def test_cli_ui_exposes_all_required_keys(self):

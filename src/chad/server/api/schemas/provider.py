@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"]
+ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"]
 RoleType = Literal["CODING", "VERIFICATION"]
 
 
@@ -15,6 +15,10 @@ class ProviderInfo(BaseModel):
     name: str = Field(description="Human-readable provider name")
     description: str = Field(description="Provider description")
     supports_reasoning: bool = Field(default=False, description="Whether provider supports reasoning levels")
+    reasoning_levels: list[str] = Field(
+        default_factory=list,
+        description="Reasoning effort levels this provider supports (empty if none)",
+    )
 
 
 class ProviderListResponse(BaseModel):
@@ -68,6 +72,10 @@ class AccountUsage(BaseModel):
     weekly_reset_eta: str | None = Field(
         default=None, description="Human-readable time until weekly reset"
     )
+    usage_as_of: str | None = Field(
+        default=None,
+        description="ISO-8601 time the usage reading was sampled, for staleness display",
+    )
 
 
 class AccountModelUpdate(BaseModel):
@@ -108,7 +116,7 @@ class AccountLoginRequest(BaseModel):
     """Request model for logging in / authorizing an account.
 
     For OAuth providers the api_key is ignored (a browser flow is launched).
-    For API-key providers (mistral, opencode) the key is required.
+    For API-key providers (mistral) the key is required.
     """
 
     api_key: str = Field(default="", description="API key for providers that require one")

@@ -137,6 +137,20 @@ class FileDiff:
     is_binary: bool = False
 
 
+def diff_stats_from_files(files: list["FileDiff"]) -> tuple[int, int, int]:
+    """Compute (files_changed, insertions, deletions) from parsed diffs."""
+    insertions = 0
+    deletions = 0
+    for file_diff in files:
+        for hunk in file_diff.hunks:
+            for line in hunk.lines:
+                if line.line_type == "added":
+                    insertions += 1
+                elif line.line_type == "removed":
+                    deletions += 1
+    return len(files), insertions, deletions
+
+
 class GitWorktreeManager:
     """Manages git worktrees for Chad tasks."""
 
@@ -426,6 +440,20 @@ class GitWorktreeManager:
         target = self._diff_target(task_id, base_commit, compare_branch)
         result = self._run_git("diff", target, cwd=worktree_path, check=False)
         return result.stdout.strip() or "No changes"
+
+    def get_diff_stats(
+        self,
+        task_id: str,
+        base_commit: str | None = None,
+        compare_branch: str | None = None,
+    ) -> tuple[int, int, int]:
+        """Return (files_changed, insertions, deletions) for all worktree changes.
+
+        Computed from the parsed diff so untracked files count — `git diff
+        --stat` alone ignores them, which previously made the UI report
+        "0 files changed" when the only change was a newly written file.
+        """
+        return diff_stats_from_files(self.get_parsed_diff(task_id, base_commit, compare_branch))
 
     def get_parsed_diff(
         self,

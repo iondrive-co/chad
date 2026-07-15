@@ -22,6 +22,7 @@ from chad.server.api.schemas import (
 )
 from chad.server.state import get_config_manager, get_model_catalog
 from chad.util import provider_login
+from chad.util.providers import get_reasoning_levels
 
 router = APIRouter()
 
@@ -57,51 +58,30 @@ def _account_to_response(
 
 @router.get("/providers", response_model=ProviderListResponse)
 async def list_providers() -> ProviderListResponse:
-    """List all supported provider types."""
-    providers = [
-        ProviderInfo(
-            type="anthropic",
-            name="Anthropic (Claude Code)",
-            description="Claude AI models via Claude Code CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="openai",
-            name="OpenAI (Codex)",
-            description="OpenAI models via Codex CLI",
-            supports_reasoning=True,
-        ),
-        ProviderInfo(
-            type="gemini",
-            name="Google (Gemini)",
-            description="Google Gemini models",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="qwen",
-            name="Alibaba (Qwen)",
-            description="Qwen models via Qwen Code CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="mistral",
-            name="Mistral (Vibe)",
-            description="Mistral models via Vibe CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="opencode",
-            name="OpenCode",
-            description="OpenCode models via OpenCode CLI",
-            supports_reasoning=False,
-        ),
-        ProviderInfo(
-            type="kimi",
-            name="Moonshot (Kimi Code)",
-            description="Kimi models via Kimi Code CLI",
-            supports_reasoning=False,
-        ),
+    """List all supported provider types.
+
+    Each provider reports the reasoning effort levels it supports so the UI can
+    render a selector with the right graduations (some providers have none).
+    """
+    provider_meta = [
+        ("anthropic", "Anthropic (Claude Code)", "Claude AI models via Claude Code CLI"),
+        ("openai", "OpenAI (Codex)", "OpenAI models via Codex CLI"),
+        ("gemini", "Google (Gemini)", "Google Gemini models"),
+        ("qwen", "Alibaba (Qwen)", "Qwen models via Qwen Code CLI"),
+        ("local", "Local (OpenAI-compatible)", "Local model server (llama.cpp, vLLM, ...) via Qwen Code CLI"),
+        ("mistral", "Mistral (Vibe)", "Mistral models via Vibe CLI"),
+        ("kimi", "Moonshot (Kimi Code)", "Kimi models via Kimi Code CLI"),
     ]
+    providers = []
+    for provider_type, name, description in provider_meta:
+        levels = get_reasoning_levels(provider_type)
+        providers.append(ProviderInfo(
+            type=provider_type,
+            name=name,
+            description=description,
+            supports_reasoning=bool(levels),
+            reasoning_levels=levels,
+        ))
     return ProviderListResponse(providers=providers)
 
 
@@ -183,7 +163,9 @@ async def login_account(name: str, request: AccountLoginRequest) -> AccountLogin
         daemon=True,
     ).start()
 
-    if provider in provider_login.API_KEY_PROVIDERS:
+    if provider == "local":
+        message = "Installing Qwen Code CLI…"
+    elif provider in provider_login.API_KEY_PROVIDERS:
         message = "Authorizing…"
     elif provider in provider_login.TTY_LOGIN_PROVIDERS:
         message = "Login started — finish signing in in the terminal window that opened."
@@ -302,6 +284,7 @@ async def get_account_usage(name: str) -> AccountUsage:
     weekly_pct = provider.get_weekly_usage_percentage()
     session_eta = provider.get_session_reset_eta() if hasattr(provider, "get_session_reset_eta") else None
     weekly_eta = provider.get_weekly_reset_eta() if hasattr(provider, "get_weekly_reset_eta") else None
+    usage_as_of = provider.get_usage_as_of() if hasattr(provider, "get_usage_as_of") else None
 
     return AccountUsage(
         account_name=name,
@@ -310,6 +293,7 @@ async def get_account_usage(name: str) -> AccountUsage:
         weekly_usage_pct=weekly_pct,
         session_reset_eta=session_eta,
         weekly_reset_eta=weekly_eta,
+        usage_as_of=usage_as_of,
     )
 
 

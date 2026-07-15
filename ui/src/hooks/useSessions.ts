@@ -10,6 +10,9 @@ const POLL_INTERVAL_MS = 3000;
 export function useSessions(api: ChadAPI | null, version: number) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
+  // True once at least one session-list fetch has completed successfully, so
+  // callers can tell an "empty list" apart from "not loaded yet".
+  const [loaded, setLoaded] = useState(false);
   const apiRef = useRef(api);
   apiRef.current = api;
 
@@ -19,6 +22,7 @@ export function useSessions(api: ChadAPI | null, version: number) {
     try {
       const result = await apiRef.current.listSessions();
       setSessions(result.sessions);
+      setLoaded(true);
     } catch {
       // Silently handle — connection may have dropped
     } finally {
@@ -61,5 +65,5 @@ export function useSessions(api: ChadAPI | null, version: number) {
     [refresh],
   );
 
-  return { sessions, loading, refresh, createSession, deleteSession };
+  return { sessions, loading, loaded, refresh, createSession, deleteSession };
 }

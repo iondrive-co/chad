@@ -212,3 +212,93 @@ class TestMilestoneTitles:
         assert "verification_llm" in titles
         assert "Automated" in titles["verification_automated"]
         assert "LLM" in titles["verification_llm"]
+
+
+class TestInfoOnlyVerification:
+    """Info-only tasks (no file changes) must not run automated lint/tests.
+
+    Running flake8/tests on unchanged code punishes the agent for pre-existing
+    project issues and wastes a verification cycle.
+    """
+
+    INFO_ONLY_OUTPUT = (
+        "The project is a multi-provider AI coding assistant.\n"
+        "```json\n"
+        '{"change_summary": "The project is a multi-provider AI coding assistant", '
+        '"files_changed": "info_only", "completion_status": "success"}\n'
+        "```\n"
+    )
+
+    def test_info_only_skips_automated_verification(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from chad.server.services import verification
+
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        def fake_run_phase(**kwargs):
+            return 0, '{"passed": true, "summary": "Answer is accurate"}'
+
+        passed, feedback = verification.run_verification(
+            project_path="/tmp/test",
+            coding_output=self.INFO_ONLY_OUTPUT,
+            task_description="Summarise this project in one sentence",
+            verification_account="test-account",
+            emit=emit_fn,
+            run_phase_fn=fake_run_phase,
+            task=MagicMock(),
+            session=MagicMock(),
+            worktree_path="/tmp/test",
+        )
+
+        assert passed is True
+        automated = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "verification_automated"
+        ]
+        assert automated == [], "automated lint must not run for info-only tasks"
+        llm = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "verification_llm"
+        ]
+        assert len(llm) == 1, "LLM verification should still review the answer"
+
+    def test_code_changes_still_run_automated_verification(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from chad.server.services import verification
+        from chad.util.verification import tools as verify_tools
+
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        monkeypatch.setattr(verify_tools, "verify", lambda **kwargs: {"success": True})
+
+        def fake_run_phase(**kwargs):
+            return 0, '{"passed": true, "summary": "All checks passed"}'
+
+        verification.run_verification(
+            project_path="/tmp/test",
+            coding_output=(
+                "```json\n"
+                '{"change_summary": "Fixed the bug", "files_changed": ["src/a.py"], '
+                '"completion_status": "success"}\n'
+                "```\n"
+            ),
+            task_description="Fix the bug",
+            verification_account="test-account",
+            emit=emit_fn,
+            run_phase_fn=fake_run_phase,
+            task=MagicMock(),
+            session=MagicMock(),
+            worktree_path="/tmp/test",
+        )
+
+        automated = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "verification_automated"
+        ]
+        assert len(automated) == 1

@@ -38,17 +38,23 @@ CODING_AGENT_PROMPT = """\
 Do not run `git commit` or `git add`. Leave all changes as uncommitted files in the working tree so the orchestration
 system can handle committing and merging.
 
-Emit progress frequently:
-- While exploring or coding, write an `EXPLORATION_RESULT:` line at least every 20 seconds. If you have a new finding, state it. If not, emit a heartbeat like `EXPLORATION_RESULT: still investigating X` that names what you are checking next.
+Report discoveries as you work:
+- When you learn something significant about the codebase or the task, emit one line: `EXPLORATION_RESULT: <the finding>`.
+- State what you learned, not what you are about to do. Never mark narration like "Let me read X" or "Now I'll check Y" as an EXPLORATION_RESULT — write narration as plain prose.
 - Flush each `EXPLORATION_RESULT:` as soon as it is ready (do not batch them).
 - Example: `EXPLORATION_RESULT: The authentication logic is in src/auth.py, using JWT tokens with a 24h expiry`
 
 Then complete these steps:
 
-1. Write test(s) that should fail until the fix/feature is implemented
-2. Make the changes, adjusting tests as needed. If no changes are required, skip to step 4.
-3. Run verification commands (lint and tests) and fix ALL failures.
-4. End your response with a JSON summary:
+1. Decide whether this task requires changing files. If it does NOT (a question, summary, or other \
+information request): explore only as much as needed to answer, then skip directly to step 5 with \
+files_changed set to "info_only". Do not write tests, do not install packages, and do not run verification \
+commands for information requests.
+2. Write test(s) that should fail until the fix/feature is implemented
+3. Make the changes, adjusting tests as needed.
+4. Run verification commands (lint and tests) and fix ALL failures. Report results honestly: if you could \
+not run verification, say so and use completion_status "partial" — never claim success you did not observe.
+5. End your response with a JSON summary:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
@@ -57,6 +63,7 @@ Then complete these steps:
 }}
 ```
 Fields: change_summary (required), files_changed (required, or "info_only"), completion_status (success/partial/blocked/error), hypothesis (optional, for bugs)
+For information requests, change_summary MUST be the answer itself (the information the user asked for), not a description of having answered.
 """
 
 
@@ -782,6 +789,9 @@ Most recent output from your previous attempt:
 {previous_output}
 ---
 
+If the task is an information request (no file changes needed), skip directly to the JSON summary with
+files_changed set to "info_only" and change_summary set to the answer itself. Otherwise:
+
 1. Write test(s) that should fail until the fix/feature is implemented
 2. Make the changes, adjusting tests as needed
 3. Run verification commands (lint and tests)
@@ -916,7 +926,8 @@ summary block with all required fields:
 ```
 
 Required fields:
-- change_summary: What you accomplished
+- change_summary: What you accomplished. For information requests this MUST be the answer itself, \
+not a description of having answered.
 - files_changed: Array of modified file paths, OR the string "info_only" if this was just an information request
 - completion_status: One of "success", "partial" (hit token/context limit), "blocked" (needs user input), or "error"
 

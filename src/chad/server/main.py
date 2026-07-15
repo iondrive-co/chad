@@ -55,6 +55,24 @@ def _repo_ui_paths(project_root: Path) -> tuple[Path | None, Path | None]:
     return None, None
 
 
+def _repo_ui_is_stale(project_root: Path) -> bool:
+    """Return True when ``ui/dist`` exists but is older than its source.
+
+    A git checkout/merge can leave a built ``ui/dist`` whose mtime predates a
+    later source change. Without this check the resolver would serve that stale
+    bundle forever (never triggering the autobuild, which only fired when
+    ``ui/dist`` was absent), so new UI never reached the browser no matter how
+    many times chad restarted.
+    """
+    ui_src = project_root / "ui" / "src"
+    ui_dist = project_root / "ui" / "dist" / "index.html"
+    if not ui_src.is_dir() or not ui_dist.is_file():
+        return False
+    from chad.util.ui_build import _is_stale
+
+    return _is_stale(ui_src, ui_dist)
+
+
 def _package_ui_paths() -> tuple[Path | None, Path | None]:
     """Return packaged UI assets bundled in the Python package if present."""
     try:
@@ -85,6 +103,12 @@ def _autobuild_ui_from_source(project_root: Path) -> None:
 def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
     """Return the UI index and assets directory if available."""
     project_root = _source_project_root()
+
+    # Rebuild a stale source-tree bundle before serving it, otherwise an
+    # out-of-date ui/dist (e.g. left by a git checkout/merge) would be served
+    # forever and source changes never reach the browser.
+    if _repo_ui_is_stale(project_root):
+        _autobuild_ui_from_source(project_root)
 
     repo_index, repo_assets = _repo_ui_paths(project_root)
     if repo_index:

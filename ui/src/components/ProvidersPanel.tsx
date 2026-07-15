@@ -12,15 +12,16 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [usageData, setUsageData] = useState<Record<string, AccountUsage>>({});
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("anthropic");
+  const [localEndpoint, setLocalEndpoint] = useState("http://localhost:8000");
   const [adding, setAdding] = useState(false);
   const [loggingIn, setLoggingIn] = useState<string | null>(null);
   const [loginKeys, setLoginKeys] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelChoices, setModelChoices] = useState<string[]>([]);
+  const [refreshingUsage, setRefreshingUsage] = useState<string | null>(null);
 
-  const isApiKeyProvider = (provider: string) =>
-    provider === "mistral" || provider === "opencode";
+  const isApiKeyProvider = (provider: string) => provider === "mistral";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -46,6 +47,20 @@ export function ProvidersPanel({ api, connected }: Props) {
     setUsageData(prev => ({...prev, ...newUsageData}));
   }, [api]);
 
+  // Re-read usage for one account (picks up snapshots written since load — e.g.
+  // after a run in the standalone CLI on the same account).
+  const refreshUsageLive = useCallback(async (name: string) => {
+    setRefreshingUsage(name);
+    try {
+      const usage = await api.getAccountUsage(name);
+      setUsageData(prev => ({ ...prev, [name]: usage }));
+    } catch {
+      flash("Could not refresh usage");
+    } finally {
+      setRefreshingUsage(null);
+    }
+  }, [api, flash]);
+
   const refresh = useCallback(async () => {
     try {
       const [a, p] = await Promise.all([api.listAccounts(), api.listProviders()]);
@@ -57,6 +72,10 @@ export function ProvidersPanel({ api, connected }: Props) {
   }, [api, refreshUsage]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() => {
+    api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
+  }, [api]);
 
   const pollReady = useCallback(async (name: string) => {
     // Install + browser OAuth complete out-of-band; poll until ready.
@@ -103,6 +122,10 @@ export function ProvidersPanel({ api, connected }: Props) {
     setAdding(true);
     setStatus(null);
     try {
+      if (provider === "local") {
+        const r = await api.setLocalEndpoint(localEndpoint);
+        setLocalEndpoint(r.endpoint);
+      }
       await api.createAccount({ name, provider: provider as Account["provider"] });
       setNewName("");
       flash(`Added ${name}`);
@@ -118,7 +141,7 @@ export function ProvidersPanel({ api, connected }: Props) {
     if (!isApiKeyProvider(provider)) {
       await handleLogin(name);
     }
-  }, [api, newName, newType, refresh, flash, handleLogin]);
+  }, [api, newName, newType, localEndpoint, refresh, flash, handleLogin]);
 
   const handleDelete = useCallback(async (name: string) => {
     try {
@@ -177,6 +200,20 @@ export function ProvidersPanel({ api, connected }: Props) {
     let text = `${filled}${empty} ${pct.toFixed(0)}%`;
     if (eta) text += ` (resets ${eta})`;
     return text;
+  };
+
+  // Relative age of a usage snapshot, e.g. "3 days ago". Returns null if unknown.
+  const formatAsOf = (asOf: string | null | undefined): string | null => {
+    if (!asOf) return null;
+    const ms = Date.now() - new Date(asOf).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return "just now";
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   };
 
   const dis = !connected;
@@ -263,7 +300,7 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </select>
                 </div>
 
-                {providers.find((p) => p.type === a.provider)?.supports_reasoning && (
+                {(providers.find((p) => p.type === a.provider)?.reasoning_levels ?? []).length > 0 && (
                   <div className="account-field">
                     <span className="field-label">Reasoning:</span>
                     <select
@@ -272,9 +309,11 @@ export function ProvidersPanel({ api, connected }: Props) {
                       disabled={dis}
                     >
                       <option value="">Default</option>
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
+                      {(providers.find((p) => p.type === a.provider)?.reasoning_levels ?? []).map((level) => (
+                        <option key={level} value={level}>
+                          {level.charAt(0).toUpperCase() + level.slice(1)}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 )}
@@ -294,6 +333,18 @@ export function ProvidersPanel({ api, connected }: Props) {
                         <span className="usage-bar">{formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}</span>
                       </div>
                     )}
+                    <div className="usage-row">
+                      {formatAsOf(usage.usage_as_of) && (
+                        <span className="usage-as-of">as of {formatAsOf(usage.usage_as_of)}</span>
+                      )}
+                      <button
+                        className="link-btn"
+                        onClick={() => refreshUsageLive(a.name)}
+                        disabled={dis || refreshingUsage === a.name}
+                      >
+                        {refreshingUsage === a.name ? "Refreshing…" : "Refresh"}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -318,6 +369,16 @@ export function ProvidersPanel({ api, connected }: Props) {
               <option key={p.type} value={p.type}>{p.name}</option>
             ))}
           </select>
+          {newType === "local" && (
+            <input
+              type="text"
+              value={localEndpoint}
+              onChange={(e) => setLocalEndpoint(e.target.value)}
+              placeholder="http://localhost:8000"
+              title="Host and port of the local OpenAI-compatible model server"
+              disabled={dis}
+            />
+          )}
           <button onClick={handleAdd} disabled={adding || !newName.trim() || dis}>
             {adding ? "Adding..." : "+ Add"}
           </button>

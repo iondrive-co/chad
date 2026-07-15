@@ -13,6 +13,7 @@ from pathlib import Path
 
 # File paths
 UI_DIR = Path(__file__).parent.parent / "ui" / "src"
+APP_FILE = UI_DIR / "App.tsx"
 CHATVIEW_FILE = UI_DIR / "components" / "ChatView.tsx"
 CSS_FILE = UI_DIR / "styles" / "main.css"
 TYPES_FILE = Path(__file__).parent.parent / "client" / "src" / "types.ts"
@@ -307,4 +308,54 @@ class TestVerificationAgentPicker:
         disabled_match = re.search(r'\s+disabled=\{', picker_element)
         assert disabled_match is None, (
             "Verification picker should not have disabled prop - it should always be enabled"
+        )
+
+
+class TestProjectSelectorNewProject:
+    """Verify the chat project selector can create and select a new project path."""
+
+    def test_chatview_has_new_project_entry_form(self):
+        """Selecting New project should reveal an editable project path form."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "NEW_PROJECT_VALUE" in content, (
+            "ChatView should have a sentinel option for starting a new project"
+        )
+        assert "New project" in content, (
+            "Project selector should include a New project option"
+        )
+        assert "newProjectPath" in content, (
+            "ChatView should track the path being entered for a new project"
+        )
+        assert 'className="project-selector-new"' in content, (
+            "ChatView should render an inline form for entering the new project path"
+        )
+
+    def test_chatview_persists_new_project_and_refreshes_parent(self):
+        """The inline path form should save project settings and refresh project options."""
+        chat_content = CHATVIEW_FILE.read_text()
+        app_content = APP_FILE.read_text()
+
+        assert "onProjectsChange" in chat_content, (
+            "ChatView should accept a callback for refreshing parent project state"
+        )
+        assert "api.setProjectSettings({ project_path: path })" in chat_content, (
+            "ChatView should persist the typed path as a configured project"
+        )
+        assert "await onProjectsChange?.()" in chat_content, (
+            "ChatView should refresh configured projects after adding one"
+        )
+        assert "onProjectsChange={loadProjects}" in app_content, (
+            "App should wire ChatView project additions back to the project list loader"
+        )
+
+    def test_project_selector_new_project_css_exists(self):
+        """The new-project form should have stable layout styling."""
+        content = CSS_FILE.read_text()
+
+        assert ".project-selector-new" in content, (
+            "CSS should style the inline new-project form"
+        )
+        assert ".project-selector-error" in content, (
+            "CSS should style validation errors without layout overlap"
         )

@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, Fragment, useLayoutEffect } from "react";
+import type { Session } from "chad-client";
 import { ChadAPI } from "chad-client";
 import type { ProjectSettings } from "chad-client";
 import { ChatView } from "./components/ChatView.tsx";
@@ -46,23 +47,109 @@ export { parseConnectionInput };
 
 const DEFAULT_CONNECTION = "127.0.0.1:3184";
 
+// Keys for persisting which session tabs are open across browser refreshes.
+// Without this, opened tabs (including unsaved "WIP" sessions that exist on the
+// server but have no started task yet) are lost on reload because they only
+// live in in-memory React state.
+const STORAGE_OPENED_SESSIONS = "chad.openedSessionIds";
+const STORAGE_SELECTED_SESSION = "chad.selectedSession";
+const STORAGE_ACTIVE_TAB = "chad.activeTab";
+
+function loadOpenedSessionIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_OPENED_SESSIONS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((x): x is string => typeof x === "string"));
+    }
+  } catch {
+    // ignore malformed/unavailable storage
+  }
+  return new Set();
+}
+
+function loadSelectedSession(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_SELECTED_SESSION) || null;
+  } catch {
+    return null;
+  }
+}
+
+function loadActiveTab(): Tab {
+  try {
+    const raw = localStorage.getItem(STORAGE_ACTIVE_TAB);
+    if (raw === "chat" || raw === "projects" || raw === "providers" || raw === "settings") {
+      return raw;
+    }
+  } catch {
+    // ignore
+  }
+  return "projects";
+}
+
+// Get the short display name for a project path (just the folder name)
+function getProjectDisplayName(path: string | null): string {
+  if (!path) return "No Project";
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || path;
+}
+
+// Group sessions by project_path, maintaining order (most recent first within each group)
+function groupSessionsByProject(
+  sessions: Session[],
+  openedIds: Set<string>,
+): Array<{ project: string | null; displayName: string; sessions: Session[] }> {
+  const opened = sessions.filter((s) => openedIds.has(s.id));
+  // Reverse to show most recent first
+  const reversed = [...opened].reverse();
+
+  // Group by project_path, preserving first-seen order
+  const groupOrder: (string | null)[] = [];
+  const groupMap = new Map<string | null, Session[]>();
+
+  for (const s of reversed) {
+    const key = s.project_path;
+    if (!groupMap.has(key)) {
+      groupOrder.push(key);
+      groupMap.set(key, []);
+    }
+    groupMap.get(key)!.push(s);
+  }
+
+  return groupOrder.map((project) => ({
+    project,
+    displayName: getProjectDisplayName(project),
+    sessions: groupMap.get(project)!,
+  }));
+}
+
 export function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [connectionInput, setConnectionInput] = useState(DEFAULT_CONNECTION);
   const [token, setToken] = useState<string | undefined>(undefined);
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
-  const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("projects");
+  // Restore the open session tabs / selection / active tab from a prior page load
+  // so a browser refresh doesn't drop the user's open (incl. WIP) sessions.
+  const [selectedSession, setSelectedSession] = useState<string | null>(loadSelectedSession);
+  const [tab, setTab] = useState<Tab>(loadActiveTab);
   const [sessionVersion, setSessionVersion] = useState(0);
+  // Collapsible menu state for Projects/Providers/Settings
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const chadBtnRef = useRef<HTMLButtonElement>(null);
   // Track the project selected for the current session (set when opening from ProjectsPanel)
   const [sessionProjectPath, setSessionProjectPath] = useState("");
   // All configured projects, loaded on connect
   const [projects, setProjects] = useState<ProjectSettings[]>([]);
   // Track which sessions have been opened in this UI instance (only these show as tabs)
-  const [openedSessionIds, setOpenedSessionIds] = useState<Set<string>>(new Set());
+  const [openedSessionIds, setOpenedSessionIds] = useState<Set<string>>(loadOpenedSessionIds);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
+  // Ensures restored tabs are reconciled against the server's session list only once.
+  const reconciledRef = useRef(false);
 
   // Load projects when connected
   const loadProjects = useCallback(async () => {
@@ -108,10 +195,51 @@ export function App() {
     if (connected) loadProjects();
   }, [connected, loadProjects]);
 
-  const { sessions, loading: sessionsLoading, createSession, deleteSession } = useSessions(
+  const { sessions, loading: sessionsLoading, loaded: sessionsLoaded, createSession, deleteSession } = useSessions(
     connected ? api : null,
     sessionVersion,
   );
+
+  // Persist open tabs / selection / active tab so they survive a browser refresh.
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_OPENED_SESSIONS, JSON.stringify([...openedSessionIds]));
+    } catch { /* ignore unavailable storage */ }
+  }, [openedSessionIds]);
+
+  useEffect(() => {
+    try {
+      if (selectedSession) localStorage.setItem(STORAGE_SELECTED_SESSION, selectedSession);
+      else localStorage.removeItem(STORAGE_SELECTED_SESSION);
+    } catch { /* ignore */ }
+  }, [selectedSession]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_ACTIVE_TAB, tab);
+    } catch { /* ignore */ }
+  }, [tab]);
+
+  // Once the real session list has loaded, drop any restored tabs/selection that
+  // no longer exist on the server (e.g. deleted, or lost to a server restart).
+  // Runs once so it never fights a freshly opened tab on a later poll.
+  useEffect(() => {
+    if (!connected || !sessionsLoaded || reconciledRef.current) return;
+    reconciledRef.current = true;
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+    setOpenedSessionIds((prev) => {
+      const next = new Set([...prev].filter((id) => byId.has(id)));
+      // Keep the restored selection visible as a tab even if storage was inconsistent.
+      if (selectedSession && byId.has(selectedSession)) next.add(selectedSession);
+      return next;
+    });
+    if (selectedSession && byId.has(selectedSession)) {
+      const projectPath = byId.get(selectedSession)?.project_path;
+      if (projectPath) setSessionProjectPath(projectPath);
+    } else if (selectedSession) {
+      setSelectedSession(null);
+    }
+  }, [connected, sessionsLoaded, sessions, selectedSession]);
 
   // Get selected session's active state from polled data
   const selectedSessionActive = sessions.find(s => s.id === selectedSession)?.active ?? false;
@@ -181,47 +309,90 @@ export function App() {
     setTab("chat");
   }, []);
 
+  // Close menu when clicking outside
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target as Node) &&
+        chadBtnRef.current &&
+        !chadBtnRef.current.contains(e.target as Node)
+      ) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [menuOpen]);
+
+  const handleMenuTab = (newTab: Tab) => {
+    setTab(newTab);
+    setMenuOpen(false);
+  };
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1 className={connected ? "connected" : ""}>Chad</h1>
+        <div className="chad-menu-container">
+          <button
+            ref={chadBtnRef}
+            className={`chad-btn ${connected ? "connected" : ""}`}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            Chad
+          </button>
+          {menuOpen && (
+            <div ref={menuRef} className="chad-menu">
+              <button className={tab === "projects" ? "active" : ""} onClick={() => handleMenuTab("projects")}>
+                Projects
+              </button>
+              <button className={tab === "providers" ? "active" : ""} onClick={() => handleMenuTab("providers")}>
+                Providers
+              </button>
+              <button className={tab === "settings" ? "active" : ""} onClick={() => handleMenuTab("settings")}>
+                Settings
+              </button>
+            </div>
+          )}
+        </div>
         <nav className="tabs">
-          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>
-            Projects
-          </button>
-          <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
-            Providers
-          </button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
-            Settings
-          </button>
           {connected && sessions.some(s => openedSessionIds.has(s.id)) && (
             <>
-              <span className="tab-separator" />
-              {[...sessions].filter(s => openedSessionIds.has(s.id)).reverse().map((s) => (
-                <button
-                  key={s.id}
-                  className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
-                  onClick={() => handleSelectSession(s.id)}
-                  title={s.name}
-                >
-                  <span className="session-tab-name">{s.name}</span>
-                  {s.active && !s.paused && <span className="badge running-badge">R</span>}
-                  {s.paused && <span className="badge paused-badge">P</span>}
-                  {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
-                  {s.resumable && !s.active && !s.has_changes && (
-                    <span className="badge" title={`${s.status} - resumable`}>
-                      {s.status === "completed" ? "\u2713" : "\u25CB"}
+              {groupSessionsByProject(sessions, openedSessionIds).map((group, groupIdx) => (
+                <Fragment key={group.project ?? "__no_project__"}>
+                  {groupIdx > 0 && <span className="tab-group-separator" />}
+                  <div className="session-group">
+                    <span className="session-group-header" title={group.project ?? "No project"}>
+                      {group.displayName}
                     </span>
-                  )}
-                  <span
-                    className="session-tab-close"
-                    onClick={(e) => handleDeleteSession(e, s.id)}
-                    title="Delete session"
-                  >
-                    x
-                  </span>
-                </button>
+                    {group.sessions.map((s) => (
+                      <button
+                        key={s.id}
+                        className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
+                        onClick={() => handleSelectSession(s.id)}
+                        title={s.name}
+                      >
+                        <span className="session-tab-name">{s.name}</span>
+                        {s.active && !s.paused && <span className="badge running-badge">R</span>}
+                        {s.paused && <span className="badge paused-badge">P</span>}
+                        {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
+                        {s.resumable && !s.active && !s.has_changes && (
+                          <span className="badge" title={`${s.status} - resumable`}>
+                            {s.status === "completed" ? "\u2713" : "\u25CB"}
+                          </span>
+                        )}
+                        <span
+                          className="session-tab-close"
+                          onClick={(e) => handleDeleteSession(e, s.id)}
+                          title="Delete session"
+                        >
+                          x
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </Fragment>
               ))}
             </>
           )}
@@ -253,6 +424,7 @@ export function App() {
                 api={api}
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
+                onProjectsChange={loadProjects}
                 defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}

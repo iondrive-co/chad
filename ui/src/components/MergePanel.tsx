@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import type { ChadAPI, DiffFull, MergeConflict } from "chad-client";
 import { ChadAPIError } from "chad-client";
-import { DiffViewer } from "./DiffViewer.tsx";
+import { NopDiffView } from "./NopDiffView.tsx";
 import { ConflictViewer } from "./ConflictViewer.tsx";
 
 interface Props {
@@ -12,6 +12,10 @@ interface Props {
 }
 
 type Phase = "loading" | "changes" | "merging" | "conflict" | "success" | "error";
+
+// How often to re-poll the branch list so branches created while the panel is
+// open appear in the target dropdown without reopening the panel.
+const BRANCH_REFRESH_INTERVAL_MS = 5000;
 
 export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
@@ -29,18 +33,44 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [showDiff, setShowDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshingBranches, setRefreshingBranches] = useState(false);
 
-  // Load available branches and initialize the comparison target.
+  // Fetch the list of branches available as merge targets. Does NOT touch the
+  // selected target branch, so a periodic or manual refresh never clobbers the
+  // user's current selection. Only updates `branches` when it actually changed
+  // to avoid needless re-renders on the background poll.
+  const refreshBranches = useCallback(async () => {
+    const branchData = await api.getBranches(sessionId);
+    setBranches((prev) =>
+      prev.length === branchData.branches.length && prev.every((b, i) => b === branchData.branches[i])
+        ? prev
+        : branchData.branches,
+    );
+    setDefaultBranch(branchData.default);
+    setCurrentBranch(branchData.current);
+    return branchData;
+  }, [api, sessionId]);
+
+  // Manual refresh shows a transient "Refreshing…" label; the background poll does not.
+  const handleManualRefresh = useCallback(async () => {
+    setRefreshingBranches(true);
+    try {
+      await refreshBranches();
+    } catch {
+      // Ignore transient failures; the list stays as-is.
+    } finally {
+      setRefreshingBranches(false);
+    }
+  }, [refreshBranches]);
+
+  // Initial load: branches + worktree status, and pick the default target branch.
   useEffect(() => {
     const load = async () => {
       try {
         const [branchData, worktreeStatus] = await Promise.all([
-          api.getBranches(sessionId),
+          refreshBranches(),
           api.getWorktreeStatus(sessionId),
         ]);
-        setBranches(branchData.branches);
-        setDefaultBranch(branchData.default);
-        setCurrentBranch(branchData.current);
         setWorktreeHasChanges(worktreeStatus.has_changes);
         const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
         setTargetBranch(preferredTarget);
@@ -49,8 +79,19 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         setPhase("error");
       }
     };
-    load();
-  }, [api, sessionId]);
+    void load();
+  }, [api, sessionId, refreshBranches]);
+
+  // Keep the branch list fresh: branches created after the panel opened (e.g. a
+  // new branch made in another tool) show up without reopening the panel.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refreshBranches().catch(() => {
+        // Ignore transient refresh failures; the list simply stays as-is.
+      });
+    }, BRANCH_REFRESH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [refreshBranches]);
 
   useEffect(() => {
     if (!targetBranch) {
@@ -247,6 +288,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   }
 
   // changes phase (or merging)
+  const nothingToMerge = filesChanged === 0 && insertions === 0 && deletions === 0;
   return (
     <div className="merge-panel">
       <div className="merge-header">Changes Ready to Merge</div>
@@ -257,7 +299,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {deletions > 0 && <span className="deletions">-{deletions}</span>}
       </div>
 
-      {filesChanged === 0 && insertions === 0 && deletions === 0 && worktreeHasChanges && (
+      {nothingToMerge && worktreeHasChanges && (
         <div className="error-text">
           These session changes are already present on "{targetBranch}", so there is nothing to
           merge into that branch. Choose a different target branch if you want to merge the same
@@ -273,7 +315,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {showDiff ? "Hide Changes" : "View Changes"}
       </button>
 
-      {showDiff && diff && <DiffViewer files={diff.files} />}
+      {showDiff && diff && <NopDiffView files={diff.files} />}
 
       <div className="merge-form">
         <label>
@@ -287,7 +329,18 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         </label>
 
         <label>
-          Target Branch
+          <span className="branch-label-row">
+            Target Branch
+            <button
+              type="button"
+              className="branch-refresh-btn"
+              onClick={() => { void handleManualRefresh(); }}
+              disabled={refreshingBranches}
+              title="Refresh branch list"
+            >
+              {refreshingBranches ? "Refreshing…" : "↻ Refresh"}
+            </button>
+          </span>
           <select
             value={targetBranch}
             onChange={(e) => setTargetBranch(e.target.value)}
@@ -313,7 +366,8 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         <button
           className="merge-btn"
           onClick={handleMerge}
-          disabled={phase === "merging" || loading}
+          disabled={phase === "merging" || loading || nothingToMerge}
+          title={nothingToMerge ? "No changes to merge into the selected branch" : undefined}
         >
           {phase === "merging" ? "Merging..." : "Accept & Merge"}
         </button>

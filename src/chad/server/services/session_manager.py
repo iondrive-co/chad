@@ -32,6 +32,7 @@ class Session:
     task_description: str | None = None
     project_path: str | None = None
     coding_account: str | None = None
+    coding_model: str | None = None
     # Git worktree support
     worktree_path: Path | None = None
     worktree_branch: str | None = None
@@ -329,6 +330,7 @@ class SessionManager:
                 task_desc = first_event.get("task_description", "")
                 project_path = first_event.get("project_path")
                 coding_account = first_event.get("coding_account")
+                coding_model = first_event.get("coding_model")
                 provider_type = first_event.get("coding_provider")
 
                 # Only sessions that did not finish cleanly should come back
@@ -367,6 +369,7 @@ class SessionManager:
                     task_description=task_desc,
                     project_path=project_path,
                     coding_account=coding_account,
+                    coding_model=coding_model,
                     provider_type=provider_type,
                     status=status,
                     active=False,

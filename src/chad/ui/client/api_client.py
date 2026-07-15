@@ -372,6 +372,7 @@ class APIClient:
         screenshots: list[str] | None = None,
         override_prompt: str | None = None,
         is_followup: bool = False,
+        notify_slack: bool = True,
         # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -412,6 +413,8 @@ class APIClient:
             data["override_prompt"] = effective_prompt
         if is_followup:
             data["is_followup"] = True
+        if not notify_slack:
+            data["notify_slack"] = False
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),
@@ -759,6 +762,28 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("attempts", attempts)
+
+    def get_local_endpoint(self) -> str:
+        """Get the base URL of the local OpenAI-compatible model server."""
+        resp = self._client.get(self._url("/config/local-endpoint"))
+        resp.raise_for_status()
+        return resp.json()["endpoint"]
+
+    def set_local_endpoint(self, endpoint: str) -> str:
+        """Set the base URL of the local OpenAI-compatible model server.
+
+        Args:
+            endpoint: Base URL, e.g. http://localhost:8000
+
+        Returns:
+            The endpoint that was set
+        """
+        resp = self._client.put(
+            self._url("/config/local-endpoint"),
+            json={"endpoint": endpoint},
+        )
+        resp.raise_for_status()
+        return resp.json()["endpoint"]
 
     def get_slack_settings(self) -> dict:
         """Get Slack integration settings.

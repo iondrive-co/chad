@@ -24,6 +24,7 @@ export function SettingsPanel({
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [retentionDays, setRetentionDays] = useState<number>(7);
+  const [localEndpoint, setLocalEndpoint] = useState("");
   const [slackEnabled, setSlackEnabled] = useState(false);
   const [slackChannel, setSlackChannel] = useState("");
   const [slackHasToken, setSlackHasToken] = useState(false);
@@ -49,6 +50,7 @@ export function SettingsPanel({
     api.getVerificationAgent().then((r) => setVerificationAgent(r.account_name)).catch(() => {});
     api.listAccounts().then((r) => setAccounts(r.accounts)).catch(() => {});
     api.getCleanupSettings().then((r) => setRetentionDays(r.cleanup_days)).catch(() => {});
+    api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
     api.getSlackSettings().then((r) => {
       setSlackEnabled(r.enabled);
       setSlackChannel(r.channel ?? "");
@@ -104,6 +106,18 @@ export function SettingsPanel({
       await api.setCleanupSettings({ cleanup_days: days });
       flash("Saved");
     } catch { /* */ }
+  }, [api, flash]);
+
+  // ── Local model ──
+
+  const saveLocalEndpoint = useCallback(async (endpoint: string) => {
+    try {
+      const r = await api.setLocalEndpoint(endpoint);
+      setLocalEndpoint(r.endpoint);
+      flash("Saved");
+    } catch {
+      flash("Invalid endpoint — must be an http(s) URL");
+    }
   }, [api, flash]);
 
   // ── Slack ──
@@ -262,6 +276,17 @@ export function SettingsPanel({
           Retention days
           <input type="number" min={1} value={retentionDays}
             onChange={(e) => saveRetention(Number(e.target.value))} disabled={dis} />
+        </label>
+      </section>
+
+      {/* ── Local Model ── */}
+      <section>
+        <h3>Local Model</h3>
+        <label>
+          Server endpoint
+          <input type="text" value={localEndpoint} placeholder="http://localhost:8000"
+            onChange={(e) => setLocalEndpoint(e.target.value)}
+            onBlur={(e) => saveLocalEndpoint(e.target.value)} disabled={dis} />
         </label>
       </section>
 

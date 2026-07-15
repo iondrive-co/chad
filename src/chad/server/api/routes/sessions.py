@@ -49,6 +49,8 @@ def _session_to_response(session: Session) -> SessionResponse:
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
         coding_account=getattr(session, "coding_account", None),
+        coding_model=getattr(session, "coding_model", None),
+        coding_provider=getattr(session, "provider_type", None),
         task_description=session.task_description,
         status=status,
         resumable=resumable,
@@ -319,6 +321,7 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             verification_model=request.verification_model,
             verification_reasoning=request.verification_reasoning,
             is_followup=request.is_followup,
+            notify_slack=request.notify_slack,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -403,6 +406,7 @@ async def stream_session(
             since_seq=since_seq,
             include_terminal=include_terminal,
             include_events=include_events,
+            keep_polling_fn=lambda: executor.get_running_task_for_session(session_id) is not None,
         ):
             yield format_sse_event(event)
 

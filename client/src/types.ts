@@ -9,6 +9,8 @@ export interface Session {
   has_worktree: boolean;
   has_changes: boolean;
   coding_account: string | null;
+  coding_model: string | null;
+  coding_provider: string | null;
   task_description: string | null;
   status: "active" | "completed" | "interrupted";
   resumable: boolean;
@@ -62,6 +64,7 @@ export interface TaskCreate {
   screenshots?: string[] | null;
   override_prompt?: string | null;
   is_followup?: boolean;
+  notify_slack?: boolean;
 }
 
 export interface TaskStatus {
@@ -91,8 +94,8 @@ export type ProviderType =
   | "openai"
   | "gemini"
   | "qwen"
+  | "local"
   | "mistral"
-  | "opencode"
   | "kimi"
   | "mock";
 
@@ -103,6 +106,7 @@ export interface ProviderInfo {
   name: string;
   description: string;
   supports_reasoning: boolean;
+  reasoning_levels: string[];
 }
 
 export interface ProviderList {
@@ -152,6 +156,7 @@ export interface AccountUsage {
   weekly_usage_pct: number | null;
   session_reset_eta: string | null;
   weekly_reset_eta: string | null;
+  usage_as_of: string | null;
 }
 
 // ── Config types ──

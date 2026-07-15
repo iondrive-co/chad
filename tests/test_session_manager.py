@@ -114,6 +114,41 @@ class TestLoadFromLogs:
         assert session.status == "completed"
         assert session.active is False
 
+    def test_restores_coding_agent_and_model(self, tmp_path, monkeypatch):
+        """The session's original agent + model are restored so a resume reuses
+        them instead of falling back to a global default. A later (e.g. failed)
+        task's session_started must not override the session's origin agent."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        now = datetime.now(timezone.utc).isoformat()
+        self._write_log(log_dir, "agent1", [
+            {"type": "session_started", "seq": 1, "ts": now,
+             "task_description": "Restyle the header",
+             "project_path": "/tmp/myproject",
+             "coding_account": "claude-iondrive",
+             "coding_provider": "anthropic",
+             "coding_model": "claude-opus-4-8"},
+            {"type": "user_message", "seq": 2, "ts": now, "content": "Restyle the header"},
+            # A later resume attempt that used a different agent must not win.
+            {"type": "session_started", "seq": 3, "ts": now,
+             "task_description": "continue",
+             "coding_account": "LocalQwen",
+             "coding_provider": "local",
+             "coding_model": None},
+            {"type": "session_ended", "seq": 4, "ts": now, "reason": "failed"},
+        ])
+
+        manager = SessionManager()
+        assert manager.load_from_logs(max_age_days=7) == 1
+
+        session = manager.get_session("agent1")
+        assert session is not None
+        assert session.coding_account == "claude-iondrive"
+        assert session.coding_model == "claude-opus-4-8"
+        assert session.provider_type == "anthropic"
+
     def test_restores_interrupted_session(self, tmp_path, monkeypatch):
         """A session without session_ended is marked 'interrupted'."""
         log_dir = tmp_path / "logs"

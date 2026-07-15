@@ -1,11 +1,10 @@
 """Git worktree management endpoints."""
 
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from chad.util.git_worktree import GitWorktreeManager
+from chad.util.git_worktree import GitWorktreeManager, diff_stats_from_files
 from chad.server.api.schemas import (
     WorktreeStatus,
     DiffSummary,
@@ -44,29 +43,6 @@ def _get_worktree_manager(session) -> GitWorktreeManager:
     if not project_path.exists():
         raise HTTPException(status_code=400, detail=f"Project path does not exist: {session.project_path}")
     return GitWorktreeManager(project_path)
-
-
-def _parse_diff_stats(diff_summary: str) -> tuple[int, int, int]:
-    """Parse diff summary to extract file count, insertions, deletions."""
-    files_changed = 0
-    insertions = 0
-    deletions = 0
-
-    # Match lines like "3 files changed, 10 insertions(+), 5 deletions(-)"
-    for line in diff_summary.split("\n"):
-        if "file" in line and "changed" in line:
-            match = re.search(r"(\d+) files? changed", line)
-            if match:
-                files_changed = int(match.group(1))
-            match = re.search(r"(\d+) insertions?\(\+\)", line)
-            if match:
-                insertions = int(match.group(1))
-            match = re.search(r"(\d+) deletions?\(-\)", line)
-            if match:
-                deletions = int(match.group(1))
-            break
-
-    return files_changed, insertions, deletions
 
 
 @router.post("/{session_id}/worktree", response_model=WorktreeStatus, status_code=201)
@@ -146,9 +122,13 @@ async def get_diff_summary(
             session.worktree_base_commit,
             compare_branch=compare_branch,
         )
+        files_changed, insertions, deletions = wt_mgr.get_diff_stats(
+            session_id,
+            session.worktree_base_commit,
+            compare_branch=compare_branch,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    files_changed, insertions, deletions = _parse_diff_stats(summary_text)
 
     return DiffSummary(
         summary=summary_text,
@@ -173,28 +153,28 @@ async def get_full_diff(
     if not wt_mgr.worktree_exists(session_id):
         raise HTTPException(status_code=400, detail="Worktree does not exist")
 
-    # Get summary
+    # Get summary and parsed diff; stats derive from the parsed diff so
+    # untracked files are counted.
     try:
         summary_text = wt_mgr.get_diff_summary(
             session_id,
             session.worktree_base_commit,
             compare_branch=compare_branch,
         )
+        parsed_files = wt_mgr.get_parsed_diff(
+            session_id,
+            session.worktree_base_commit,
+            compare_branch=compare_branch,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    files_changed, insertions, deletions = _parse_diff_stats(summary_text)
+
+    files_changed, insertions, deletions = diff_stats_from_files(parsed_files)
     summary = DiffSummary(
         summary=summary_text,
         files_changed=files_changed,
         insertions=insertions,
         deletions=deletions,
-    )
-
-    # Get parsed diff
-    parsed_files = wt_mgr.get_parsed_diff(
-        session_id,
-        session.worktree_base_commit,
-        compare_branch=compare_branch,
     )
 
     # Convert to schema types

@@ -57,8 +57,11 @@ def test_ui_tabs_start_with_projects_and_new_button():
     """
     text = Path("ui/src/App.tsx").read_text()
 
-    # Default tab should be "projects" so users start by selecting a project
-    assert 'useState<Tab>("projects")' in text
+    # The active tab is restored from localStorage (loadActiveTab) so it survives
+    # a browser refresh, but it still falls back to "projects" when nothing is
+    # stored, so users start by selecting a project.
+    assert "useState<Tab>(loadActiveTab)" in text
+    assert 'return "projects";' in text
     assert 'useState<Tab>("chat")' not in text
 
     # There should be no "Chat" tab button

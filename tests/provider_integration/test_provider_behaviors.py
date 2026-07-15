@@ -20,13 +20,19 @@ pytestmark = pytest.mark.skipif(
 
 
 def get_codex_home() -> Path:
-    """Get Codex home directory from config or default."""
-    # Try common locations
-    for name in ["codex-work", "codex-personal", "default"]:
-        path = Path.home() / ".chad" / "codex-homes" / name
-        if path.exists():
-            return path
-    pytest.skip("No Codex home directory found")
+    """Get the Codex home with the freshest auth token.
+
+    Tokens rotate; stale homes fail with "refresh token was already used".
+    Picking by auth.json mtime selects the most recently logged-in account.
+    """
+    homes = sorted(
+        (Path.home() / ".chad" / "codex-homes").glob("*/.codex/auth.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not homes:
+        pytest.skip("No Codex home directory found")
+    return homes[0].parent.parent
 
 
 def get_claude_config_dir() -> Path:

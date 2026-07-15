@@ -31,13 +31,13 @@ PROVIDER_TOOL_KEYS: dict[str, str] = {
     "anthropic": "claude",
     "gemini": "gemini",
     "qwen": "qwen",
+    "local": "qwen",
     "mistral": "vibe",
-    "opencode": "opencode",
     "kimi": "kimi",
 }
 
 # Providers that authenticate with a pasted API key rather than browser OAuth.
-API_KEY_PROVIDERS = frozenset({"mistral", "opencode"})
+API_KEY_PROVIDERS = frozenset({"mistral"})
 
 _LOGIN_TIMEOUT_SECS = 120
 
@@ -133,17 +133,12 @@ def is_logged_in(provider: str, account_name: str) -> bool:
         if provider == "qwen":
             return (Path.home() / ".qwen" / "oauth_creds.json").exists()
 
+        if provider == "local":
+            # No credentials needed — ready once the Qwen Code CLI is installed.
+            return _resolve_cli(provider) is not None
+
         if provider == "mistral":
             return is_mistral_configured(Path.home() / ".vibe")
-
-        if provider == "opencode":
-            auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
-            if not auth_file.exists():
-                return False
-            try:
-                return bool(json.loads(auth_file.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                return False
 
         if provider == "kimi":
             creds_file = kimi_home(account_name) / ".kimi" / "credentials" / "kimi-code.json"
@@ -186,6 +181,10 @@ def run_login(
     # Already authenticated (also repairs a partial kimi config as a side effect).
     if is_logged_in(provider, account_name):
         return True, "Already logged in"
+
+    if provider == "local":
+        # CLI is installed (ensure_cli above); a local server needs no login.
+        return True, "Ready"
 
     if provider in API_KEY_PROVIDERS:
         return _login_api_key(provider, api_key)
@@ -260,18 +259,6 @@ def _login_api_key(provider: str, api_key: str) -> tuple[bool, str]:
             return False, "Mistral requires an API key"
         vibe_dir.mkdir(parents=True, exist_ok=True)
         (vibe_dir / ".env").write_text(f"MISTRAL_API_KEY='{api_key}'\n", encoding="utf-8")
-        return True, "Login successful"
-
-    if provider == "opencode":
-        auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
-        if is_logged_in(provider, ""):
-            return True, "Already logged in"
-        if not api_key:
-            return False, "OpenCode requires an API key"
-        auth_file.parent.mkdir(parents=True, exist_ok=True)
-        auth_file.write_text(
-            json.dumps({"opencode": {"type": "api", "key": api_key}}), encoding="utf-8"
-        )
         return True, "Login successful"
 
     return False, f"Unsupported provider: {provider}"
