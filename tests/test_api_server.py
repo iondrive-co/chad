@@ -554,6 +554,51 @@ class TestUIServing:
         assert index == project_root / "ui" / "dist" / "index.html"
         assert assets == project_root / "ui" / "dist" / "assets"
 
+    def test_ui_resolver_autobuilds_when_repo_dist_is_stale(self, tmp_path, monkeypatch):
+        """A stale ``ui/dist`` (older than source) must trigger a rebuild.
+
+        Regression: the resolver served an existing ``ui/dist`` directly and only
+        autobuilt when it was *absent*. So a stale bundle (e.g. after a git
+        checkout/merge that predates a source change) was served forever and
+        never rebuilt, which is why new UI (reasoning levels, Slack toggle) never
+        reached the browser no matter how many times chad was restarted.
+        """
+        project_root = tmp_path / "project"
+        ui_src = project_root / "ui" / "src"
+        ui_src.mkdir(parents=True)
+        (project_root / "client" / "src").mkdir(parents=True)
+
+        # A stale build: dist exists but its index.html is OLDER than the source.
+        dist = project_root / "ui" / "dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        (dist / "index.html").write_text("<div id='root'></div>", encoding="utf-8")
+        (assets / "stale.js").write_text("console.log('stale')", encoding="utf-8")
+
+        import os
+        import time
+        old = time.time() - 1000
+        os.utime(dist / "index.html", (old, old))
+        os.utime(assets / "stale.js", (old, old))
+        # Source file is newer than the built bundle.
+        (ui_src / "main.tsx").write_text("export {};", encoding="utf-8")
+
+        built = {"called": False}
+
+        def fake_autobuild(root):
+            built["called"] = True
+            (assets / "fresh.js").write_text("console.log('fresh')", encoding="utf-8")
+
+        monkeypatch.setattr("chad.server.main._source_project_root", lambda: project_root)
+        monkeypatch.setattr("chad.server.main._package_ui_paths", lambda: (None, None))
+        monkeypatch.setattr("chad.server.main._autobuild_ui_from_source", fake_autobuild)
+
+        index, assets_dir = _resolve_ui_paths()
+
+        assert built["called"] is True, "stale ui/dist should have triggered a rebuild"
+        assert index == dist / "index.html"
+        assert assets_dir == assets
+
     def test_get_verification_settings(self, client):
         """Can get verification settings."""
         response = client.get("/api/v1/config/verification")
