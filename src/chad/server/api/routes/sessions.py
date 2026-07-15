@@ -49,6 +49,8 @@ def _session_to_response(session: Session) -> SessionResponse:
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
         coding_account=getattr(session, "coding_account", None),
+        coding_model=getattr(session, "coding_model", None),
+        coding_provider=getattr(session, "provider_type", None),
         task_description=session.task_description,
         status=status,
         resumable=resumable,

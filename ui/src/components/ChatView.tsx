@@ -70,6 +70,12 @@ export function ChatView({
   // chosen for the next answer ("" = use the account's configured model).
   const [codingModels, setCodingModels] = useState<string[]>([]);
   const [codingModel, setCodingModel] = useState("");
+  // The agent + model this session already runs its tasks with. Used to seed
+  // the composer so continuing a session (including after a server restart)
+  // reuses its own agent instead of a global default. Null for a brand-new
+  // session that has not run a task yet.
+  const [sessionCodingAgent, setSessionCodingAgent] = useState<string | null>(null);
+  const [sessionCodingModel, setSessionCodingModel] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
@@ -286,11 +292,38 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
+  // Load this session's own coding agent/model (set once it has run a task)
+  // so the composer can reuse it instead of a global default.
+  useEffect(() => {
+    let cancelled = false;
+    setSessionCodingAgent(null);
+    setSessionCodingModel(null);
+    api.getSession(sessionId)
+      .then((s) => {
+        if (cancelled) return;
+        setSessionCodingAgent(s.coding_account);
+        setSessionCodingModel(s.coding_model);
+      })
+      .catch(() => { /* new/unknown session: fall back to defaults */ });
+    return () => { cancelled = true; };
+  }, [api, sessionId]);
+
   // Load default coding account, using project's preferred agent if available
   useEffect(() => {
     let cancelled = false;
     api.listAccounts().then((res) => {
       if (cancelled) return;
+
+      // Reuse the agent this session already runs with, so continuing a
+      // session keeps its own agent rather than resetting to a global default.
+      if (sessionCodingAgent) {
+        const sessionAccount = res.accounts.find((a) => a.name === sessionCodingAgent);
+        if (sessionAccount) {
+          setCodingAccount(sessionAccount);
+          return;
+        }
+      }
+
       // Find the project's preferred coding agent if a project is selected
       const currentProject = projects?.find((p) => p.project_path === currentProjectPath);
       const preferredAgentName = currentProject?.preferred_coding_agent;
@@ -311,7 +344,7 @@ export function ChatView({
       if (!cancelled) setCodingAccount(null);
     });
     return () => { cancelled = true; };
-  }, [api, currentProjectPath, projects]);
+  }, [api, currentProjectPath, projects, sessionCodingAgent]);
 
   // Load provider metadata so we know which coding agents support a reasoning level.
   useEffect(() => {
@@ -333,23 +366,31 @@ export function ChatView({
   }, [api]);
 
   // Load the models the selected coding agent can run so the composer can offer
-  // a per-message model override. Reset the override when the agent changes so a
-  // stale selection can't leak onto a different account.
+  // a per-message model override. When the selected agent is the one this
+  // session runs with, restore its saved model; otherwise clear the override so
+  // a stale selection can't leak onto a different account.
   useEffect(() => {
+<<<<<<< Updated upstream
     setCodingModel("");
     // Reasoning levels differ per provider, so a level chosen for one agent may
     // not exist for the next — reset to the provider default on agent change.
     setCodingReasoning("");
+=======
+>>>>>>> Stashed changes
     if (!codingAccount) {
+      setCodingModel("");
       setCodingModels([]);
       return;
     }
+    setCodingModel(
+      sessionCodingAgent === codingAccount.name ? (sessionCodingModel ?? "") : "",
+    );
     let cancelled = false;
     api.getAccountModels(codingAccount.name)
       .then((r) => { if (!cancelled) setCodingModels(r.models); })
       .catch(() => { if (!cancelled) setCodingModels([]); });
     return () => { cancelled = true; };
-  }, [api, codingAccount]);
+  }, [api, codingAccount, sessionCodingAgent, sessionCodingModel]);
 
   // Load verification settings and default verification agent
   useEffect(() => {
@@ -982,7 +1023,7 @@ export function ChatView({
               <div className="chat-agent-pickers">
                 <div className="chat-agent-picker">
                   <span className="field-label">Coding Agent</span>
-                  <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
+                  <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} autoSelect={false} />
                 </div>
                 <div className="chat-verification-picker">
                   <span className="field-label">Verification Agent</span>

@@ -1231,6 +1231,8 @@ class TaskExecutor:
         session.active = True
         session.status = "active"
         session.coding_account = coding_account
+        session.coding_model = coding_model
+        session.provider_type = coding_provider
         session.task_description = task_description
 
         # Send initial input if needed
