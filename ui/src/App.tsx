@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, Fragment } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, Fragment, useLayoutEffect } from "react";
 import type { Session } from "chad-client";
 import { ChadAPI } from "chad-client";
 import type { ProjectSettings } from "chad-client";
@@ -136,6 +136,10 @@ export function App() {
   const [selectedSession, setSelectedSession] = useState<string | null>(loadSelectedSession);
   const [tab, setTab] = useState<Tab>(loadActiveTab);
   const [sessionVersion, setSessionVersion] = useState(0);
+  // Collapsible menu state for Projects/Providers/Settings
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const chadBtnRef = useRef<HTMLButtonElement>(null);
   // Track the project selected for the current session (set when opening from ProjectsPanel)
   const [sessionProjectPath, setSessionProjectPath] = useState("");
   // All configured projects, loaded on connect
@@ -305,23 +309,56 @@ export function App() {
     setTab("chat");
   }, []);
 
+  // Close menu when clicking outside
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target as Node) &&
+        chadBtnRef.current &&
+        !chadBtnRef.current.contains(e.target as Node)
+      ) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [menuOpen]);
+
+  const handleMenuTab = (newTab: Tab) => {
+    setTab(newTab);
+    setMenuOpen(false);
+  };
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1 className={connected ? "connected" : ""}>Chad</h1>
+        <div className="chad-menu-container">
+          <button
+            ref={chadBtnRef}
+            className={`chad-btn ${connected ? "connected" : ""}`}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            Chad
+          </button>
+          {menuOpen && (
+            <div ref={menuRef} className="chad-menu">
+              <button className={tab === "projects" ? "active" : ""} onClick={() => handleMenuTab("projects")}>
+                Projects
+              </button>
+              <button className={tab === "providers" ? "active" : ""} onClick={() => handleMenuTab("providers")}>
+                Providers
+              </button>
+              <button className={tab === "settings" ? "active" : ""} onClick={() => handleMenuTab("settings")}>
+                Settings
+              </button>
+            </div>
+          )}
+        </div>
         <nav className="tabs">
-          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>
-            Projects
-          </button>
-          <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
-            Providers
-          </button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
-            Settings
-          </button>
           {connected && sessions.some(s => openedSessionIds.has(s.id)) && (
             <>
-              <span className="tab-separator" />
               {groupSessionsByProject(sessions, openedSessionIds).map((group, groupIdx) => (
                 <Fragment key={group.project ?? "__no_project__"}>
                   {groupIdx > 0 && <span className="tab-group-separator" />}
