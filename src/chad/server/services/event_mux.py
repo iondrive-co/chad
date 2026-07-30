@@ -181,6 +181,14 @@ class EventMultiplexer:
         # still streaming EventLog and ping events. This avoids the previous
         # race where we fell back permanently after a fixed wait.
         if include_terminal:
+            # Without bounds this loop used to spin at 10Hz forever for
+            # sessions that will never get a PTY (e.g. restored after a server
+            # restart with no running task). Bail out once the task is
+            # confirmed dead, with a deadline backstop that is pushed forward
+            # while the task is alive (await_reset pauses can last days).
+            now_ts = datetime.now(timezone.utc).timestamp()
+            task_dead_since: float | None = None
+            poll_deadline = now_ts + POLL_TIMEOUT_SECONDS
             while True:
                 pty_session = pty_service.get_session_by_session_id(self.session_id)
                 if pty_session:
@@ -201,6 +209,30 @@ class EventMultiplexer:
 
                 if self._should_ping():
                     yield self._create_ping()
+
+                now_ts = datetime.now(timezone.utc).timestamp()
+                if keep_polling_fn is not None:
+                    if keep_polling_fn():
+                        task_dead_since = None
+                        poll_deadline = now_ts + POLL_TIMEOUT_SECONDS
+                    elif task_dead_since is None:
+                        task_dead_since = now_ts
+                    elif now_ts - task_dead_since > 10.0:
+                        # No running task and no PTY appeared — nothing more
+                        # will ever arrive on this stream.
+                        yield MuxEvent(
+                            type="complete",
+                            data={"exit_code": None},
+                            seq=self._next_seq(),
+                        )
+                        return
+                if now_ts > poll_deadline:
+                    yield MuxEvent(
+                        type="complete",
+                        data={"exit_code": None},
+                        seq=self._next_seq(),
+                    )
+                    return
 
                 await asyncio.sleep(0.1)
 

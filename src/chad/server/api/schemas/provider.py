@@ -5,7 +5,9 @@ from pydantic import BaseModel, Field
 
 
 ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"]
-RoleType = Literal["CODING", "VERIFICATION"]
+# Only CODING exists as an assignable role — the verification agent is
+# configured via /config/verification-agent, not a role assignment.
+RoleType = Literal["CODING"]
 
 
 class ProviderInfo(BaseModel):
@@ -33,7 +35,15 @@ class AccountCreate(BaseModel):
     Note: Actual credentials are handled via OAuth flow, not directly through API.
     """
 
-    name: str = Field(description="Account name/identifier")
+    name: str = Field(
+        description="Account name/identifier",
+        min_length=1,
+        max_length=64,
+        # Account names become directory names (CLAUDE_CONFIG_DIR, codex/kimi
+        # homes) — restrict to a safe charset so '../'-style names can't
+        # escape ~/.chad/.
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     provider: ProviderType = Field(description="Provider type")
 
 
@@ -93,7 +103,7 @@ class AccountReasoningUpdate(BaseModel):
 class AccountRoleUpdate(BaseModel):
     """Request model for updating account role."""
 
-    role: RoleType = Field(description="Role to assign")
+    role: RoleType | None = Field(default=None, description="Role to assign, or null to clear")
 
 
 class AccountModelsResponse(BaseModel):

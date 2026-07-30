@@ -481,6 +481,54 @@ class TestBuildAgentCommand:
         assert "EXPLORATION_RESULT:" in cmd[prompt_idx + 1]
         assert initial_input is None
 
+    def test_gemini_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Gemini account gets its own GEMINI_CLI_HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("gemini", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("gemini", "acct-b", tmp_path)
+
+        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
+        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
+        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+
+    def test_qwen_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Qwen account gets its own HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("qwen", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("qwen", "acct-b", tmp_path)
+
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
+
+    def test_local_sets_isolated_home_and_openai_env(self, tmp_path, monkeypatch):
+        """Local accounts get qwen-home isolation while build_local_env still applies."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+
+        _, env, _ = build_agent_command("local", "my-local", tmp_path, model="pinned")
+
+        assert env["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "my-local")
+        assert env["OPENAI_API_KEY"] == "local"
+        assert env["OPENAI_MODEL"] == "pinned"
+
+    def test_mistral_sets_isolated_vibe_home_per_account(self, tmp_path, monkeypatch):
+        """Each Mistral account gets its own VIBE_HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("mistral", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("mistral", "acct-b", tmp_path)
+
+        assert env_a["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-a")
+        assert env_b["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-b")
+        assert env_a["VIBE_HOME"] != env_b["VIBE_HOME"]
+
     def test_mock_provider_produces_output(self, tmp_path):
         """Mock provider command produces ANSI-formatted output."""
         cmd, env, initial_input = build_agent_command(

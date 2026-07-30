@@ -35,8 +35,17 @@ interface Segment {
 }
 
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  /* eslint-disable no-control-regex */
+  return text
+    // OSC sequences (window title etc.), terminated by BEL or ESC-backslash
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    // CSI sequences (colors, cursor movement)
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+    // Charset selection (e.g. ESC ( B)
+    .replace(/\x1b[()][0-9A-Za-z]/g, "")
+    // Any stray escapes left over (e.g. a sequence split across chunks)
+    .replace(/\x1b/g, "");
+  /* eslint-enable no-control-regex */
 }
 
 function truncate(value: string, max: number): string {
@@ -117,8 +126,10 @@ function cleanProse(text: string): string {
   // <function=...> block): machine plumbing, never prose.
   t = t.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "");
   t = t.replace(/<\/?(?:function|parameter|tool_call)[^>]*>/g, "");
-  // Fenced JSON blocks: ```json { ... } ``` or ``` { ... } ```
-  t = t.replace(/```(?:json)?\s*\{[^`]*?\}\s*```/gi, "");
+  // Fenced JSON blocks: ```json { ... } ``` or ``` { ... } ``` — only fences
+  // whose first non-space char is `{`. Fences can't nest, so lazily matching
+  // anything up to the closing fence covers nested {} inside the JSON.
+  t = t.replace(/```(?:json)?\s*\{[\s\S]*?\n?```/gi, "");
   // Bare completion JSON: {"change_summary": ...} / completion_status / files_changed
   t = t.replace(/\{[^{}]*"(?:change_summary|completion_status|files_changed)"[^{}]*\}/g, "");
   // Bare progress JSON: {"type": "progress", ...}

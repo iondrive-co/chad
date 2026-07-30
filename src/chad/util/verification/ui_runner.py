@@ -230,6 +230,9 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
         "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
         "CHAD_PARENT_PID": str(os.getpid()),
+        # Keep the test server from clobbering the developer's real
+        # ~/.chad/server.port autodiscovery file
+        "CHAD_DIR": os.fspath(env.temp_dir / "chad-home"),
     }
     if env.env_vars:
         chad_env.update(env.env_vars)
@@ -305,8 +308,9 @@ def open_playwright_page(
         page = context.new_page()
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
-            # Wait for the React app to render
-            page.wait_for_selector(".app-header h1", timeout=15000)
+            # Wait for the React app to render (the header has no h1 — the
+            # old ".app-header h1" selector timed out on every call)
+            page.wait_for_selector(".app-header .chad-btn", timeout=15000)
             if tab:
                 _select_tab(page, tab)
             if render_delay > 0:

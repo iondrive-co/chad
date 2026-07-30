@@ -4,16 +4,6 @@ interface Props {
   conflicts: MergeConflict[];
 }
 
-/** Escape HTML special characters for safe rendering. */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
 function ConflictHunkView({ hunk }: { hunk: MergeConflictHunk }) {
   return (
     <div className="conflict-hunk">
@@ -23,7 +13,7 @@ function ConflictHunkView({ hunk }: { hunk: MergeConflictHunk }) {
           <div className="conflict-side-header ours">Original (HEAD)</div>
           <div className="conflict-side-content">
             {hunk.ours.map((line, i) => (
-              <pre key={i}>{escapeHtml(line)}</pre>
+              <pre key={i}>{line}</pre>
             ))}
           </div>
         </div>
@@ -32,7 +22,7 @@ function ConflictHunkView({ hunk }: { hunk: MergeConflictHunk }) {
           <div className="conflict-side-header theirs">Incoming (Changes)</div>
           <div className="conflict-side-content">
             {hunk.theirs.map((line, i) => (
-              <pre key={i}>{escapeHtml(line)}</pre>
+              <pre key={i}>{line}</pre>
             ))}
           </div>
         </div>

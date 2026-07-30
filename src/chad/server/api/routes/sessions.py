@@ -23,6 +23,7 @@ from chad.server.api.schemas.events import (
     ConversationResponseSchema,
 )
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
+from chad.server.services.task_executor import TaskAlreadyRunningError
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.server.services.event_mux import EventMultiplexer, format_sse_event
 from chad.util.event_log import EventLog
@@ -66,10 +67,22 @@ def _task_state_to_status(state: TaskState) -> TaskStatus:
 
 def _build_conversation(event_log: EventLog, since_seq: int = 0) -> ConversationResponseSchema:
     """Build a conversation timeline for the latest task in the event log."""
-    # Find the latest task start
+    # Find the latest task start. A session that has not run a task yet has
+    # an empty timeline — that's a valid state, not a 404.
     starts = event_log.get_events(event_types=["session_started"])
     if not starts:
-        raise HTTPException(status_code=404, detail="No tasks found for this session")
+        return ConversationResponseSchema(
+            session_id=event_log.session_id,
+            task={
+                "seq": 0,
+                "task_description": "",
+                "project_path": "",
+                "coding_provider": "",
+                "coding_account": "",
+            },
+            items=[],
+            latest_seq=event_log.get_latest_seq(),
+        )
 
     latest_start = starts[-1]
     start_seq = int(latest_start.get("seq", 0))
@@ -184,7 +197,6 @@ async def get_session(session_id: str) -> SessionResponse:
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    print(f"Client connected to session {session_id}")
     return _session_to_response(session)
 
 
@@ -192,6 +204,11 @@ async def get_session(session_id: str) -> SessionResponse:
 async def delete_session(session_id: str) -> None:
     """Delete a session and clean up its resources."""
     manager = get_session_manager()
+
+    # Cancel any running task first so its worker thread winds down as
+    # CANCELLED instead of misreading the killed PTY as a successful run.
+    executor = get_task_executor()
+    executor.cancel_tasks_for_session(session_id)
 
     # Terminate any active PTY sessions
     pty_service = get_pty_stream_service()
@@ -323,6 +340,8 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             is_followup=request.is_followup,
             notify_slack=request.notify_slack,
         )
+    except TaskAlreadyRunningError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

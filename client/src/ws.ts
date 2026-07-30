@@ -13,6 +13,8 @@ export class ChadWebSocket {
   private callbacks: Partial<Record<WSServerMessageType | "any", WSCallback[]>> = {};
   private pingInterval: ReturnType<typeof setInterval> | null = null;
 
+  // _token is unused: authentication happens via the short-lived ticket passed
+  // to connect(). Kept only so existing call sites (useStream) keep compiling.
   constructor(private baseUrl: string, _token?: string) {
     // Convert http(s) to ws(s)
     this.baseUrl = baseUrl
@@ -28,12 +30,25 @@ export class ChadWebSocket {
     if (options?.ticket) {
       params.set("ticket", options.ticket);
     }
-    if (options?.sinceSeq) params.set("since_seq", String(options.sinceSeq));
+    if (options?.sinceSeq != null) params.set("since_seq", String(options.sinceSeq));
     const qs = params.toString();
     const ws = new WebSocket(
       `${this.baseUrl}/api/v1/ws/${sessionId}${qs ? `?${qs}` : ""}`,
     );
     this.ws = ws;
+
+    // Surface silent stream death: if the socket errors or closes before a
+    // "complete" message was seen, notify handlers with a synthetic error so
+    // consumers don't hang forever waiting on a dead stream.
+    let completeSeen = false;
+    let errorNotified = false;
+    const notifyStreamDeath = (error: string) => {
+      if (completeSeen || errorNotified) return;
+      errorNotified = true;
+      const msg: WSMessage = { type: "error", session_id: sessionId, data: { error } };
+      this.emit("error", msg);
+      this.emit("any" as WSServerMessageType, msg);
+    };
 
     ws.onmessage = (e) => {
       let msg: WSMessage;
@@ -42,12 +57,18 @@ export class ChadWebSocket {
       } catch {
         return;
       }
+      if (msg.type === "complete") completeSeen = true;
       this.emit(msg.type, msg);
       this.emit("any" as WSServerMessageType, msg);
     };
 
+    ws.onerror = () => {
+      notifyStreamDeath("websocket error");
+    };
+
     ws.onclose = () => {
       this.stopPing();
+      notifyStreamDeath("connection closed");
     };
 
     ws.onopen = () => {
@@ -86,6 +107,11 @@ export class ChadWebSocket {
   disconnect(): void {
     this.stopPing();
     if (this.ws) {
+      // Intentional close: drop the handlers first so no synthetic
+      // "connection closed" error reaches the message handlers.
+      this.ws.onmessage = null;
+      this.ws.onerror = null;
+      this.ws.onclose = null;
       this.ws.close();
       this.ws = null;
     }

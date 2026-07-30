@@ -610,15 +610,29 @@ async def get_prompt_previews(
 # ── Config Export / Import ──
 
 
-@router.get("/export")
-async def export_config() -> JSONResponse:
-    """Export the full config for transfer to another machine.
+class ConfigExportRequest(BaseModel):
+    """Request body for config export."""
 
-    The exported data contains encrypted API keys (not plaintext),
-    so it requires the same master password on the destination.
+    passphrase: str | None = Field(
+        default=None,
+        description=(
+            "Passphrase used to encrypt provider credentials in the export. "
+            "Without it the export contains settings only."
+        ),
+    )
+
+
+@router.post("/export")
+async def export_config(request: ConfigExportRequest | None = None) -> JSONResponse:
+    """Export the config for transfer to another machine.
+
+    Provider auth files are live credentials, so they are only included when
+    a passphrase is supplied, encrypted with it. The response records this in
+    `credentials_included`.
     """
     config_mgr = get_config_manager()
-    data = config_mgr.export_config()
+    passphrase = request.passphrase if request else None
+    data = config_mgr.export_config(passphrase=passphrase)
     return JSONResponse(content=data)
 
 
@@ -626,6 +640,10 @@ class ConfigImportRequest(BaseModel):
     """Request body for config import."""
 
     config: dict[str, Any] = Field(description="Full config dictionary from export")
+    passphrase: str | None = Field(
+        default=None,
+        description="Passphrase used when the export was created (if it has credentials)",
+    )
 
 
 PROVIDER_TO_TOOL_KEY: dict[str, str] = {
@@ -684,7 +702,7 @@ async def import_config(request: ConfigImportRequest) -> JSONResponse:
 
     config_mgr = get_config_manager()
     try:
-        config_mgr.import_config(request.config)
+        config_mgr.import_config(request.config, passphrase=request.passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

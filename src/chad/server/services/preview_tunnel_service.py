@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import os
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -158,6 +160,32 @@ def create_preview_access_url(base_url: str, auth_token: str) -> str:
     )
     separator = "&" if "?" in base_url else "?"
     return f"{base_url}{separator}{urlencode({'preview_token': ticket})}"
+
+
+def resolve_command_target(command: str) -> str | list[str]:
+    """Turn a preview command into something Popen can run without a shell.
+
+    The command arrives in an HTTP request body, so it is never handed to a
+    shell. A preview command is a single program invocation ("npm run dev");
+    shell metacharacters are not supported. On Windows the string is passed
+    through for CreateProcess to parse (still no shell) because shlex would
+    mangle backslash paths there.
+
+    Raises:
+        ValueError: If the command is empty or cannot be parsed.
+    """
+    if os.name == "nt":
+        if not command.strip():
+            raise ValueError("Preview command is empty")
+        return command
+
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse preview command: {exc}") from exc
+    if not argv:
+        raise ValueError("Preview command is empty")
+    return argv
 
 
 def create_preview_proxy_app(target_port: int, auth_token: str) -> FastAPI:
@@ -376,15 +404,25 @@ class PreviewTunnelService:
                 return None
 
             try:
+                popen_target = resolve_command_target(command)
+            except ValueError as exc:
+                self._error = str(exc)
+                logger.error(self._error)
+                return None
+
+            try:
+                # Own process group so registry killpg can't take chad down,
+                # and so the app's children die with it.
+                popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
                 self._app_proc = subprocess.Popen(
-                    command,
-                    shell=True,
+                    popen_target,
                     cwd=resolved_cwd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    **popen_kwargs,
                 )
-            except Exception as exc:
-                self._error = str(exc)
+            except (OSError, ValueError) as exc:
+                self._error = f"Failed to start preview command: {exc}"
                 logger.error("Failed to start preview app: %s", exc)
                 return None
 
@@ -428,6 +466,7 @@ class PreviewTunnelService:
             return f"http://localhost:{port}"
 
         try:
+            popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
             self._tunnel_proc = subprocess.Popen(
                 [
                     path_or_error, "tunnel",
@@ -436,6 +475,7 @@ class PreviewTunnelService:
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **popen_kwargs,
             )
         except Exception as exc:
             self._error = str(exc)

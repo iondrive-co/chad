@@ -48,8 +48,6 @@ CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 90.0)
 CODEX_START_IDLE_TIMEOUT = _get_env_float("CODEX_START_IDLE_TIMEOUT", 120.0)
 CODEX_THINK_IDLE_TIMEOUT = _get_env_float("CODEX_THINK_IDLE_TIMEOUT", 240.0)
 CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
-# Shorter timeout during pure "thinking" phases (no command running)
-CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 
 # Maximum exploration commands without implementation before triggering early timeout
 # Prevents agents from getting stuck in endless search/read loops
@@ -596,7 +594,7 @@ def _stream_pipe_output(
                     continue
                 # Before declaring stall, check if data arrived in the queue
                 if not output_queue.empty():
-                    last_activity = time.time()
+                    last_activity = time.monotonic()
                     continue
                 idle_stalled = True
                 break
@@ -1206,6 +1204,43 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     return pct if pct is not None else 0.0
 
 
+def _gemini_home_dir(account_name: str | None) -> Path:
+    """Isolated Gemini CLI home for an account (or the real home if unset).
+
+    The Gemini CLI resolves its ``.gemini`` config dir from the
+    ``GEMINI_CLI_HOME`` env var (falling back to ``os.homedir()``), so pointing
+    that at this directory gives each account its own credentials.
+    """
+    base_home = platform_path(safe_home())
+    if account_name:
+        return base_home / ".chad" / "gemini-homes" / account_name
+    return base_home
+
+
+def _qwen_home_dir(account_name: str | None) -> Path:
+    """Isolated Qwen CLI HOME for an account (or the real home if unset).
+
+    The Qwen CLI has no config-dir env var; it resolves ``.qwen`` from
+    ``os.homedir()``, so HOME (USERPROFILE on Windows) must be redirected.
+    """
+    base_home = platform_path(safe_home())
+    if account_name:
+        return base_home / ".chad" / "qwen-homes" / account_name
+    return base_home
+
+
+def _vibe_home_dir(account_name: str | None) -> Path:
+    """Isolated Vibe config dir for an account (or the real ``~/.vibe`` if unset).
+
+    The Vibe CLI reads the ``VIBE_HOME`` env var as the config dir itself
+    (``config.toml``/``.env`` live directly inside it, no nested ``.vibe``).
+    """
+    base_home = platform_path(safe_home())
+    if account_name:
+        return base_home / ".chad" / "vibe-homes" / account_name
+    return base_home / ".vibe"
+
+
 def _gemini_usage_path() -> Path:
     """Get the path to the Gemini usage JSONL file."""
     return Path(safe_home()) / ".chad" / "gemini-usage.jsonl"
@@ -1259,14 +1294,14 @@ def _get_gemini_usage_percentage(account_name: str) -> float | None:
     Gemini free tier allows ~2000 requests/day.
 
     Args:
-        account_name: The account name (unused for Gemini, single account only)
+        account_name: The account name for the isolated Gemini home
 
     Returns:
         Usage percentage (0-100), or None if unavailable
     """
     from datetime import datetime, timezone
 
-    gemini_dir = Path(safe_home()) / ".gemini"
+    gemini_dir = _gemini_home_dir(account_name) / ".gemini"
     oauth_file = gemini_dir / "oauth_creds.json"
     if not oauth_file.exists():
         return None
@@ -1287,7 +1322,9 @@ def _get_gemini_usage_percentage(account_name: str) -> float | None:
             except (ValueError, AttributeError):
                 pass
 
-    daily_limit = 100  # Conservative estimate for free-tier Gemini
+    # Gemini Code Assist free tier allows ~2000 requests/day (must match the
+    # docstring above — the old value of 100 tripped usage actions 20x early)
+    daily_limit = 2000
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
@@ -1298,14 +1335,14 @@ def _get_qwen_usage_percentage(account_name: str) -> float | None:
     We count today's requests from local session files.
 
     Args:
-        account_name: The account name (unused for Qwen, single account only)
+        account_name: The account name for the isolated Qwen HOME
 
     Returns:
         Usage percentage (0-100), or None if unavailable
     """
     from datetime import datetime, timezone
 
-    qwen_dir = Path(safe_home()) / ".qwen"
+    qwen_dir = _qwen_home_dir(account_name) / ".qwen"
     oauth_file = qwen_dir / "oauth_creds.json"
     if not oauth_file.exists():
         return None
@@ -1397,14 +1434,14 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
     We count today's requests from local session files.
 
     Args:
-        account_name: The account name (unused for Mistral, single account only)
+        account_name: The account name for the isolated Vibe config dir
 
     Returns:
         Usage percentage (0-100), or None if unavailable
     """
     from datetime import datetime, timezone
 
-    vibe_dir = Path(safe_home()) / ".vibe"
+    vibe_dir = _vibe_home_dir(account_name)
     if not is_mistral_configured(vibe_dir):
         return None
 
@@ -2058,7 +2095,6 @@ class OpenAICodexProvider(AIProvider):
                 "--json",
                 "-C",
                 self.project_path,
-                "-",  # Read from stdin
             ]
 
             if self.config.model_name and self.config.model_name != "default":
@@ -2066,6 +2102,9 @@ class OpenAICodexProvider(AIProvider):
 
             if self.config.reasoning_effort and self.config.reasoning_effort != "default":
                 cmd.extend(["-c", f'model_reasoning_effort="{self.config.reasoning_effort}"'])
+
+            # The stdin marker must come after all options
+            cmd.append("-")
 
         try:
             env = self._get_env()
@@ -2596,6 +2635,16 @@ class GeminiCodeAssistProvider(AIProvider):
         self.master_fd: int | None = None
         self.session_id: str | None = None  # For multi-turn support
 
+    def _get_env(self) -> dict:
+        """Environment with the per-account Gemini home for this account."""
+        home = _gemini_home_dir(self.config.account_name)
+        # The CLI errors out (ENOENT) if the home doesn't exist.
+        home.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["GEMINI_CLI_HOME"] = str(home)
+        return env
+
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("gemini", self._notify_activity)
         if not ok:
@@ -2640,8 +2689,7 @@ class GeminiCodeAssistProvider(AIProvider):
             cmd.extend(["-p", self.current_message])
 
         try:
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
+            env = self._get_env()
 
             json_events = []
             response_parts = []
@@ -2814,8 +2862,19 @@ class QwenCodeProvider(AIProvider):
         self.extra_cli_args: list[str] = []
 
     def runtime_env(self) -> dict[str, str]:
-        """Extra environment variables for the CLI process."""
-        return {}
+        """Extra environment variables for the CLI process.
+
+        Points HOME at the per-account Qwen home so each account keeps its
+        own ``.qwen`` credentials and session state.
+        """
+        home = _qwen_home_dir(self.config.account_name)
+        # The CLI errors out (ENOENT) if the home doesn't exist.
+        home.mkdir(parents=True, exist_ok=True)
+        env = {"HOME": str(home)}
+        if os.name == "nt":
+            # Node's os.homedir() reads USERPROFILE on Windows.
+            env["USERPROFILE"] = str(home)
+        return env
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("qwen", self._notify_activity)
@@ -3009,7 +3068,9 @@ class LocalProvider(QwenCodeProvider):
         from chad.util.config_manager import ConfigManager
 
         endpoint = ConfigManager().get_local_endpoint()
-        return build_local_env(endpoint, self.config.model_name)
+        env = super().runtime_env()
+        env.update(build_local_env(endpoint, self.config.model_name))
+        return env
 
     def supports_usage_reporting(self) -> bool:
         """A local server has no usage limits to report."""
@@ -3234,6 +3295,15 @@ class MistralVibeProvider(AIProvider):
         self.master_fd: int | None = None
         self.session_active: bool = False  # For multi-turn support
 
+    def _get_env(self) -> dict:
+        """Environment with the per-account Vibe config dir for this account."""
+        home = _vibe_home_dir(self.config.account_name)
+        home.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["VIBE_HOME"] = str(home)
+        return env
+
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("vibe", self._notify_activity)
         if not ok:
@@ -3266,8 +3336,7 @@ class MistralVibeProvider(AIProvider):
         try:
             self._notify_activity("text", "Starting Vibe...")
 
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
+            env = self._get_env()
 
             def handle_chunk(decoded: str) -> None:
                 self._notify_activity("stream", decoded)

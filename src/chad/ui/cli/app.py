@@ -8,15 +8,21 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+
 from chad.ui.cli.terminal_io import (
     save_terminal,
     restore_terminal,
     enter_raw_mode,
 )
-from chad.ui.client import APIClient
+from chad.ui.client import APIClient, ChadAuthError
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
 from chad.util import provider_login
+from chad.util.config_manager import ConfigManager
 
+
+# Marker stored in config when verification is explicitly disabled.
+_VERIFICATION_NONE = ConfigManager.VERIFICATION_NONE
 
 _PROVIDER_LOGIN_LABELS = {
     "openai": "Codex",
@@ -24,6 +30,12 @@ _PROVIDER_LOGIN_LABELS = {
     "gemini": "Gemini",
     "qwen": "Qwen",
     "kimi": "Kimi",
+    "mistral": "Mistral",
+}
+
+# Where to get an API key for providers that authenticate with one.
+_PROVIDER_API_KEY_URLS = {
+    "mistral": "https://console.mistral.ai/codestral/cli",
 }
 
 
@@ -37,9 +49,12 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
         if provider_login.is_logged_in(provider, account_name):
             return True, "Already logged in"
         import webbrowser
-        print("Mistral requires an API key.")
-        print("Opening https://console.mistral.ai/codestral/cli ...")
-        webbrowser.open("https://console.mistral.ai/codestral/cli")
+        label = _PROVIDER_LOGIN_LABELS.get(provider, provider.title())
+        print(f"{label} requires an API key.")
+        key_url = _PROVIDER_API_KEY_URLS.get(provider)
+        if key_url:
+            print(f"Opening {key_url} ...")
+            webbrowser.open(key_url)
         print()
         try:
             api_key = input("Paste your API key: ").strip()
@@ -74,6 +89,30 @@ def get_terminal_size() -> tuple[int, int]:
 def clear_screen():
     """Clear the terminal screen."""
     os.system("cls" if os.name == "nt" else "clear")
+
+
+def _pause(message: str = "Press Enter to continue...") -> None:
+    """Wait for Enter, tolerating closed/piped stdin (EOF) and Ctrl+C."""
+    try:
+        input(message)
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
+def _print_full_diff(full_diff: dict) -> None:
+    """Print a full diff API response (DiffFullResponse) as unified diff text."""
+    prefixes = {"add": "+", "delete": "-"}
+    for file_info in full_diff.get("files", []):
+        path = file_info.get("new_path") or file_info.get("old_path") or "unknown"
+        print(f"--- {path}")
+        for hunk in file_info.get("hunks", []):
+            print(
+                f"@@ -{hunk.get('old_start', 0)},{hunk.get('old_count', 0)} "
+                f"+{hunk.get('new_start', 0)},{hunk.get('new_count', 0)} @@"
+            )
+            for line in hunk.get("lines", []):
+                prefix = prefixes.get(line.get("type"), " ")
+                print(f"{prefix}{line.get('content', '')}")
 
 
 def print_header():
@@ -172,8 +211,12 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Accounts:           {len(accounts)} configured")
         print(f"  Cleanup:            {cleanup.retention_days} days")
         print(f"  UI Mode:            {preferences.ui_mode}")
+        if verification_agent_name == _VERIFICATION_NONE:
+            verification_display = "(disabled)"
+        else:
+            verification_display = verification_agent_name or "(not set)"
         print(f"  Coding Agent:       {coding_agent or '(not set)'}")
-        print(f"  Verification Agent: {verification_agent_name or '(not set)'}")
+        print(f"  Verification Agent: {verification_display}")
         print(f"  Verification Model: {verification_model or '(auto)'}")
         print(f"  Max Verif Attempts: {max_verification_attempts}")
         print(f"  Local Endpoint:     {local_endpoint}")
@@ -224,14 +267,14 @@ def run_settings_menu(client: APIClient) -> None:
                         print("Please enter a number between 1 and 365")
             except ValueError:
                 print("Invalid number")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "3":
             print()
             if not accounts:
                 print("No accounts configured.")
             else:
-                options = [("None (disabled)", None)] + [
+                options = [("None (disabled)", _VERIFICATION_NONE)] + [
                     (f"{acc.name} ({acc.provider})", acc.name)
                     for acc in accounts
                 ]
@@ -243,20 +286,22 @@ def run_settings_menu(client: APIClient) -> None:
                             break
 
                 selected = select_from_list("Select verification agent:", options, default_idx)
-                if selected is not None or (selected is None and default_idx == 0):
+                if selected is None:
+                    print("Cancelled - verification agent unchanged")
+                elif selected == _VERIFICATION_NONE:
+                    client.set_verification_agent(_VERIFICATION_NONE)
+                    print("Verification agent disabled")
+                else:
                     client.set_verification_agent(selected)
-                    if selected:
-                        print(f"Verification agent set to: {selected}")
-                    else:
-                        print("Verification agent disabled")
-            input("Press Enter to continue...")
+                    print(f"Verification agent set to: {selected}")
+            _pause()
 
         elif choice == "4":
             # Set verification model
             print()
             print(f"Current verification model: {verification_model or '(auto)'}")
             print()
-            if not verification_agent_name:
+            if not verification_agent_name or verification_agent_name == _VERIFICATION_NONE:
                 print("No verification agent set. Set one first.")
             else:
                 # Get available models for the verification agent
@@ -283,7 +328,7 @@ def run_settings_menu(client: APIClient) -> None:
                         print("No models available for verification agent.")
                 except Exception as e:
                     print(f"Error getting models: {e}")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "5":
             # Set max verification attempts
@@ -301,7 +346,7 @@ def run_settings_menu(client: APIClient) -> None:
                         print("Please enter a number between 1 and 20")
             except ValueError:
                 print("Invalid number")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "6":
             # Action rules
@@ -398,7 +443,7 @@ def run_settings_menu(client: APIClient) -> None:
                             print(f"Error: {e}")
             except ValueError:
                 print("Invalid input")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "7":
             # Slack integration
@@ -438,7 +483,7 @@ def run_settings_menu(client: APIClient) -> None:
                         print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "8":
             # Remote access (tunnel)
@@ -495,7 +540,7 @@ def run_settings_menu(client: APIClient) -> None:
                             print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "9":
             # Config export/import
@@ -508,11 +553,19 @@ def run_settings_menu(client: APIClient) -> None:
             try:
                 sub = input("Choice (or Enter to skip): ").strip().lower()
                 if sub == "e":
-                    data = client.export_config()
+                    passphrase = input(
+                        "Passphrase to encrypt provider credentials "
+                        "(blank = exclude credentials): "
+                    ).strip() or None
+                    data = client.export_config(passphrase)
                     path = Path.home() / "chad-config.json"
                     import json as _json
                     path.write_text(_json.dumps(data, indent=2))
                     print(f"Config exported to {path}")
+                    if data.get("credentials_included"):
+                        print("Provider credentials included (encrypted with your passphrase).")
+                    else:
+                        print("Provider credentials excluded.")
                     print("Transfer this file to the target machine and import it there.")
                 elif sub == "i":
                     path_str = input("Path to config file: ").strip()
@@ -523,11 +576,22 @@ def run_settings_menu(client: APIClient) -> None:
                             print(f"File not found: {path}")
                         else:
                             data = _json.loads(path.read_text())
-                            result = client.import_config(data)
-                            print(result.get("message", "Config imported"))
+                            passphrase = None
+                            if "provider_auth_encrypted" in data:
+                                passphrase = input(
+                                    "Passphrase used to encrypt this export's credentials: "
+                                ).strip() or None
+                            try:
+                                result = client.import_config(data, passphrase)
+                                print(result.get("message", "Config imported"))
+                            except httpx.HTTPStatusError as e:
+                                if e.response.status_code != 400:
+                                    raise
+                                detail = e.response.json().get("detail", "invalid config")
+                                print(f"Import failed: {detail}")
             except (ValueError, EOFError) as e:
                 print(f"Error: {e}")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "10":
             # Set local model endpoint
@@ -541,7 +605,7 @@ def run_settings_menu(client: APIClient) -> None:
                     print(f"Local endpoint set to {saved}")
             except Exception as e:
                 print(f"Error: {e}")
-            input("Press Enter to continue...")
+            _pause()
 
 
 def run_accounts_menu(client: APIClient) -> None:
@@ -600,7 +664,7 @@ def run_accounts_menu(client: APIClient) -> None:
                 provider_choice = input(f"Select provider [1-{len(providers)}]: ").strip()
                 if not provider_choice.isdigit() or not (1 <= int(provider_choice) <= len(providers)):
                     print("Invalid selection")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 provider = providers[int(provider_choice) - 1]["type"]
@@ -608,14 +672,14 @@ def run_accounts_menu(client: APIClient) -> None:
                 account_name = input(f"Account name (e.g., my-{provider}): ").strip()
                 if not account_name:
                     print("Account name is required")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 # Check if account exists
                 existing = [acc.name for acc in accounts]
                 if account_name in existing:
                     print(f"Account '{account_name}' already exists")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 print()
@@ -635,7 +699,7 @@ def run_accounts_menu(client: APIClient) -> None:
             except (EOFError, KeyboardInterrupt):
                 pass
 
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "2":
             print()
@@ -649,7 +713,7 @@ def run_accounts_menu(client: APIClient) -> None:
                     if confirm == "y":
                         client.delete_account(selected)
                         print(f"Account '{selected}' deleted")
-            input("Press Enter to continue...")
+            _pause()
 
         elif choice == "3":
             print()
@@ -667,7 +731,7 @@ def run_accounts_menu(client: APIClient) -> None:
                 if selected:
                     client.set_account_role(selected, "CODING")
                     print(f"Coding agent set to: {selected}")
-            input("Press Enter to continue...")
+            _pause()
 
 
 def run_task_with_streaming(
@@ -831,7 +895,7 @@ def run_cli(client: APIClient) -> None:
     Args:
         client: API client instance
     """
-    stream_client = SyncStreamClient(base_url=client.base_url)
+    stream_client = SyncStreamClient(base_url=client.base_url, token=client.token)
 
     try:
         while True:
@@ -852,8 +916,10 @@ def run_cli(client: APIClient) -> None:
                     coding_provider = acc.provider
                     break
 
-            # Get verification agent from config
+            # Get verification agent from config (the disabled marker means "no agent")
             verification_account = client.get_verification_agent()
+            if verification_account == _VERIFICATION_NONE:
+                verification_account = None
 
             if not accounts:
                 print("No accounts configured.")
@@ -924,12 +990,12 @@ def run_cli(client: APIClient) -> None:
                     resume_project = selected_session.project_path or default_project
                     if not resume_project:
                         print("\nNo project path available for this session.")
-                        input("Press Enter to continue...")
+                        _pause()
                         continue
 
                     if not coding_account or not coding_provider:
                         print("\nPlease select a coding agent first.")
-                        input("Press Enter to continue...")
+                        _pause()
                         continue
 
                     clear_screen()
@@ -952,7 +1018,7 @@ def run_cli(client: APIClient) -> None:
                     print()
                     print("-" * 60)
                     print(f"Agent exited with code: {exit_code}")
-                    input("\nPress Enter to continue...")
+                    _pause("\nPress Enter to continue...")
 
             elif choice == "2":
                 # Change project path
@@ -965,7 +1031,7 @@ def run_cli(client: APIClient) -> None:
                         print(f"Project path set to: {expanded}")
                     else:
                         print(f"Path does not exist: {expanded}")
-                input("Press Enter to continue...")
+                _pause()
 
             elif choice == "3":
                 # Change agent
@@ -985,30 +1051,30 @@ def run_cli(client: APIClient) -> None:
                     if selected:
                         client.set_account_role(selected, "CODING")
                         print(f"Agent set to: {selected}")
-                input("Press Enter to continue...")
+                _pause()
 
             elif choice == "1":
                 # Start a task
                 if not default_project:
                     print("\nPlease set a project path first.")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 project_path = str(Path(default_project).expanduser().resolve())
                 if not Path(project_path).exists():
                     print(f"\nProject path does not exist: {project_path}")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 git_dir = Path(project_path) / ".git"
                 if not git_dir.exists():
                     print(f"\nProject is not a git repository: {project_path}")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 if not coding_account or not coding_provider:
                     print("\nPlease select a coding agent first.")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 # Get task description
@@ -1029,7 +1095,7 @@ def run_cli(client: APIClient) -> None:
                 task_description = "\n".join(lines).strip()
                 if not task_description:
                     print("\nNo task description provided.")
-                    input("Press Enter to continue...")
+                    _pause()
                     continue
 
                 # Create session via API
@@ -1107,16 +1173,18 @@ def run_cli(client: APIClient) -> None:
                                 # Show diff
                                 full_diff = client.get_full_diff(session.id)
                                 print()
-                                for file_info in full_diff.get("files", []):
-                                    print(f"--- {file_info.get('path', 'unknown')}")
-                                    for hunk in file_info.get("hunks", []):
-                                        print(hunk.get("content", ""))
+                                _print_full_diff(full_diff)
                                 continue
 
                             elif action == "m":
                                 # Merge to main
+                                print()
+                                try:
+                                    commit_message = input("Commit message (Enter for default): ").strip() or None
+                                except (EOFError, KeyboardInterrupt):
+                                    commit_message = None
                                 print("\nMerging changes...")
-                                result = client.merge_worktree(session.id)
+                                result = client.merge_worktree(session.id, commit_message=commit_message)
                                 if result.success:
                                     print("Merge successful!")
                                 else:
@@ -1124,7 +1192,8 @@ def run_cli(client: APIClient) -> None:
                                     if result.conflicts:
                                         print("Conflicts:")
                                         for c in result.conflicts:
-                                            print(f"  - {c}")
+                                            hunk_count = len(c.get("hunks", []))
+                                            print(f"  - {c.get('file_path', 'unknown')} ({hunk_count} conflicting hunks)")
                                 break
 
                             elif action == "x":
@@ -1155,8 +1224,11 @@ def run_cli(client: APIClient) -> None:
                 except Exception as e:
                     print(f"\nError checking worktree: {e}")
 
-                input("\nPress Enter to continue...")
+                _pause("\nPress Enter to continue...")
 
+    except ChadAuthError as e:
+        print(f"\n{e}")
+        print("Re-pair by entering the pairing code (subdomain:token) shown by `chad --tunnel`.")
     finally:
         stream_client.close()
 
@@ -1166,7 +1238,7 @@ def _parse_connection_input(text: str) -> tuple[str, str | None]:
 
     Handles:
       - Direct URLs: "http://localhost:3184" -> ("http://localhost:3184", None)
-      - Host:port: "localhost:8000" -> ("http://localhost:3184", None)
+      - Host:port: "localhost:8000" -> ("http://localhost:8000", None)
       - CF tunnel with token: "subdomain:mytoken" -> ("https://subdomain.trycloudflare.com", "mytoken")
       - CF tunnel subdomain: "my-tunnel" -> ("https://my-tunnel.trycloudflare.com", None)
       - Empty string: ("", None)
@@ -1193,7 +1265,7 @@ def _parse_connection_input(text: str) -> tuple[str, str | None]:
     return (f"https://{text}.trycloudflare.com", None)
 
 
-def _run_disconnected_menu(original_url: str) -> None:
+def _run_disconnected_menu(original_url: str, original_token: str | None = None) -> None:
     """Show a menu when the server is unreachable, allowing the user to connect."""
     print(f"\nCannot connect to Chad server at {original_url}")
     print("Make sure the server is running (chad --mode server)\n")
@@ -1212,7 +1284,7 @@ def _run_disconnected_menu(original_url: str) -> None:
             print("Goodbye!")
             return
         elif choice == "2":
-            url = original_url
+            url, token = original_url, original_token
         elif choice == "1":
             try:
                 raw = input("Server URL or pairing code: ").strip()
@@ -1221,13 +1293,13 @@ def _run_disconnected_menu(original_url: str) -> None:
                 return
             if not raw:
                 continue
-            url, _token = _parse_connection_input(raw)
+            url, token = _parse_connection_input(raw)
             if not url:
                 continue
         else:
             continue
 
-        client = APIClient(base_url=url)
+        client = APIClient(base_url=url, token=token)
         try:
             status = client.get_status()
             print(f"Connected to Chad server v{status.get('version', 'unknown')}")
@@ -1247,17 +1319,19 @@ def launch_cli_ui(api_base_url: str = "http://localhost:3184", password: str | N
     """Launch the Chad CLI UI.
 
     Args:
-        api_base_url: Base URL of the Chad API server
+        api_base_url: Base URL of the Chad API server, or a pairing code
+            ("subdomain:token") from a server started with `chad --tunnel`
         password: Optional pre-authenticated password (unused, kept for compatibility)
     """
-    client = APIClient(base_url=api_base_url)
+    url, token = _parse_connection_input(api_base_url)
+    client = APIClient(base_url=url, token=token)
 
     try:
         status = client.get_status()
         print(f"Connected to Chad server v{status.get('version', 'unknown')}")
     except Exception:
         client.close()
-        _run_disconnected_menu(api_base_url)
+        _run_disconnected_menu(url, token)
         return
 
     try:

@@ -43,6 +43,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
+    setTimeout(() => setStatus(null), 3000);
   }, []);
 
   // Load projects and pre-fill default path on connect
@@ -117,7 +118,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   }, [api, selectedProject, connected]);
 
   const saveProjectSettings = useCallback(async (
-    overrides?: { preferredCodingAgent?: Account | null; codingAgent?: Account | null },
+    overrides?: {
+      preferredCodingAgent?: Account | null;
+      codingAgent?: Account | null;
+      previewPortMode?: "disabled" | "auto" | "manual";
+      instructionsPaths?: string[];
+    },
   ) => {
     if (!selectedProject) return null;
     const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
@@ -125,8 +131,8 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       project_path: selectedProject,
       lint_command: lintCommand || null,
       test_command: testCommand || null,
-      instructions_paths: instructionsPaths.filter(p => p.trim()),
-      preview_port_mode: previewPortMode,
+      instructions_paths: (overrides?.instructionsPaths ?? instructionsPaths).filter(p => p.trim()),
+      preview_port_mode: overrides?.previewPortMode ?? previewPortMode,
       preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       preview_command: previewCommand || null,
       preferred_coding_agent: (overrides?.preferredCodingAgent ?? preferredCodingAgent)?.name || null,
@@ -219,11 +225,13 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
     }
   }, [api, selectedProject, loadProjects, flash, onProjectsChange]);
 
-  const handleSave = useCallback(async () => {
+  const persistSettings = useCallback(async (
+    overrides?: Parameters<typeof saveProjectSettings>[0],
+  ) => {
     if (!selectedProject) return;
     setSaving(true);
     try {
-      await saveProjectSettings();
+      await saveProjectSettings(overrides);
       flash("Saved");
       onProjectsChange?.();
     } catch {
@@ -232,6 +240,8 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       setSaving(false);
     }
   }, [selectedProject, saveProjectSettings, flash, onProjectsChange]);
+
+  const handleSave = useCallback(() => { void persistSettings(); }, [persistSettings]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -315,8 +325,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   }, []);
 
   const removeInstructionsPath = useCallback((index: number) => {
-    setInstructionsPaths(prev => prev.filter((_, i) => i !== index));
-  }, []);
+    // Pass the updated list explicitly so the save doesn't use the stale
+    // closure value of instructionsPaths.
+    const next = instructionsPaths.filter((_, i) => i !== index);
+    setInstructionsPaths(next);
+    void persistSettings({ instructionsPaths: next });
+  }, [instructionsPaths, persistSettings]);
 
   const updateInstructionsPath = useCallback((index: number, value: string) => {
     setInstructionsPaths(prev => prev.map((p, i) => i === index ? value : p));
@@ -429,6 +443,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                         selected={codingAgent}
                         onSelect={handleAutoconfigureAgentChange}
                         placeholder="Autoconfigure agent"
+                        autoSelect={false}
                       />
                       <button
                         className="autoconfigure-btn"
@@ -470,8 +485,11 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                     <select
                       value={previewPortMode}
                       onChange={(e) => {
-                        setPreviewPortMode(e.target.value as "disabled" | "auto" | "manual");
-                        setTimeout(handleSave, 0);
+                        const mode = e.target.value as "disabled" | "auto" | "manual";
+                        setPreviewPortMode(mode);
+                        // Save with the new mode directly — state updates are
+                        // async, so a plain handleSave would persist the old one.
+                        void persistSettings({ previewPortMode: mode });
                       }}
                     >
                       <option value="disabled">Disabled</option>
@@ -565,6 +583,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                       selected={codingAgent}
                       onSelect={handleAutoconfigureAgentChange}
                       placeholder="Autoconfigure agent"
+                      autoSelect={false}
                     />
                     <button
                       className="autoconfigure-btn"

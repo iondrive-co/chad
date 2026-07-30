@@ -25,6 +25,7 @@ import type {
   SessionResume,
   TaskCreate,
   TaskStatus,
+  TunnelStatus,
   UserPreferences,
   VerificationSettings,
   WebSocketTicket,
@@ -251,7 +252,8 @@ export class ChadAPI {
     );
   }
 
-  setAccountRole(name: string, role: string): Promise<Account> {
+  /** Assign the CODING role to an account, or pass null to clear its role. */
+  setAccountRole(name: string, role: "CODING" | null): Promise<Account> {
     return this.put(`/api/v1/accounts/${encodeURIComponent(name)}/role`, {
       role,
     });
@@ -433,30 +435,20 @@ export class ChadAPI {
 
   // ── Tunnel ──
 
-  getTunnelStatus(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  getTunnelStatus(): Promise<TunnelStatus> {
     return this.get("/api/v1/tunnel");
   }
 
-  startTunnel(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  /**
+   * Start the tunnel. Publishing the server to the internet requires auth, so
+   * the server mints a token if it has none and returns it here along with the
+   * pairing code — the caller must adopt the token to keep making requests.
+   */
+  startTunnel(): Promise<TunnelStatus> {
     return this.post("/api/v1/tunnel/start");
   }
 
-  stopTunnel(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  stopTunnel(): Promise<TunnelStatus> {
     return this.post("/api/v1/tunnel/stop");
   }
 
@@ -567,14 +559,20 @@ export class ChadAPI {
 
   // ── Config Export / Import ──
 
-  exportConfig(): Promise<Record<string, unknown>> {
-    return this.get("/api/v1/config/export");
+  /**
+   * Export the config. Provider credentials are only included when a
+   * passphrase is given, encrypted with it; `credentials_included` on the
+   * result says which kind of export this is.
+   */
+  exportConfig(passphrase?: string | null): Promise<Record<string, unknown>> {
+    return this.post("/api/v1/config/export", { passphrase: passphrase ?? null });
   }
 
   importConfig(
     config: Record<string, unknown>,
+    passphrase?: string | null,
   ): Promise<{ ok: boolean; message: string; install_errors?: Record<string, string> }> {
-    return this.post("/api/v1/config/import", { config });
+    return this.post("/api/v1/config/import", { config, passphrase: passphrase ?? null });
   }
 
   // ── Session Log ──

@@ -33,10 +33,10 @@ def _latest_mtime(paths: Iterable[Path]) -> float:
     return latest
 
 
-def _is_stale(src: Path, built: Path) -> bool:
+def _is_stale(sources: Iterable[Path], built: Path) -> bool:
     if not built.exists():
         return True
-    return _latest_mtime([src]) > built.stat().st_mtime
+    return _latest_mtime(sources) > built.stat().st_mtime
 
 
 def _safe_run(cmd: list[str], cwd: Path) -> None:
@@ -84,15 +84,17 @@ def ensure_ui_built(
             _log("[*] Installing UI dependencies...", verbose=verbose)
             _safe_run([npm, "install"], cwd=ui_dir)
 
-        if force or _is_stale(client_src, client_dist):
+        if force or _is_stale([client_src], client_dist):
             _log("[*] Rebuilding chad-client...", verbose=verbose)
             _safe_run([npm, "run", "build"], cwd=client_dir)
 
-        if force or _is_stale(ui_src, ui_dist):
+        # The chad-client TS source is bundled into the UI, so changes to
+        # client/src must also mark the UI bundles stale.
+        if force or _is_stale([ui_src, client_src], ui_dist):
             _log("[*] Rebuilding React UI...", verbose=verbose)
             _safe_run([npm, "run", "build"], cwd=ui_dir)
 
-        if force or _is_stale(ui_src, portable_dist):
+        if force or _is_stale([ui_src, client_src], portable_dist):
             _log("[*] Rebuilding portable React UI...", verbose=verbose)
             _safe_run(
                 [

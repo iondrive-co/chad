@@ -1,6 +1,7 @@
 """Tests for config manager module."""
 
 from unittest.mock import patch
+import json
 import os
 import pytest
 from chad.util.config_manager import CONFIG_BASE_KEYS, ConfigManager, validate_config_keys
@@ -122,7 +123,7 @@ class TestConfigManager:
         assert mgr.is_first_run() is False
 
     def test_export_config(self, tmp_path):
-        """Test exporting config returns the full config with provider_auth."""
+        """Export returns settings; credentials need an explicit passphrase."""
         config_path = tmp_path / "test.conf"
         mgr = ConfigManager(config_path)
         config = {
@@ -136,7 +137,25 @@ class TestConfigManager:
         assert exported["password_hash"] == "hash123"
         assert exported["encryption_salt"] == "salt123"
         assert "myaccount" in exported["accounts"]
-        assert "provider_auth" in exported
+        # Provider credentials are never exported in the clear
+        assert exported["credentials_included"] is False
+        assert "provider_auth" not in exported
+        assert "provider_auth_encrypted" not in exported
+
+    def test_export_config_with_passphrase_encrypts_credentials(self, tmp_path):
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+        mgr.save_config({
+            "password_hash": "hash123",
+            "encryption_salt": "salt123",
+            "accounts": {"myaccount": {"provider": "anthropic", "key": "enc_key"}},
+        })
+
+        exported = mgr.export_config(passphrase="pass-phrase")
+        assert exported["credentials_included"] is True
+        assert exported["provider_auth_encrypted"]
+        assert exported["provider_auth_salt"]
+        assert "provider_auth" not in exported
 
     def test_import_config(self, tmp_path):
         """Test importing config replaces existing config."""
@@ -209,8 +228,12 @@ class TestConfigManager:
             },
         })
 
-        exported = mgr.export_config()
-        assert len(exported["provider_auth"]) == 2
+        exported = mgr.export_config(passphrase="transfer-pass")
+        assert exported["credentials_included"] is True
+        # Credentials travel encrypted — the tokens must not be readable
+        serialized = json.dumps(exported)
+        assert "tok123" not in serialized
+        assert "test@example.com" not in serialized
 
         # Wipe the auth files and import into a new config
         claude_auth.unlink()
@@ -218,13 +241,25 @@ class TestConfigManager:
 
         dst_path = tmp_path / "dest.conf"
         dst = ConfigManager(dst_path)
-        dst.import_config(exported)
+        dst.import_config(exported, passphrase="transfer-pass")
 
         # Auth files should be restored
         assert claude_auth.exists()
         assert '"oauthAccount"' in claude_auth.read_text()
         assert codex_auth.exists()
         assert '"access_token"' in codex_auth.read_text()
+
+    def test_import_requires_passphrase_for_encrypted_export(self, tmp_path):
+        config_path = tmp_path / "source.conf"
+        mgr = ConfigManager(config_path)
+        mgr.save_config({"password_hash": "h", "encryption_salt": "s", "accounts": {}})
+        exported = mgr.export_config(passphrase="right-pass")
+
+        dst = ConfigManager(tmp_path / "dest.conf")
+        with pytest.raises(ValueError, match="passphrase is required"):
+            dst.import_config(exported)
+        with pytest.raises(ValueError, match="wrong passphrase"):
+            dst.import_config(exported, passphrase="nope")
 
     @patch("getpass.getpass")
     def test_setup_main_password(self, mock_getpass, tmp_path):

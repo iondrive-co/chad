@@ -58,6 +58,16 @@ async def create_worktree(session_id: str) -> WorktreeStatus:
     if not wt_mgr.is_git_repo():
         raise HTTPException(status_code=400, detail="Project is not a git repository")
 
+    # Recreating a worktree discards its contents — refuse while it still
+    # holds unmerged work instead of silently destroying it.
+    if wt_mgr.worktree_exists(session_id) and wt_mgr.has_changes(
+        session_id, session.worktree_base_commit
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Worktree already exists with uncommitted changes; merge or reset it first",
+        )
+
     # Use session ID as task ID
     worktree_path, base_commit = wt_mgr.create_worktree(session_id)
 

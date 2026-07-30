@@ -1185,7 +1185,7 @@ class TestFinalThresholdCheckAfterPhase:
                 "usage_threshold",
                 "Paused, waiting for weekly reset (ETA: 30m)",
             )
-            return ""
+            return 0, ""
 
         loop._handle_await_reset = fake_handle_await_reset
 
@@ -2064,7 +2064,7 @@ class TestNegativeExitCodeWithPendingAction:
             "action": "await_reset",
             "label": "session",
         }
-        result = loop._handle_await_reset(
+        wait_exit, result = loop._handle_await_reset(
             action=action,
             session=None,
             task_description="cleanup ui",

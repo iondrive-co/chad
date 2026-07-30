@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, DragEvent, UIEvent } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, DragEvent, UIEvent } from "react";
 import type { ChadAPI, ConversationItem, Account, ProviderInfo, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import type { TerminalChunk } from "../hooks/useStream.ts";
@@ -24,6 +24,8 @@ interface Props {
   token?: string;
   /** Whether the session is active (from polled session list data). */
   sessionActive?: boolean;
+  /** Whether the session is paused (from polled session list data). */
+  sessionPaused?: boolean;
   /** Available projects for the project dropdown. */
   projects?: ProjectSettings[];
 }
@@ -52,6 +54,7 @@ export function ChatView({
   apiBaseUrl,
   token,
   sessionActive = false,
+  sessionPaused = false,
   projects = [],
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
@@ -99,6 +102,13 @@ export function ChatView({
   const [screenshots, setScreenshots] = useState<UploadedScreenshot[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // Server URLs (relative, e.g. /api/v1/uploads/<uuid>.png) for screenshots
+  // uploaded in this view, keyed by their absolute server path. Task events
+  // carry the absolute path, so this lets thumbnails resolve back to the URL.
+  const uploadedUrlsRef = useRef<Map<string, string>>(new Map());
+  // Object URLs for composer previews, tracked so unmount can revoke any that
+  // were neither removed nor sent.
+  const previewUrlsRef = useRef<Set<string>>(new Set());
 
   // Historical transcript loaded from persisted log for finished sessions.
   // Mirrors the live stream: prose chunks (with seq) plus tool_call_started events.
@@ -138,9 +148,21 @@ export function ChatView({
   const [verificationSettings, setVerificationSettings] = useState<VerificationSettings | null>(null);
   const verificationDefaultsApplied = useRef(false);
 
+  // Guards the pending-followup effect against double-sends when its deps
+  // change identity while a follow-up request is still in flight.
+  const followupInFlightRef = useRef(false);
+
+  // Whether resuming a paused session is in progress.
+  const [resuming, setResuming] = useState(false);
+
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
+
+  // Whether polling has confirmed the current task active on the server. Lets
+  // the recovery effect below tell "task ended without a WS complete" apart
+  // from "polling hasn't caught up with a task we just started".
+  const sawSessionActiveRef = useRef(false);
 
   const { terminalChunks, events, completed, error, reset } = useStream(
     taskActive ? sessionId : null,
@@ -153,9 +175,12 @@ export function ChatView({
   // panel renders a Claude-Code-style transcript from these — tool calls plus
   // prose — rather than the raw terminal text.
   const usingLive = taskActive || terminalChunks.length > 0 || events.length > 0;
-  const transcript = buildTranscript(
-    usingLive ? terminalChunks : historicalChunks,
-    usingLive ? events : historicalEvents,
+  const transcript = useMemo(
+    () => buildTranscript(
+      usingLive ? terminalChunks : historicalChunks,
+      usingLive ? events : historicalEvents,
+    ),
+    [usingLive, terminalChunks, events, historicalChunks, historicalEvents],
   );
   const hasOutput = transcript.length > 0;
   const hasHistorical = historicalChunks.length > 0 || historicalEvents.length > 0;
@@ -391,13 +416,17 @@ export function ChatView({
   // Load verification settings and default verification agent
   useEffect(() => {
     let cancelled = false;
+    // Claim the defaults BEFORE any await so concurrent/repeat runs can't both
+    // apply them — a later run must never wipe a manual account pick.
+    const applyDefaults = !verificationDefaultsApplied.current;
+    verificationDefaultsApplied.current = true;
 
     api.getVerificationSettings()
       .then((settings) => {
         if (cancelled) return;
         setVerificationSettings(settings);
-        // On first load, if verification is disabled clear the account
-        if (!settings.enabled) {
+        // Only the first load clears the account when verification is disabled.
+        if (applyDefaults && !settings.enabled) {
           setVerificationAccount(null);
         }
       })
@@ -407,22 +436,20 @@ export function ChatView({
         }
       });
 
-    api.getVerificationAgent()
-      .then((r) => {
-        if (cancelled) return;
-        const name = r.account_name;
-        if (!name || name === "__verification_none__") return;
-        if (verificationDefaultsApplied.current) return;
-        api.getAccount(name)
-          .then((acct) => {
-            if (!cancelled) {
-              setVerificationAccount(acct);
-              verificationDefaultsApplied.current = true;
-            }
-          })
-          .catch(() => { /* ignore missing account */ });
-      })
-      .catch(() => {});
+    if (applyDefaults) {
+      api.getVerificationAgent()
+        .then((r) => {
+          if (cancelled) return;
+          const name = r.account_name;
+          if (!name || name === "__verification_none__") return;
+          api.getAccount(name)
+            .then((acct) => {
+              if (!cancelled) setVerificationAccount(acct);
+            })
+            .catch(() => { /* ignore missing account */ });
+        })
+        .catch(() => {});
+    }
 
     return () => { cancelled = true; };
   }, [api]);
@@ -458,44 +485,77 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [sessionActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Append conversation items from streaming events
+  // Recover when the session goes inactive without a WS "complete" (socket
+  // dropped, task finished elsewhere, cancel raced): clear the Running state
+  // and load the persisted end reason / worktree status. Only fires once the
+  // poll has actually confirmed the task active, so a freshly started task
+  // isn't clobbered while the session list catches up.
+  useEffect(() => {
+    if (sessionActive) {
+      sawSessionActiveRef.current = true;
+      return;
+    }
+    if (!taskActive || sending || completed || !sawSessionActiveRef.current) return;
+    sawSessionActiveRef.current = false;
+    setTaskActive(false);
+    onSessionChange();
+    setWorktreeRefresh((v) => v + 1);
+    api.getEvents(sessionId, 0, "session_ended").then((data) => {
+      const ends = (data.events as { type: string; reason?: string }[])
+        .filter((e) => e.type === "session_ended");
+      setEndReason(ends.length > 0 ? ends[ends.length - 1].reason || "completed" : "completed");
+    }).catch(() => {
+      setEndReason("completed");
+    });
+    api.getWorktreeStatus(sessionId).then((status) => {
+      if (status.exists && status.has_changes) {
+        setShowMerge(true);
+      }
+    }).catch(() => {});
+  }, [api, sessionId, sessionActive, taskActive, sending, completed, onSessionChange]);
+
+  // Append conversation items from streaming events. Side effects (task
+  // metadata, watermark) are derived from the event list up front so the
+  // setConversation updater stays pure.
   useEffect(() => {
     if (events.length === 0) return;
 
-    setConversation((prev) => {
-      let updated = [...prev];
+    const sinceSeq = conversationSeqRef.current;
+    const newItems: ConversationItem[] = [];
+    let latestStart: any = null;
+    let maxSeq = sinceSeq;
 
-      for (const ev of events) {
-        const seq = ev.seq ?? 0;
-        if (seq && seq <= conversationSeqRef.current) continue;
-        const data: any = ev.data || {};
-        const evtType = data.type || data.event_type;
+    for (const ev of events) {
+      const seq = ev.seq ?? 0;
+      if (seq && seq <= sinceSeq) continue;
+      const data: any = ev.data || {};
+      const evtType = data.type || data.event_type;
 
-        if (evtType === "session_started") {
-          // Preserve conversation on follow-up (when prev has items)
-          // Only clear on first task start
-          if (prev.length === 0) {
-            updated = [];
-          }
-          setTaskDescription(data.task_description ?? null);
-          setVerificationAgent(data.verification_account ?? null);
-          setTaskScreenshots(data.screenshots ?? []);
-          setHasRunTask(true);
-          if (seq) conversationSeqRef.current = seq;
-          continue;
-        }
-
-        const item = mapEventToConversationItem(data, seq);
-        if (item) {
-          updated.push(item);
-          if (seq) {
-            conversationSeqRef.current = Math.max(conversationSeqRef.current, seq);
-          }
-        }
+      if (evtType === "session_started") {
+        latestStart = data;
+        if (seq) maxSeq = Math.max(maxSeq, seq);
+        continue;
       }
 
-      return updated;
-    });
+      const item = mapEventToConversationItem(data, seq);
+      if (item) {
+        newItems.push(item);
+        if (seq) maxSeq = Math.max(maxSeq, seq);
+      }
+    }
+
+    conversationSeqRef.current = maxSeq;
+
+    if (latestStart) {
+      setTaskDescription(latestStart.task_description ?? null);
+      setVerificationAgent(latestStart.verification_account ?? null);
+      setTaskScreenshots(latestStart.screenshots ?? []);
+      setHasRunTask(true);
+    }
+
+    if (newItems.length > 0) {
+      setConversation((prev) => [...prev, ...newItems]);
+    }
   }, [events, mapEventToConversationItem]);
 
   // Track whether the user has scrolled up off the bottom of the transcript.
@@ -561,15 +621,11 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (taskDesc: string, isFollowup: boolean = false) => {
-    // Capture the current event log position before the task starts, so the
-    // stream only shows events from this task (not old milestones/output).
-    try {
-      const data = await api.getEvents(sessionId, 0, "session_started");
-      streamSinceSeqRef.current = data.latest_seq;
-    } catch {
-      streamSinceSeqRef.current = undefined;
-    }
+  const handleTaskStart = useCallback((taskDesc: string, isFollowup: boolean = false) => {
+    // streamSinceSeqRef was captured by startTaskRequest BEFORE the task
+    // started; capturing again here would skip the session_started event and
+    // the first output.
+    sawSessionActiveRef.current = false;
     reset();
     // Clear historical transcript when starting a new task
     setHistoricalChunks([]);
@@ -584,7 +640,7 @@ export function ChatView({
       conversationSeqRef.current = 0;
     }
     setHasRunTask(true);
-  }, [api, sessionId, reset]);
+  }, [reset]);
 
   const handleMergeDone = useCallback(() => {
     setShowMerge(false);
@@ -595,13 +651,37 @@ export function ChatView({
     try {
       await api.cancelSession(sessionId);
       setEndReason("cancelled");
-    } catch {
-      // ignore
+    } catch (e) {
+      setConversationError(e instanceof Error ? e.message : "Failed to cancel task");
     }
   }, [api, sessionId]);
 
+  const handleResume = useCallback(async () => {
+    setResuming(true);
+    setConversationError(null);
+    try {
+      await api.resumeSession(sessionId);
+      onSessionChange();
+    } catch (e) {
+      setConversationError(e instanceof Error ? e.message : "Failed to resume session");
+    } finally {
+      setResuming(false);
+    }
+  }, [api, sessionId, onSessionChange]);
+
   // Determine if we're connected to a remote server (need tunnel) or local (open directly)
   const isRemote = Boolean(apiBaseUrl) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiBaseUrl || "");
+
+  // Resolve a task screenshot's absolute server path to a servable URL: prefer
+  // the URL returned when this view uploaded it, otherwise derive the uploads
+  // URL from the filename (historical events only carry the absolute path).
+  const screenshotSrc = useCallback((path: string) => {
+    const base = apiBaseUrl || "";
+    const url = uploadedUrlsRef.current.get(path);
+    if (url) return `${base}${url}`;
+    const filename = path.split(/[\\/]/).pop() || path;
+    return `${base}/api/v1/uploads/${encodeURIComponent(filename)}`;
+  }, [apiBaseUrl]);
 
   const handlePreview = useCallback(async () => {
     if (previewPortMode === "disabled") return;
@@ -649,8 +729,12 @@ export function ChatView({
 
     for (const file of imageFiles) {
       try {
-        const result = await api.uploadFile(file);
+        const result = await api.uploadFile(file) as { path: string; filename: string; url?: string };
+        if (result.url) {
+          uploadedUrlsRef.current.set(result.path, result.url);
+        }
         const previewUrl = URL.createObjectURL(file);
+        previewUrlsRef.current.add(previewUrl);
         setScreenshots((prev) => [
           ...prev,
           { path: result.path, filename: result.filename, previewUrl },
@@ -661,6 +745,15 @@ export function ChatView({
     }
     setUploading(false);
   }, [api]);
+
+  // Revoke any composer preview object URLs still alive on unmount.
+  useEffect(() => {
+    const urls = previewUrlsRef.current;
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      urls.clear();
+    };
+  }, []);
 
   const handleDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
@@ -722,6 +815,7 @@ export function ChatView({
       const removed = prev[index];
       if (removed?.previewUrl) {
         URL.revokeObjectURL(removed.previewUrl);
+        previewUrlsRef.current.delete(removed.previewUrl);
       }
       return prev.filter((_, i) => i !== index);
     });
@@ -827,7 +921,10 @@ export function ChatView({
     try {
       await startTaskRequest(message, hasRunTask, screenshots);
       setInputText("");
-      screenshots.forEach((s) => URL.revokeObjectURL(s.previewUrl));
+      screenshots.forEach((s) => {
+        URL.revokeObjectURL(s.previewUrl);
+        previewUrlsRef.current.delete(s.previewUrl);
+      });
       setScreenshots([]);
     } catch (e) {
       if (e instanceof Error) {
@@ -851,8 +948,13 @@ export function ChatView({
 
   useEffect(() => {
     if (!pendingFollowup || taskActive || sending) return;
+    // Re-runs caused by dep identity changes (e.g. startTaskRequest) must not
+    // double-send while a follow-up is in flight — and the in-flight request
+    // must still clear `sending` when it settles, so an effect-cleanup
+    // cancellation flag cannot be used here.
+    if (followupInFlightRef.current) return;
+    followupInFlightRef.current = true;
 
-    let cancelled = false;
     const message = pendingFollowup;
     setPendingFollowup(null);
     setConversationError(null);
@@ -862,7 +964,6 @@ export function ChatView({
       try {
         await startTaskRequest(message, true, []);
       } catch (e) {
-        if (cancelled) return;
         setPendingFollowup(message);
         if (e instanceof Error) {
           setConversationError(e.message);
@@ -870,15 +971,10 @@ export function ChatView({
           setConversationError("Failed to start follow-up task");
         }
       } finally {
-        if (!cancelled) {
-          setSending(false);
-        }
+        followupInFlightRef.current = false;
+        setSending(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
   }, [pendingFollowup, taskActive, sending, startTaskRequest]);
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -940,6 +1036,17 @@ export function ChatView({
           refreshTrigger={worktreeRefresh}
         />
         <SessionLog api={api} sessionId={sessionId} />
+        {sessionPaused && (
+          <button
+            type="button"
+            className="resume-btn"
+            onClick={handleResume}
+            disabled={resuming}
+            title="Resume this paused session"
+          >
+            {resuming ? "Resuming..." : "Resume"}
+          </button>
+        )}
       </div>
 
       {/* Task description - shown when a task is running or has output */}
@@ -955,7 +1062,7 @@ export function ChatView({
               {taskScreenshots.map((path, i) => (
                 <img
                   key={i}
-                  src={`/api/v1/file?path=${encodeURIComponent(path)}`}
+                  src={screenshotSrc(path)}
                   alt={`Screenshot ${i + 1}`}
                   className="task-screenshot-thumbnail"
                 />

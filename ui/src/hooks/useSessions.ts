@@ -15,20 +15,38 @@ export function useSessions(api: ChadAPI | null, version: number) {
   const [loaded, setLoaded] = useState(false);
   const apiRef = useRef(api);
   apiRef.current = api;
+  // Request generation: a response only lands if no newer request has started
+  // since, so a slow old poll can never overwrite fresher data.
+  const requestGenRef = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!apiRef.current) return;
+    const gen = ++requestGenRef.current;
     setLoading(true);
     try {
       const result = await apiRef.current.listSessions();
-      setSessions(result.sessions);
-      setLoaded(true);
+      if (gen === requestGenRef.current) {
+        setSessions(result.sessions);
+        setLoaded(true);
+      }
     } catch {
       // Silently handle — connection may have dropped
     } finally {
-      setLoading(false);
+      if (gen === requestGenRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
+
+  // A different api instance means a different server — the old list is
+  // meaningless there, so drop it (and invalidate in-flight requests) before
+  // the first fetch against the new server.
+  useEffect(() => {
+    requestGenRef.current++;
+    setSessions([]);
+    setLoaded(false);
+    setLoading(false);
+  }, [api]);
 
   // Refresh when api or version changes
   useEffect(() => {

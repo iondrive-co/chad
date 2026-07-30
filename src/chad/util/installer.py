@@ -10,6 +10,34 @@ from .utils import ensure_directory, is_tool_installed, run_command
 DEFAULT_TOOLS_DIR = Path.home() / ".chad" / "tools"
 
 
+def _is_unsafe_member_name(name: str) -> bool:
+    """True when an archive member would extract outside the target dir."""
+    pure = Path(name)
+    return pure.is_absolute() or ".." in pure.parts or name.startswith(("/", "\\"))
+
+
+def _assert_safe_zip_members(zf) -> None:
+    """Reject zip members that escape the extraction directory."""
+    for name in zf.namelist():
+        if _is_unsafe_member_name(name):
+            raise ValueError(f"Refusing to extract unsafe archive member: {name}")
+
+
+def _assert_safe_tar_members(tf) -> None:
+    """Reject tar members that escape the directory or aren't file/dir/symlink."""
+    for member in tf.getmembers():
+        if _is_unsafe_member_name(member.name):
+            raise ValueError(f"Refusing to extract unsafe archive member: {member.name}")
+        if member.islnk() or member.issym():
+            target = member.linkname
+            if _is_unsafe_member_name(target):
+                raise ValueError(
+                    f"Refusing to extract link escaping the archive: {member.name}"
+                )
+        elif not (member.isfile() or member.isdir()):
+            raise ValueError(f"Refusing to extract special archive member: {member.name}")
+
+
 @dataclass(frozen=True)
 class CLIToolSpec:
     """Metadata describing how to install a CLI tool."""
@@ -90,10 +118,16 @@ class AIToolInstaller:
         import os
 
         if os.name == "nt":
+            # pip --prefix installs console scripts into Scripts/, not bin/,
+            # so a successful install used to resolve to "not found"
+            scripts_dir = self.tools_dir / "Scripts"
             candidates = [
                 self.bin_dir / f"{binary}.exe",
                 self.bin_dir / f"{binary}.cmd",
                 self.bin_dir / binary,
+                scripts_dir / f"{binary}.exe",
+                scripts_dir / f"{binary}.cmd",
+                scripts_dir / binary,
             ]
         else:
             candidates = [
@@ -336,15 +370,19 @@ class AIToolInstaller:
         try:
             ensure_directory(node_dir)
 
+            # Downloaded archives are untrusted input: refuse members that
+            # would escape tools_dir (path traversal / absolute paths) and
+            # anything that isn't a regular file or directory.
             if archive.endswith(".zip"):
                 with zipfile.ZipFile(download_path) as zf:
+                    _assert_safe_zip_members(zf)
                     zf.extractall(self.tools_dir)
-            elif archive.endswith(".tar.xz"):
-                with tarfile.open(download_path, "r:xz") as tf:
-                    tf.extractall(self.tools_dir)
-            elif archive.endswith(".tar.gz"):
-                with tarfile.open(download_path, "r:gz") as tf:
-                    tf.extractall(self.tools_dir)
+            elif archive.endswith((".tar.xz", ".tar.gz")):
+                mode = "r:xz" if archive.endswith(".tar.xz") else "r:gz"
+                with tarfile.open(download_path, mode) as tf:
+                    _assert_safe_tar_members(tf)
+                    # data filter also strips setuid bits / odd member types
+                    tf.extractall(self.tools_dir, filter="data")
 
             # The archive extracts to a versioned directory — rename to "node"
             extracted_name = archive.replace(".tar.xz", "").replace(".tar.gz", "").replace(".zip", "")

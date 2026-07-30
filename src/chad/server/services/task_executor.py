@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +31,7 @@ from chad.util.prompts import (
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
+from chad.util.utils import safe_home
 from chad.util.providers import CLAUDE_THINKING_BUDGETS
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
@@ -444,6 +446,10 @@ def _read_project_docs(project_path: Path) -> str | None:
     return build_doc_reference_text(project_path)
 
 
+class TaskAlreadyRunningError(ValueError):
+    """Raised when a session already has a running task (maps to HTTP 409)."""
+
+
 class TaskState(str, Enum):
     """Task execution states."""
 
@@ -568,16 +574,14 @@ def build_agent_command(
             full_prompt = build_prompt(
                 task_description, project_docs, project_path, screenshots
             )
-        elif phase == "continuation":
-            # Agent exited early without completion - send continuation prompt
-            full_prompt = get_continuation_prompt(task_description, exploration_output or "")
-        elif phase == "revision":
-            # Revision after verification failure - override_prompt already set above
+        elif phase in ("continuation", "revision"):
+            # Agent exited early without completion - send continuation prompt.
+            # (Revisions always arrive with an override_prompt and are handled above.)
             full_prompt = get_continuation_prompt(task_description, exploration_output or "")
 
     if provider == "anthropic":
         # Claude Code CLI
-        config_dir = Path.home() / ".chad" / "claude-configs" / account_name
+        config_dir = safe_home() / ".chad" / "claude-configs" / account_name
         cmd = [
             resolve_tool("claude"),
             "-p",  # non-interactive print mode
@@ -604,7 +608,7 @@ def build_agent_command(
     elif provider == "openai":
         # Codex CLI with isolated home - use exec mode for non-interactive execution
         # This prevents the agent from stopping after outputting text and waiting for input
-        codex_home = Path.home() / ".chad" / "codex-homes" / account_name
+        codex_home = safe_home() / ".chad" / "codex-homes" / account_name
         cmd = [
             resolve_tool("codex"),
             "exec",  # Non-interactive mode - runs to completion
@@ -612,12 +616,13 @@ def build_agent_command(
             "--skip-git-repo-check",  # Avoid git validation issues in worktrees
             "-C",
             str(project_path),
-            "-",  # Read prompt from stdin
         ]
         if model and model != "default":
             cmd.extend(["-m", model])
         if reasoning_effort and reasoning_effort != "default":
             cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        # The stdin marker must come after all options
+        cmd.append("-")
         env["HOME"] = str(codex_home)
         if full_prompt:
             initial_input = full_prompt + "\n"
@@ -625,30 +630,47 @@ def build_agent_command(
     elif provider == "gemini":
         # Gemini CLI in YOLO mode with stream-json output.
         # Use -p for headless execution; positional prompts keep the CLI interactive.
+        # GEMINI_CLI_HOME is the CLI's home override: it resolves its .gemini
+        # config/credentials dir under it, isolating accounts from each other.
+        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
+        gemini_home = safe_home() / ".chad" / "gemini-homes" / account_name
+        gemini_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("gemini"), "-y", "--output-format", "stream-json"]
         if model and model != "default":
             cmd.extend(["-m", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
+        env["GEMINI_CLI_HOME"] = str(gemini_home)
 
     elif provider == "qwen":
         # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
         # Using stdin doesn't work reliably because qwen checks stdin at startup
         # before we can send data via PTY. With subprocess.Popen(shell=False),
         # there's no shell escaping issues, just OS argv limits (~128KB on Linux).
+        # The CLI resolves .qwen from os.homedir(), so redirect HOME per account.
+        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
+        qwen_home = safe_home() / ".chad" / "qwen-homes" / account_name
+        qwen_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("qwen"), "-y", "--output-format", "stream-json"]
         if model and model != "default":
             cmd.extend(["-m", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
+        env["HOME"] = str(qwen_home)
+        if os.name == "nt":
+            # Node's os.homedir() reads USERPROFILE on Windows.
+            env["USERPROFILE"] = str(qwen_home)
 
     elif provider == "local":
         # Local OpenAI-compatible server (llama.cpp, vLLM, ...) driven through the
         # Qwen Code CLI's OpenAI-compatible auth. Endpoint comes from config.
+        # Same per-account HOME isolation as the qwen provider (same CLI).
         from chad.util.config_manager import ConfigManager
         from chad.util.providers import build_local_env
 
         endpoint = ConfigManager().get_local_endpoint()
+        local_home = safe_home() / ".chad" / "qwen-homes" / account_name
+        local_home.mkdir(parents=True, exist_ok=True)
         cmd = [
             resolve_tool("qwen"),
             "--auth-type",
@@ -657,22 +679,30 @@ def build_agent_command(
             "--output-format",
             "stream-json",
         ]
+        env["HOME"] = str(local_home)
+        if os.name == "nt":
+            env["USERPROFILE"] = str(local_home)
         env.update(build_local_env(endpoint, model))
         if full_prompt:
             cmd.extend(["-p", full_prompt])
 
     elif provider == "mistral":
         # Vibe CLI (Mistral) - pass prompt via -p flag like MistralVibeProvider expects
+        # VIBE_HOME is the CLI's config dir itself (config.toml/.env live in it),
+        # isolating each account's credentials.
+        vibe_home = safe_home() / ".chad" / "vibe-homes" / account_name
+        vibe_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("vibe"), "--output", "text"]
         if model and model != "default":
             cmd.extend(["--model", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
             initial_input = None
+        env["VIBE_HOME"] = str(vibe_home)
 
     elif provider == "kimi":
         # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
-        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        kimi_home = safe_home() / ".chad" / "kimi-homes" / account_name
         cmd = [resolve_tool("kimi"), "--output-format", "stream-json", "--print"]
         # Only pass -m for explicit model selection. The CLI uses config default_model
         # otherwise. Model keys must include the platform prefix (e.g. "kimi-code/kimi-k2.5").
@@ -691,6 +721,7 @@ def build_agent_command(
             account_name=account_name,
             phase=phase,
             run_duration_seconds=mock_run_duration_seconds,
+            prompt=full_prompt,
         )
 
     else:
@@ -702,17 +733,39 @@ def build_agent_command(
     return cmd, env, initial_input
 
 
+def _mock_python_executable() -> str:
+    """Interpreter for the mock agent script.
+
+    sys.executable is correct for normal installs (and the only reliable
+    choice on Windows, which has no `python3`). In a frozen build
+    sys.executable is the chad binary itself, so fall back to a python on
+    PATH.
+    """
+    if getattr(sys, "frozen", False):
+        import shutil
+        return shutil.which("python3") or shutil.which("python") or "python3"
+    return sys.executable
+
+
 def _build_mock_agent_command(
     project_path: Path,
     task_description: str | None,
     account_name: str = "",
     phase: str = "exploration",
     run_duration_seconds: int = 0,
+    prompt: str | None = None,
 ) -> list[str]:
     """Build mock agent command that simulates a real agent CLI."""
     duration = max(0, int(run_duration_seconds or 0))
-    # Escape the account name for embedding in the script string
-    safe_account = (account_name or "").replace("'", "\\'").replace('"', '\\"')
+    # A verification pass is recognizable by its conclusion prompt; the mock
+    # then emits a verdict JSON instead of a coding summary so the real
+    # verification code path can complete.
+    is_verification = bool(prompt) and "final verdict" in prompt.lower()
+    # Embed all dynamic values as JSON literals — raw f-string interpolation
+    # broke on Windows paths (\\U escapes) and quotes in paths.
+    account_json = json.dumps(account_name or "")
+    project_json = json.dumps(str(project_path))
+    phase_json = json.dumps(phase.capitalize())
     # Python script that outputs ANSI-formatted text like a real agent
     # Uses minimal delays to keep tests fast while still demonstrating ANSI output
     script = f'''
@@ -723,7 +776,8 @@ import time
 import random
 
 # Check mock quota before doing any work
-_account = "{safe_account}"
+_account = {account_json}
+_project = {project_json}
 if _account:
     _conf_path = os.path.join(os.path.expanduser("~"), ".chad.conf")
     _env_conf = os.environ.get("CHAD_CONFIG")
@@ -753,8 +807,8 @@ def writeln(text=""):
 
 # Header
 writeln(f"{{BLUE}}{{BOLD}}Mock Agent v1.0{{RESET}}")
-writeln(f"{{GRAY}}Working in: {project_path}{{RESET}}")
-writeln(f"{{CYAN}}Prompt: {phase.capitalize()}{{RESET}}")
+writeln(f"{{GRAY}}Working in: {{_project}}{{RESET}}")
+writeln(f"{{CYAN}}Prompt: {{{phase_json}}}{{RESET}}")
 writeln()
 
 # Thinking
@@ -767,26 +821,29 @@ writeln(f"{{GREEN}}✓{{RESET}} Read 15 lines")
 writeln(f"{{CYAN}}Tool: Glob{{RESET}} {{GRAY}}src/**/*.py{{RESET}}")
 writeln(f"{{GREEN}}✓{{RESET}} Found 8 files")
 
-# Make actual change
-writeln()
-writeln(f"{{YELLOW}}> Making changes...{{RESET}}")
+is_verification = {is_verification}
 
-import datetime
-bugs_path = "{project_path}/BUGS.md"
-try:
-    with open(bugs_path, "a") as f:
-        f.write(f"\\n## Mock Task - {{datetime.datetime.now().isoformat()}}\\n")
-        f.write("- Fixed simulated bug\\n")
-        f.write("- Added mock improvements\\n")
-    writeln(f"{{CYAN}}Tool: Edit{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
-    writeln(f"{{GREEN}}✓{{RESET}} Modified BUGS.md")
-except Exception as e:
-    writeln(f"{{YELLOW}}Note:{{RESET}} Could not modify BUGS.md: {{e}}")
+if not is_verification:
+    # Make actual change
+    writeln()
+    writeln(f"{{YELLOW}}> Making changes...{{RESET}}")
 
-# Verification
-writeln()
-writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
-writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
+    import datetime
+    bugs_path = os.path.join(_project, "BUGS.md")
+    try:
+        with open(bugs_path, "a") as f:
+            f.write(f"\\n## Mock Task - {{datetime.datetime.now().isoformat()}}\\n")
+            f.write("- Fixed simulated bug\\n")
+            f.write("- Added mock improvements\\n")
+        writeln(f"{{CYAN}}Tool: Edit{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
+        writeln(f"{{GREEN}}✓{{RESET}} Modified BUGS.md")
+    except Exception as e:
+        writeln(f"{{YELLOW}}Note:{{RESET}} Could not modify BUGS.md: {{e}}")
+
+    # Verification
+    writeln()
+    writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
+    writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
 
 # Optional long-running stream simulation for handover tests
 run_duration_seconds = {duration}
@@ -808,9 +865,26 @@ if run_duration_seconds > 0:
 # Summary
 writeln()
 writeln(f"{{BLUE}}{{BOLD}}Task Complete{{RESET}}")
-writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
+if is_verification:
+    # Verdict JSON so parse_verification_response succeeds
+    verdict = {{"passed": True, "summary": "Mock verification passed", "issues": []}}
+    writeln("```json")
+    writeln(json.dumps(verdict))
+    writeln("```")
+else:
+    writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
+    # Completion JSON so the executor sees the task as complete instead of
+    # burning three continuation runs looking for a summary
+    summary = {{
+        "change_summary": "Mock change: appended a simulated fix entry to BUGS.md",
+        "completion_status": "complete",
+        "files_changed": ["BUGS.md"],
+    }}
+    writeln("```json")
+    writeln(json.dumps(summary))
+    writeln("```")
 '''
-    return ["python3", "-c", script]
+    return [_mock_python_executable(), "-c", script]
 
 
 class TaskExecutor:
@@ -941,7 +1015,7 @@ class TaskExecutor:
                 if existing_task.session_id != session_id:
                     continue
                 if existing_task.state == TaskState.RUNNING:
-                    raise ValueError(
+                    raise TaskAlreadyRunningError(
                         f"Task {existing_task.id} is already running in session {session_id}"
                     )
             self._tasks[task.id] = task
@@ -1283,16 +1357,25 @@ class TaskExecutor:
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
 
+        # The PTY session vanished under us (e.g. the session was deleted and
+        # its streams cleaned up externally). Treat as cancellation — the old
+        # default of 0 made a killed agent read as a successful run.
+        if pty_session is None:
+            return -1, ""
+
         # Get final exit code.  The reader thread sets exit_code after
         # _proc.wait(), but terminate() sets active=False first.  Wait briefly
         # for the reader thread to populate exit_code to avoid a race.
-        exit_code = 0
-        if pty_session:
-            for _ in range(20):  # up to 2 seconds
-                if pty_session.exit_code is not None:
-                    break
-                time.sleep(0.1)
-            exit_code = pty_session.exit_code if pty_session.exit_code is not None else 0
+        for _ in range(50):  # up to 5 seconds
+            if pty_session.exit_code is not None:
+                break
+            time.sleep(0.1)
+        if pty_session.exit_code is None:
+            # Unknown outcome — report failure rather than assuming success
+            emit("status", status="⚠️ Agent exit code unavailable; treating as failure")
+            exit_code = 1
+        else:
+            exit_code = pty_session.exit_code
 
         # Flush any trailing Codex output (last line may lack a newline)
         if codex_parser:
@@ -1503,6 +1586,7 @@ class TaskExecutor:
                 run_phase_fn=self._run_phase,
                 emit_fn=emit,
                 worktree_path=worktree_path,
+                max_verification_attempts=self.config_manager.get_max_verification_attempts(),
                 is_quota_exhausted_fn=quota_checker,
                 get_session_usage_fn=_check_provider.get_session_usage_percentage if _check_provider else None,
                 get_weekly_usage_fn=_check_provider.get_weekly_usage_percentage if _check_provider else None,
@@ -1540,6 +1624,7 @@ class TaskExecutor:
             if task.cancel_requested or final_exit_code == -1:
                 emit("status", status="Task cancelled")
                 task.state = TaskState.CANCELLED
+                task.result = "Task cancelled"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
@@ -1549,10 +1634,11 @@ class TaskExecutor:
 
             # Handle timeout
             if final_exit_code == -2:
-                emit("complete", success=False, message="Agent timed out", exit_code=-1)
+                emit("complete", success=False, message="Agent timed out", exit_code=-2)
                 emit("message_complete", speaker="CODING AI", content="Task timed out")
                 task.state = TaskState.FAILED
                 task.error = "Agent timed out"
+                task.result = "Agent timed out"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
@@ -1569,7 +1655,10 @@ class TaskExecutor:
 
             if final_exit_code == 0:
                 task.state = TaskState.COMPLETED
-                task.result = "Task completed successfully"
+                if event_loop.verification_passed is False:
+                    task.result = "Task completed, but verification did not pass"
+                else:
+                    task.result = "Task completed successfully"
                 session.has_worktree_changes = git_mgr.has_changes(
                     task.session_id,
                     session.worktree_base_commit,
@@ -1578,13 +1667,14 @@ class TaskExecutor:
                 emit(
                     "complete",
                     success=True,
-                    message="Task completed successfully",
+                    message=task.result,
                     has_changes=session.has_worktree_changes,
                     exit_code=final_exit_code,
                 )
             else:
                 task.state = TaskState.FAILED
                 task.error = f"Agent exited with code {final_exit_code}"
+                task.result = task.error
                 session.status = "completed"
                 emit(
                     "complete",
@@ -1608,6 +1698,7 @@ class TaskExecutor:
             emit("error", error=str(e))
             task.state = TaskState.FAILED
             task.error = str(e)
+            task.result = str(e)
             task.completed_at = datetime.now(timezone.utc)
             session.status = "interrupted"
 

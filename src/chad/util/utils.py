@@ -8,10 +8,28 @@ import tempfile
 from pathlib import Path, PosixPath
 
 
-def run_command(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
-    result = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+# Installs (npm/pip) are slow but must not hang a login thread forever
+DEFAULT_COMMAND_TIMEOUT = 600
+
+
+def run_command(
+    cmd: list[str],
+    cwd: Path | None = None,
+    timeout: int | None = DEFAULT_COMMAND_TIMEOUT,
+) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        return 1, stdout, f"{stderr}\nCommand timed out after {timeout}s: {' '.join(cmd)}"
     return result.returncode, result.stdout, result.stderr
 
 

@@ -1,5 +1,6 @@
 """Provider and account management endpoints."""
 
+import os
 import threading
 
 from fastapi import APIRouter, HTTPException
@@ -72,6 +73,9 @@ async def list_providers() -> ProviderListResponse:
         ("mistral", "Mistral (Vibe)", "Mistral models via Vibe CLI"),
         ("kimi", "Moonshot (Kimi Code)", "Kimi models via Kimi Code CLI"),
     ]
+    # The mock provider is only offered in dev mode (chad --dev)
+    if os.environ.get("CHAD_DEV_MODE"):
+        provider_meta.append(("mock", "Mock (dev)", "Simulated agent for development and testing"))
     providers = []
     for provider_type, name, description in provider_meta:
         levels = get_reasoning_levels(provider_type)
@@ -241,13 +245,18 @@ async def set_account_reasoning(name: str, request: AccountReasoningUpdate) -> A
 
 @router.put("/accounts/{name}/role", response_model=AccountResponse)
 async def set_account_role(name: str, request: AccountRoleUpdate) -> AccountResponse:
-    """Assign a role to an account."""
+    """Assign a role to an account, or clear its roles when role is null."""
     config_mgr = get_config_manager()
 
     if not config_mgr.has_account(name):
         raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
 
-    config_mgr.assign_role(name, request.role)
+    if request.role is None:
+        for role, account in config_mgr.list_role_assignments().items():
+            if account == name:
+                config_mgr.clear_role(role)
+    else:
+        config_mgr.assign_role(name, request.role)
 
     accounts_dict = config_mgr.list_accounts()
     provider = accounts_dict.get(name)

@@ -4,7 +4,21 @@ Note: UI mode tests are in test_cli_integration.py::TestUIModeSwitching.
 Note: PTY runner command tests are in test_cli_integration.py::TestProviderCommandGeneration.
 """
 
+from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
+
 import pytest
+
+
+@dataclass
+class MockAccount:
+    """Mock account for testing."""
+    name: str
+    provider: str
+    model: str | None = None
+    reasoning: str | None = None
+    role: str | None = None
+    ready: bool = True
 
 
 class TestCLIImports:
@@ -130,7 +144,7 @@ class TestProviderOauthFlow:
         assert "[models." in config_text
 
     def test_mistral_prompts_for_api_key(self, monkeypatch, tmp_path):
-        """Mistral auth should prompt for an API key and write it to ~/.vibe/.env."""
+        """Mistral auth should prompt for an API key and write it to the account's vibe home."""
         import webbrowser
         from chad.ui.cli.app import _run_provider_oauth
 
@@ -144,7 +158,7 @@ class TestProviderOauthFlow:
 
         assert success is True
         assert "Login successful" in message
-        env_file = tmp_path / ".vibe" / ".env"
+        env_file = tmp_path / ".chad" / "vibe-homes" / "my-vibe" / ".env"
         assert env_file.exists()
         assert "sk-test-key-123" in env_file.read_text()
 
@@ -274,6 +288,373 @@ class TestDisconnectedCLI:
 
         _run_disconnected_menu("http://localhost:8000")
         assert "http://localhost:8000" in connect_attempts
+
+
+class TestPause:
+    """Tests for the _pause helper (EOF-safe "Press Enter" prompts)."""
+
+    def test_pause_swallows_eof(self, monkeypatch):
+        from chad.ui.cli.app import _pause
+
+        def raise_eof(_prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+        _pause()  # must not raise
+
+    def test_pause_swallows_keyboard_interrupt(self, monkeypatch):
+        from chad.ui.cli.app import _pause
+
+        def raise_interrupt(_prompt=""):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", raise_interrupt)
+        _pause("\nPress Enter to continue...")  # must not raise
+
+    def test_pause_reads_input(self, monkeypatch):
+        from chad.ui.cli.app import _pause
+
+        prompts = []
+        monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt))
+        _pause()
+        assert prompts == ["Press Enter to continue..."]
+
+
+class TestDiffRendering:
+    """Tests for CLI rendering of the full-diff API response (DiffFullResponse schema)."""
+
+    def test_print_full_diff_uses_api_schema(self, capsys):
+        """Renders old_path/new_path and hunk lines with +/-/space prefixes."""
+        from chad.ui.cli.app import _print_full_diff
+
+        full_diff = {
+            "files": [
+                {
+                    "old_path": "src/foo.py",
+                    "new_path": "src/foo.py",
+                    "is_new": False,
+                    "is_deleted": False,
+                    "is_binary": False,
+                    "hunks": [
+                        {
+                            "old_start": 1,
+                            "old_count": 2,
+                            "new_start": 1,
+                            "new_count": 3,
+                            "lines": [
+                                {"type": "context", "content": "def foo():"},
+                                {"type": "delete", "content": "    return 1"},
+                                {"type": "add", "content": "    return 2"},
+                                {"type": "add", "content": "    # done"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        _print_full_diff(full_diff)
+
+        out = capsys.readouterr().out
+        assert "--- src/foo.py" in out
+        assert "@@ -1,2 +1,3 @@" in out
+        assert " def foo():" in out
+        assert "-    return 1" in out
+        assert "+    return 2" in out
+        assert "unknown" not in out
+
+    def test_print_full_diff_new_file_falls_back_to_old_path(self, capsys):
+        """When new_path is empty (deleted file), old_path is used."""
+        from chad.ui.cli.app import _print_full_diff
+
+        full_diff = {
+            "files": [
+                {
+                    "old_path": "gone.py",
+                    "new_path": "",
+                    "hunks": [],
+                }
+            ]
+        }
+
+        _print_full_diff(full_diff)
+
+        out = capsys.readouterr().out
+        assert "--- gone.py" in out
+
+
+def _make_settings_client(accounts, verification_agent=None):
+    """Mock API client with everything run_settings_menu reads."""
+    from chad.ui.client.api_client import CleanupSettings, Preferences
+
+    client = MagicMock()
+    client.list_accounts.return_value = accounts
+    client.get_cleanup_settings.return_value = CleanupSettings(retention_days=7, auto_cleanup=True)
+    client.get_preferences.return_value = Preferences(last_project_path="", ui_mode="cli")
+    client.get_verification_agent.return_value = verification_agent
+    client.get_preferred_verification_model.return_value = None
+    client.get_max_verification_attempts.return_value = 3
+    client.get_local_endpoint.return_value = "http://localhost:8000"
+    client.get_action_settings.return_value = []
+    client.get_slack_settings.return_value = {"enabled": False, "channel": None, "has_token": False}
+    return client
+
+
+class TestVerificationAgentMenu:
+    """Tests for the 'Set verification agent' settings option."""
+
+    def test_none_disabled_sends_sentinel(self, monkeypatch):
+        """Choosing 'None (disabled)' must send the VERIFICATION_NONE marker, not None."""
+        from chad.ui.cli.app import run_settings_menu, _VERIFICATION_NONE
+
+        client = _make_settings_client([MockAccount(name="agent-1", provider="mock", role="CODING")])
+
+        inputs = iter(["3", "1", "", "b"])  # settings option 3 -> pick option 1 (None) -> pause -> back
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        run_settings_menu(client)
+
+        client.set_verification_agent.assert_called_once_with(_VERIFICATION_NONE)
+
+    def test_cancel_leaves_setting_unchanged(self, monkeypatch):
+        """Cancelling the picker (q) must not touch the verification agent."""
+        from chad.ui.cli.app import run_settings_menu
+
+        client = _make_settings_client(
+            [MockAccount(name="agent-1", provider="mock", role="CODING")],
+            verification_agent="agent-1",
+        )
+
+        inputs = iter(["3", "q", "", "b"])  # settings option 3 -> cancel picker -> pause -> back
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        run_settings_menu(client)
+
+        client.set_verification_agent.assert_not_called()
+
+    def test_sentinel_displayed_as_disabled(self, monkeypatch, capsys):
+        """The stored sentinel renders as '(disabled)', not the raw marker string."""
+        from chad.ui.cli.app import run_settings_menu, _VERIFICATION_NONE
+
+        client = _make_settings_client(
+            [MockAccount(name="agent-1", provider="mock", role="CODING")],
+            verification_agent=_VERIFICATION_NONE,
+        )
+
+        inputs = iter(["b"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        run_settings_menu(client)
+
+        out = capsys.readouterr().out
+        assert "Verification Agent: (disabled)" in out
+        assert _VERIFICATION_NONE not in out
+
+
+class TestAPIClientWorktreeParams:
+    """Tests that APIClient forwards optional worktree parameters."""
+
+    @pytest.fixture
+    def client(self):
+        from chad.ui.client.api_client import APIClient
+
+        api = APIClient(base_url="http://test")
+        api._client = MagicMock()
+        return api
+
+    def test_merge_worktree_sends_commit_message(self, client):
+        resp = MagicMock()
+        resp.json.return_value = {"success": True, "message": "ok", "conflicts": None}
+        client._client.post.return_value = resp
+
+        result = client.merge_worktree("sess-1", commit_message="Custom message")
+
+        assert result.success is True
+        _, kwargs = client._client.post.call_args
+        assert kwargs["json"] == {"commit_message": "Custom message"}
+
+    def test_merge_worktree_omits_empty_commit_message(self, client):
+        resp = MagicMock()
+        resp.json.return_value = {"success": True, "message": "ok", "conflicts": None}
+        client._client.post.return_value = resp
+
+        client.merge_worktree("sess-1")
+
+        _, kwargs = client._client.post.call_args
+        assert kwargs["json"] == {}
+
+    def test_get_diff_summary_sends_compare_branch(self, client):
+        resp = MagicMock()
+        resp.json.return_value = {"summary": "s", "files_changed": 1, "insertions": 2, "deletions": 3}
+        client._client.get.return_value = resp
+
+        client.get_diff_summary("sess-1", compare_branch="main")
+
+        _, kwargs = client._client.get.call_args
+        assert kwargs["params"] == {"compare_branch": "main"}
+
+    def test_get_full_diff_sends_compare_branch(self, client):
+        resp = MagicMock()
+        resp.json.return_value = {"session_id": "sess-1", "summary": {}, "files": []}
+        client._client.get.return_value = resp
+
+        client.get_full_diff("sess-1", compare_branch="main")
+
+        _, kwargs = client._client.get.call_args
+        assert kwargs["params"] == {"compare_branch": "main"}
+
+
+class TestCLIMergeFlow:
+    """Tests for the post-task merge flow in run_cli."""
+
+    @pytest.fixture
+    def git_repo(self, tmp_path):
+        import subprocess
+
+        repo_path = tmp_path / "test_repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True)
+        (repo_path / "README.md").write_text("# Test")
+        return repo_path
+
+    def _make_client(self, git_repo):
+        from datetime import datetime
+        from chad.ui.client.api_client import (
+            CleanupSettings, DiffSummary, Preferences, Session, WorktreeStatus,
+        )
+
+        client = MagicMock()
+        client.base_url = "http://localhost:8000"
+        client.list_accounts.return_value = [MockAccount(name="test-agent", provider="mock", role="CODING")]
+        client.get_preferences.return_value = Preferences(last_project_path=str(git_repo), ui_mode="cli")
+        client.get_cleanup_settings.return_value = CleanupSettings(retention_days=7, auto_cleanup=True)
+        client.get_verification_agent.return_value = None
+        client.list_sessions.return_value = []
+        client.get_conversation.return_value = {"items": []}
+        client.create_session.return_value = Session(
+            id="test-session-123",
+            name="Test task",
+            project_path=str(git_repo),
+            active=True,
+            has_worktree=True,
+            has_changes=True,
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        client.get_worktree_status.return_value = WorktreeStatus(
+            exists=True,
+            path=str(git_repo / ".chad-worktrees" / "test"),
+            branch="chad/test-session-123",
+            base_commit="abc123",
+            has_changes=True,
+        )
+        client.get_diff_summary.return_value = DiffSummary(
+            summary="1 file changed", files_changed=1, insertions=5, deletions=2,
+        )
+        return client
+
+    def test_merge_prompts_for_commit_message(self, git_repo, monkeypatch):
+        """Merging asks for an optional commit message and passes it through."""
+        from chad.ui.cli.app import run_cli
+        from chad.ui.client.api_client import MergeResult
+
+        client = self._make_client(git_repo)
+        client.merge_worktree.return_value = MergeResult(success=True, message="ok", conflicts=None)
+
+        inputs = iter([
+            "1",                # Start task
+            "test task",        # Task description
+            "",                 # End description
+            "m",                # Merge
+            "Custom message",   # Commit message
+            "",                 # Press Enter to continue
+            "q",                # Quit
+        ])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0):
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(client)
+
+        client.merge_worktree.assert_called_once_with("test-session-123", commit_message="Custom message")
+
+    def test_merge_conflicts_printed_as_file_paths(self, git_repo, monkeypatch, capsys):
+        """Conflicts are shown as file paths with hunk counts, not raw dicts."""
+        from chad.ui.cli.app import run_cli
+        from chad.ui.client.api_client import MergeResult
+
+        client = self._make_client(git_repo)
+        client.merge_worktree.return_value = MergeResult(
+            success=False,
+            message="Merge conflicts detected",
+            conflicts=[{"file_path": "src/foo.py", "hunks": [{"ours": ["a"], "theirs": ["b"], "base": []}]}],
+        )
+
+        inputs = iter([
+            "1",           # Start task
+            "test task",   # Task description
+            "",            # End description
+            "m",           # Merge
+            "",            # Commit message (default)
+            "",            # Press Enter to continue
+            "q",           # Quit
+        ])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0):
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(client)
+
+        client.merge_worktree.assert_called_once_with("test-session-123", commit_message=None)
+        out = capsys.readouterr().out
+        assert "src/foo.py (1 conflicting hunks)" in out
+        assert "'file_path'" not in out
+
+    def test_verification_none_sentinel_not_passed_to_task(self, git_repo, monkeypatch):
+        """A stored disable marker must not be forwarded as the verification account."""
+        from chad.ui.cli.app import run_cli, _VERIFICATION_NONE
+        from chad.ui.client.api_client import MergeResult
+
+        client = self._make_client(git_repo)
+        client.get_verification_agent.return_value = _VERIFICATION_NONE
+        client.merge_worktree.return_value = MergeResult(success=True, message="ok", conflicts=None)
+
+        inputs = iter(["1", "test task", "", "k", "", "q"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0) as mock_run:
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(client)
+
+        assert mock_run.call_args.kwargs["verification_account"] is None
+
+
+class TestProviderApiKeyPrompt:
+    """Tests for the API-key login prompt copy."""
+
+    def test_api_key_prompt_uses_provider_label(self, monkeypatch, capsys, tmp_path):
+        """The prompt names the provider being added instead of hard-coding Mistral."""
+        import webbrowser
+        from chad.ui.cli.app import _run_provider_oauth
+
+        _stub_installer(monkeypatch)
+        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(webbrowser, "open", lambda *_a, **_k: False)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "sk-test-key")
+
+        success, _message = _run_provider_oauth("mistral", "my-vibe")
+
+        assert success is True
+        out = capsys.readouterr().out
+        assert "Mistral requires an API key." in out
+        assert "console.mistral.ai" in out
 
 
 class TestCLIStreamingMilestones:

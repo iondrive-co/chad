@@ -26,6 +26,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "verified-password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -49,6 +51,8 @@ class TestMain:
         mock_config.is_first_run.return_value = True
         mock_config.setup_main_password.return_value = "new-password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -70,6 +74,8 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -93,6 +99,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -113,6 +121,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -131,6 +141,8 @@ class TestMain:
         """Test main in server-only mode (no password needed)."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--mode", "server"]):
@@ -153,6 +165,8 @@ class TestMain:
         """Tunnel mode should take the headless server path and set up password."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.is_first_run.return_value = True
         mock_config.setup_main_password.return_value = "test"
         mock_config_class.return_value = mock_config
@@ -178,6 +192,8 @@ class TestMain:
         """Tunnel mode should verify password when config already exists."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "test"
         mock_config_class.return_value = mock_config
@@ -198,6 +214,8 @@ class TestMain:
         """Tunnel mode should use CHAD_PASSWORD env var when set."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--tunnel"]):
@@ -215,6 +233,8 @@ class TestMain:
         """Tunnel mode should not accept an existing remote server URL."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--tunnel", "--server-url", "http://127.0.0.1:9999"]):
@@ -232,6 +252,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -253,6 +275,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -276,6 +300,8 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -299,6 +325,8 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
@@ -325,6 +353,8 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
         mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 

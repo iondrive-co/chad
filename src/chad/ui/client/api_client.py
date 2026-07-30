@@ -7,6 +7,29 @@ from typing import Any
 import httpx
 
 
+class ChadAuthError(RuntimeError):
+    """Raised when the server rejects a request due to missing/invalid auth."""
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or "Server requires an authentication token "
+            "(pair with the code shown by `chad --tunnel`)"
+        )
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    """Build default headers carrying the bearer token, if any."""
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _check_response(resp: httpx.Response) -> None:
+    """Raise ChadAuthError on 401, otherwise defer to raise_for_status()."""
+    if resp.status_code == 401:
+        raise ChadAuthError()
+    resp.raise_for_status()
+
+
 @dataclass
 class Session:
     """Session data from API."""
@@ -99,14 +122,16 @@ class CleanupSettings:
 class APIClient:
     """Client for Chad server REST API."""
 
-    def __init__(self, base_url: str = "http://localhost:3184"):
+    def __init__(self, base_url: str = "http://localhost:3184", token: str | None = None):
         """Initialize the API client.
 
         Args:
             base_url: Base URL of the Chad server
+            token: Bearer token for servers started with auth (chad --tunnel)
         """
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=30.0)
+        self.token = token
+        self._client = httpx.Client(timeout=30.0, headers=_auth_headers(token))
 
     def close(self):
         """Close the HTTP client."""
@@ -132,7 +157,7 @@ class APIClient:
     def get_status(self) -> dict[str, Any]:
         """Get server status including health, version, and uptime."""
         resp = self._client.get(f"{self.base_url}/status")
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Sessions
@@ -149,31 +174,31 @@ class APIClient:
             data["name"] = name
 
         resp = self._client.post(self._url("/sessions"), json=data)
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_session(resp.json())
 
     def list_sessions(self) -> list[Session]:
         """List all sessions."""
         resp = self._client.get(self._url("/sessions"))
-        resp.raise_for_status()
+        _check_response(resp)
         data = resp.json()
         return [self._parse_session(s) for s in data.get("sessions", [])]
 
     def get_session(self, session_id: str) -> Session:
         """Get a session by ID."""
         resp = self._client.get(self._url(f"/sessions/{session_id}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_session(resp.json())
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session."""
         resp = self._client.delete(self._url(f"/sessions/{session_id}"))
-        resp.raise_for_status()
+        _check_response(resp)
 
     def cancel_session(self, session_id: str) -> dict[str, Any]:
         """Request cancellation of the current task in a session."""
         resp = self._client.post(self._url(f"/sessions/{session_id}/cancel"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def get_session_events(
@@ -187,7 +212,7 @@ class APIClient:
         if event_types:
             params["event_types"] = event_types
         resp = self._client.get(self._url(f"/sessions/{session_id}/events"), params=params)
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def get_session_latest_seq(self, session_id: str) -> int:
@@ -220,7 +245,7 @@ class APIClient:
     def list_accounts(self) -> list[Account]:
         """List all configured accounts."""
         resp = self._client.get(self._url("/accounts"))
-        resp.raise_for_status()
+        _check_response(resp)
         data = resp.json()
         return [self._parse_account(a) for a in data.get("accounts", [])]
 
@@ -238,19 +263,19 @@ class APIClient:
             self._url("/accounts"),
             json={"name": name, "provider": provider},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_account(resp.json())
 
     def get_account(self, name: str) -> Account:
         """Get an account by name."""
         resp = self._client.get(self._url(f"/accounts/{name}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_account(resp.json())
 
     def delete_account(self, name: str) -> None:
         """Delete an account."""
         resp = self._client.delete(self._url(f"/accounts/{name}"))
-        resp.raise_for_status()
+        _check_response(resp)
 
     def set_account_model(self, name: str, model: str) -> Account:
         """Set the model for an account."""
@@ -258,7 +283,7 @@ class APIClient:
             self._url(f"/accounts/{name}/model"),
             json={"model": model},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_account(resp.json())
 
     def set_account_reasoning(self, name: str, reasoning: str) -> Account:
@@ -267,7 +292,7 @@ class APIClient:
             self._url(f"/accounts/{name}/reasoning"),
             json={"reasoning": reasoning},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_account(resp.json())
 
     def set_account_role(self, name: str, role: str) -> Account:
@@ -276,13 +301,13 @@ class APIClient:
             self._url(f"/accounts/{name}/role"),
             json={"role": role},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_account(resp.json())
 
     def get_account_models(self, name: str) -> list[str]:
         """Get available models for an account."""
         resp = self._client.get(self._url(f"/accounts/{name}/models"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("models", [])
 
     def _parse_account(self, data: dict) -> Account:
@@ -317,7 +342,7 @@ class APIClient:
             self._url(f"/sessions/{session_id}/messages"),
             json={"content": content, "source": source},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def get_milestones(
@@ -338,7 +363,7 @@ class APIClient:
             self._url(f"/sessions/{session_id}/milestones"),
             params={"since_seq": since_seq},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("milestones", [])
 
     def get_conversation(
@@ -351,7 +376,7 @@ class APIClient:
             self._url(f"/sessions/{session_id}/conversation"),
             params={"since_seq": since_seq},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Tasks
@@ -420,13 +445,13 @@ class APIClient:
             self._url(f"/sessions/{session_id}/tasks"),
             json=data,
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_task_status(resp.json())
 
     def get_task_status(self, session_id: str, task_id: str) -> TaskStatus:
         """Get the status of a task."""
         resp = self._client.get(self._url(f"/sessions/{session_id}/tasks/{task_id}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_task_status(resp.json())
 
     def _parse_task_status(self, data: dict) -> TaskStatus:
@@ -445,19 +470,22 @@ class APIClient:
     def create_worktree(self, session_id: str) -> WorktreeStatus:
         """Create a worktree for a session."""
         resp = self._client.post(self._url(f"/sessions/{session_id}/worktree"))
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_worktree_status(resp.json())
 
     def get_worktree_status(self, session_id: str) -> WorktreeStatus:
         """Get worktree status for a session."""
         resp = self._client.get(self._url(f"/sessions/{session_id}/worktree"))
-        resp.raise_for_status()
+        _check_response(resp)
         return self._parse_worktree_status(resp.json())
 
-    def get_diff_summary(self, session_id: str) -> DiffSummary:
+    def get_diff_summary(self, session_id: str, compare_branch: str | None = None) -> DiffSummary:
         """Get diff summary for a session's worktree."""
-        resp = self._client.get(self._url(f"/sessions/{session_id}/worktree/diff"))
-        resp.raise_for_status()
+        params = {}
+        if compare_branch:
+            params["compare_branch"] = compare_branch
+        resp = self._client.get(self._url(f"/sessions/{session_id}/worktree/diff"), params=params)
+        _check_response(resp)
         data = resp.json()
         return DiffSummary(
             summary=data["summary"],
@@ -466,27 +494,33 @@ class APIClient:
             deletions=data["deletions"],
         )
 
-    def get_full_diff(self, session_id: str) -> dict[str, Any]:
+    def get_full_diff(self, session_id: str, compare_branch: str | None = None) -> dict[str, Any]:
         """Get full diff with file details for a session's worktree."""
-        resp = self._client.get(self._url(f"/sessions/{session_id}/worktree/diff/full"))
-        resp.raise_for_status()
+        params = {}
+        if compare_branch:
+            params["compare_branch"] = compare_branch
+        resp = self._client.get(self._url(f"/sessions/{session_id}/worktree/diff/full"), params=params)
+        _check_response(resp)
         return resp.json()
 
     def merge_worktree(
         self,
         session_id: str,
         target_branch: str | None = None,
+        commit_message: str | None = None,
     ) -> MergeResult:
         """Merge worktree changes to target branch."""
         data = {}
         if target_branch:
             data["target_branch"] = target_branch
+        if commit_message:
+            data["commit_message"] = commit_message
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/worktree/merge"),
             json=data,
         )
-        resp.raise_for_status()
+        _check_response(resp)
         result = resp.json()
         return MergeResult(
             success=result["success"],
@@ -497,13 +531,13 @@ class APIClient:
     def reset_worktree(self, session_id: str) -> dict[str, Any]:
         """Reset worktree to original state."""
         resp = self._client.post(self._url(f"/sessions/{session_id}/worktree/reset"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def delete_worktree(self, session_id: str) -> None:
         """Delete a session's worktree."""
         resp = self._client.delete(self._url(f"/sessions/{session_id}/worktree"))
-        resp.raise_for_status()
+        _check_response(resp)
 
     def _parse_worktree_status(self, data: dict) -> WorktreeStatus:
         """Parse worktree status response data."""
@@ -519,7 +553,7 @@ class APIClient:
     def get_verification_settings(self) -> dict[str, Any]:
         """Get verification settings."""
         resp = self._client.get(self._url("/config/verification"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def update_verification_settings(
@@ -532,13 +566,13 @@ class APIClient:
             data["enabled"] = enabled
 
         resp = self._client.put(self._url("/config/verification"), json=data)
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def get_cleanup_settings(self) -> CleanupSettings:
         """Get cleanup settings."""
         resp = self._client.get(self._url("/config/cleanup"))
-        resp.raise_for_status()
+        _check_response(resp)
         data = resp.json()
         return CleanupSettings(
             retention_days=data.get("cleanup_days", 7),
@@ -558,7 +592,7 @@ class APIClient:
             data["auto_cleanup"] = auto_cleanup
 
         resp = self._client.put(self._url("/config/cleanup"), json=data)
-        resp.raise_for_status()
+        _check_response(resp)
         result = resp.json()
         return CleanupSettings(
             retention_days=result.get("cleanup_days", 7),
@@ -568,7 +602,7 @@ class APIClient:
     def get_preferences(self) -> "Preferences":
         """Get user preferences."""
         resp = self._client.get(self._url("/config/preferences"))
-        resp.raise_for_status()
+        _check_response(resp)
         data = resp.json()
         return Preferences(
             last_project_path=data.get("last_project_path"),
@@ -588,7 +622,7 @@ class APIClient:
             data["ui_mode"] = ui_mode
 
         resp = self._client.put(self._url("/config/preferences"), json=data)
-        resp.raise_for_status()
+        _check_response(resp)
         result = resp.json()
         return Preferences(
             last_project_path=result.get("last_project_path"),
@@ -599,14 +633,14 @@ class APIClient:
     def list_providers(self) -> list[dict[str, Any]]:
         """List all supported provider types."""
         resp = self._client.get(self._url("/providers"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("providers", [])
 
     # Verification Agent
     def get_verification_agent(self) -> str | None:
         """Get the account configured as verification agent."""
         resp = self._client.get(self._url("/config/verification-agent"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("account_name")
 
     def set_verification_agent(self, account_name: str | None) -> str | None:
@@ -622,13 +656,13 @@ class APIClient:
             self._url("/config/verification-agent"),
             json={"account_name": account_name},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("account_name")
 
     def get_preferred_verification_model(self) -> str | None:
         """Get the preferred model for verification."""
         resp = self._client.get(self._url("/config/preferred-verification-model"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("model")
 
     def set_preferred_verification_model(self, model: str | None) -> str | None:
@@ -644,13 +678,13 @@ class APIClient:
             self._url("/config/preferred-verification-model"),
             json={"model": model},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("model")
 
     def get_action_settings(self) -> list[dict]:
         """Get usage action settings."""
         resp = self._client.get(self._url("/config/action-settings"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("settings", [])
 
     def set_action_settings(self, settings: list[dict]) -> list[dict]:
@@ -666,7 +700,7 @@ class APIClient:
             self._url("/config/action-settings"),
             json={"settings": settings},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("settings", [])
 
     def get_mock_remaining_usage(self, account_name: str) -> float:
@@ -681,7 +715,7 @@ class APIClient:
             Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
         """
         resp = self._client.get(self._url(f"/config/mock-remaining-usage/{account_name}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("remaining", 0.5)
 
     def set_mock_remaining_usage(self, account_name: str, remaining: float) -> float:
@@ -700,7 +734,7 @@ class APIClient:
             self._url("/config/mock-remaining-usage"),
             json={"account_name": account_name, "remaining": remaining},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("remaining", remaining)
 
     def get_mock_run_duration_seconds(self, account_name: str) -> int:
@@ -715,7 +749,7 @@ class APIClient:
             Run duration in seconds (0-3600)
         """
         resp = self._client.get(self._url(f"/config/mock-run-duration/{account_name}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("seconds", 0)
 
     def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> int:
@@ -734,7 +768,7 @@ class APIClient:
             self._url("/config/mock-run-duration"),
             json={"account_name": account_name, "seconds": seconds},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("seconds", seconds)
 
     def get_max_verification_attempts(self) -> int:
@@ -744,7 +778,7 @@ class APIClient:
             Maximum attempts (default 5)
         """
         resp = self._client.get(self._url("/config/max-verification-attempts"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("attempts", 5)
 
     def set_max_verification_attempts(self, attempts: int) -> int:
@@ -760,13 +794,13 @@ class APIClient:
             self._url("/config/max-verification-attempts"),
             json={"attempts": attempts},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json().get("attempts", attempts)
 
     def get_local_endpoint(self) -> str:
         """Get the base URL of the local OpenAI-compatible model server."""
         resp = self._client.get(self._url("/config/local-endpoint"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()["endpoint"]
 
     def set_local_endpoint(self, endpoint: str) -> str:
@@ -782,7 +816,7 @@ class APIClient:
             self._url("/config/local-endpoint"),
             json={"endpoint": endpoint},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()["endpoint"]
 
     def get_slack_settings(self) -> dict:
@@ -792,7 +826,7 @@ class APIClient:
             Dict with enabled, channel, has_token
         """
         resp = self._client.get(self._url("/config/slack"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def set_slack_settings(
@@ -814,7 +848,7 @@ class APIClient:
         if bot_token is not None:
             payload["bot_token"] = bot_token
         resp = self._client.put(self._url("/config/slack"), json=payload)
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Tunnel
@@ -825,7 +859,7 @@ class APIClient:
             Dict with running, url, subdomain, error
         """
         resp = self._client.get(self._url("/tunnel"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def start_tunnel(self) -> dict:
@@ -835,7 +869,7 @@ class APIClient:
             Dict with running, url, subdomain, error
         """
         resp = self._client.post(self._url("/tunnel/start"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def stop_tunnel(self) -> dict:
@@ -845,7 +879,7 @@ class APIClient:
             Dict with running, url, subdomain, error
         """
         resp = self._client.post(self._url("/tunnel/stop"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Preview Tunnel
@@ -856,7 +890,7 @@ class APIClient:
             Dict with running, url, port, error
         """
         resp = self._client.get(self._url("/preview-tunnel"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def start_preview_tunnel(
@@ -880,7 +914,7 @@ class APIClient:
         if session_id:
             payload["session_id"] = session_id
         resp = self._client.post(self._url("/preview-tunnel/start"), json=payload)
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def stop_preview_tunnel(self) -> dict:
@@ -890,7 +924,7 @@ class APIClient:
             Dict with running, url, port, error
         """
         resp = self._client.post(self._url("/preview-tunnel/stop"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Project Autoconfigure
@@ -904,7 +938,7 @@ class APIClient:
             self._url("/config/project/autoconfigure"),
             json={"project_path": project_path, "coding_agent": coding_agent},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def get_autoconfigure_result(self, job_id: str) -> dict:
@@ -914,13 +948,13 @@ class APIClient:
             Dict with status, settings (when complete), error
         """
         resp = self._client.get(self._url(f"/config/project/autoconfigure/{job_id}"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def cancel_autoconfigure(self, job_id: str) -> dict:
         """Cancel a running autoconfigure job."""
         resp = self._client.post(self._url(f"/config/project/autoconfigure/{job_id}/cancel"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     def test_slack_connection(self) -> dict:
@@ -930,31 +964,42 @@ class APIClient:
             Dict with ok (bool) and error (str|None)
         """
         resp = self._client.post(self._url("/slack/test"))
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()
 
     # Config export/import
-    def export_config(self) -> dict:
+    def export_config(self, passphrase: str | None = None) -> dict:
         """Export the full config for transfer to another machine.
 
+        Args:
+            passphrase: Encrypts provider credentials into the export.
+                None excludes credentials entirely.
+
         Returns:
-            The full config dictionary (accounts have encrypted keys).
+            The config dictionary. Includes "credentials_included"; with a
+            passphrase it carries provider_auth_encrypted + provider_auth_salt
+            instead of plaintext provider_auth.
         """
-        resp = self._client.get(self._url("/config/export"))
-        resp.raise_for_status()
+        resp = self._client.post(
+            self._url("/config/export"), json={"passphrase": passphrase}
+        )
+        _check_response(resp)
         return resp.json()
 
-    def import_config(self, config_data: dict) -> dict:
+    def import_config(self, config_data: dict, passphrase: str | None = None) -> dict:
         """Import a config exported from another machine.
 
         Args:
             config_data: Config dictionary from export_config().
+            passphrase: Passphrase used when the export encrypted credentials.
+                A wrong/missing passphrase for an encrypted export is HTTP 400.
 
         Returns:
             Dict with ok and message.
         """
         resp = self._client.post(
-            self._url("/config/import"), json={"config": config_data}
+            self._url("/config/import"),
+            json={"config": config_data, "passphrase": passphrase},
         )
-        resp.raise_for_status()
+        _check_response(resp)
         return resp.json()

@@ -437,7 +437,8 @@ class TestMockProviderThroughAPI:
             task_description="Fix the bug",
         )
 
-        assert cmd[0] == "python3"
+        # Uses the running interpreter — `python3` broke on Windows and under venvs
+        assert cmd[0] == sys.executable
         assert cmd[1] == "-c"
         # Script should be in cmd[2]
         assert "Mock Agent" in cmd[2]

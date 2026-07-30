@@ -29,7 +29,7 @@ class TestFollowUpPreservesConversation:
         # Find the handleTaskStart function - it should have isFollowup parameter
         # and conditionally clear conversation
         handle_task_start_match = re.search(
-            r"const handleTaskStart = useCallback\(async \([^)]+\) => \{",
+            r"const handleTaskStart = useCallback\((?:async )?\([^)]+\) => \{",
             content,
         )
         assert handle_task_start_match, "Should have handleTaskStart function"

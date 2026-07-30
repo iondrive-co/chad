@@ -1165,3 +1165,157 @@ class TestFindMainVenv:
 
         result = find_main_venv(tmp_path)
         assert result is None
+
+
+class TestWorktreeRegressionFixes:
+    """Regression tests for merge/diff/stash bugs found during the 2026-07 bug hunt."""
+
+    def _git(self, repo, *args):
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True
+        )
+
+    def test_untracked_file_diff_paths_are_relative(self, git_repo):
+        """Untracked files in the parsed diff must use repo-relative paths."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("relpaths")
+        (worktree_path / "sub").mkdir()
+        (worktree_path / "sub" / "brand_new.py").write_text("print('hi')\n")
+
+        files = manager.get_parsed_diff("relpaths")
+        names = {f.new_path or f.old_path for f in files}
+        assert "sub/brand_new.py" in names, names
+        new_file = next(f for f in files if (f.new_path or f.old_path) == "sub/brand_new.py")
+        assert new_file.is_new
+
+    def test_worktree_dir_invisible_to_git_status(self, git_repo):
+        """.chad-worktrees/ must not pollute git status in the main checkout."""
+        manager = GitWorktreeManager(git_repo)
+        manager.create_worktree("excluded")
+        status = self._git(git_repo, "status", "--porcelain")
+        assert status.stdout.strip() == "", status.stdout
+
+    def test_merge_never_pops_user_stash(self, git_repo):
+        """A pre-existing user stash must survive a merge untouched."""
+        # User parks their own WIP in a stash
+        (git_repo / "README.md").write_text("# user WIP\n")
+        self._git(git_repo, "stash", "push", "-m", "user-personal-stash")
+
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("stashsafe")
+        (worktree_path / "feature.txt").write_text("feature\n")
+        success, conflicts, error = manager.merge_to_main("stashsafe")
+        assert success, error
+
+        stash_list = self._git(git_repo, "stash", "list").stdout
+        assert "user-personal-stash" in stash_list, stash_list
+        assert stash_list.count("stash@{") == 1, stash_list
+        # And the user's WIP must not have been popped onto the working tree
+        assert (git_repo / "README.md").read_text() == "# Test Repository\n"
+
+    def test_merge_returns_to_original_branch(self, git_repo):
+        """Merging into main while on another branch must restore that branch."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("branchback")
+        (worktree_path / "feature.txt").write_text("feature\n")
+
+        self._git(git_repo, "checkout", "-b", "dev")
+        # Uncommitted tracked change on dev should be stashed and restored on dev
+        (git_repo / "README.md").write_text("# dev WIP\n")
+
+        success, conflicts, error = manager.merge_to_main("branchback", target_branch="main")
+        assert success, error
+        current = self._git(git_repo, "branch", "--show-current").stdout.strip()
+        assert current == "dev"
+        assert (git_repo / "README.md").read_text() == "# dev WIP\n"
+        # Merge landed on main, not dev
+        main_files = self._git(git_repo, "ls-tree", "--name-only", "main").stdout
+        dev_files = self._git(git_repo, "ls-tree", "--name-only", "dev").stdout
+        assert "feature.txt" in main_files
+        assert "feature.txt" not in dev_files
+
+    def test_abort_merge_restores_original_branch(self, git_repo):
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("branchabort")
+        (worktree_path / "README.md").write_text("# worktree edit\n")
+
+        self._git(git_repo, "checkout", "-b", "dev2")
+        (git_repo / "README.md").write_text("# main-side edit\n")
+        self._git(git_repo, "commit", "-am", "dev-side edit")
+        # merge into dev2 (current branch is dev2, so no checkout happens),
+        # instead target main after diverging main
+        self._git(git_repo, "checkout", "main")
+        (git_repo / "README.md").write_text("# diverged on main\n")
+        self._git(git_repo, "commit", "-am", "main edit")
+        self._git(git_repo, "checkout", "dev2")
+
+        success, conflicts, error = manager.merge_to_main("branchabort", target_branch="main")
+        assert not success
+        assert conflicts, error
+        assert manager.abort_merge()
+        current = self._git(git_repo, "branch", "--show-current").stdout.strip()
+        assert current == "dev2"
+        status = self._git(git_repo, "status", "--porcelain").stdout.strip()
+        assert status == "", status
+
+    def test_complete_merge_refuses_unresolved_conflicts(self, git_repo):
+        """complete_merge must not commit files that still contain markers."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("markers")
+        (worktree_path / "README.md").write_text("# from worktree\n")
+        (git_repo / "README.md").write_text("# from main\n")
+        self._git(git_repo, "commit", "-am", "main edit")
+
+        success, conflicts, error = manager.merge_to_main("markers")
+        assert not success and conflicts
+
+        # Without resolving anything, completing must fail...
+        assert not manager.complete_merge("should not land")
+        # ...and the conflict markers must not have been committed
+        log = self._git(git_repo, "log", "-1", "--format=%s").stdout.strip()
+        assert log == "main edit"
+        manager.abort_merge()
+
+    def test_complete_merge_does_not_sweep_user_untracked_files(self, git_repo):
+        """The user's own untracked files must not land in the merge commit."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("sweep")
+        (worktree_path / "README.md").write_text("# from worktree\n")
+        (git_repo / "README.md").write_text("# from main\n")
+        self._git(git_repo, "commit", "-am", "main edit")
+        # User has an unrelated untracked file in the main checkout
+        (git_repo / "personal-notes.txt").write_text("secret\n")
+
+        success, conflicts, error = manager.merge_to_main("sweep")
+        assert not success and conflicts
+        assert manager.resolve_all_conflicts(use_incoming=True)
+        assert manager.complete_merge("resolved merge")
+
+        committed = self._git(git_repo, "ls-tree", "--name-only", "HEAD").stdout
+        assert "personal-notes.txt" not in committed
+        assert (git_repo / "personal-notes.txt").exists()
+
+    def test_binary_conflict_reported_not_crash(self, git_repo):
+        """A binary-file conflict must produce a conflict entry, not an exception."""
+        (git_repo / "blob.bin").write_bytes(bytes(range(256)) * 4)
+        self._git(git_repo, "add", "-A")
+        self._git(git_repo, "commit", "-m", "add binary")
+
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("binconflict")
+        (worktree_path / "blob.bin").write_bytes(b"\xff\x00worktree" * 40)
+        (git_repo / "blob.bin").write_bytes(b"\x00\xffmain" * 40)
+        self._git(git_repo, "commit", "-am", "main binary edit")
+
+        success, conflicts, error = manager.merge_to_main("binconflict")
+        assert not success
+        assert conflicts and conflicts[0].file_path == "blob.bin"
+        manager.abort_merge()
+
+    def test_create_worktree_in_empty_repo_raises_clear_error(self, tmp_path):
+        repo = tmp_path / "empty_repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        manager = GitWorktreeManager(repo)
+        with pytest.raises(ValueError, match="no commits"):
+            manager.create_worktree("nocommits")

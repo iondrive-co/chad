@@ -50,6 +50,10 @@ class TunnelService:
             return None
 
         try:
+            # Own process group: the registry kills via killpg, and without
+            # this the recorded pgid is chad's own — terminating the tunnel
+            # would take the whole server down with it.
+            popen_kwargs = {"start_new_session": True} if os.name != "nt" else {}
             self._proc = subprocess.Popen(
                 [
                     path_or_error, "tunnel",
@@ -58,6 +62,7 @@ class TunnelService:
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **popen_kwargs,
             )
         except Exception as exc:
             self._error = str(exc)

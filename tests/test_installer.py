@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 import sys
 import types
 
@@ -80,6 +82,22 @@ def test_node_auto_install_for_npm_tools(monkeypatch, tmp_path):
 
     monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
 
+    class FakeMember:
+        def __init__(self, name):
+            self.name = name
+
+        def islnk(self):
+            return False
+
+        def issym(self):
+            return False
+
+        def isfile(self):
+            return True
+
+        def isdir(self):
+            return False
+
     class FakeTarFile:
         def __init__(self, *a, **kw):
             pass
@@ -90,7 +108,12 @@ def test_node_auto_install_for_npm_tools(monkeypatch, tmp_path):
         def __exit__(self, *a):
             pass
 
-        def extractall(self, dest):
+        def getmembers(self):
+            # Members are validated before extraction (path-traversal guard)
+            return [FakeMember("node-v22.16.0-linux-x64/bin/node"),
+                    FakeMember("node-v22.16.0-linux-x64/bin/npm")]
+
+        def extractall(self, dest, filter=None):
             # Simulate what the real tarball would produce
             node_bin = Path(dest) / "node-v22.16.0-linux-x64" / "bin"
             node_bin.mkdir(parents=True, exist_ok=True)
@@ -141,3 +164,53 @@ def test_resolve_prefers_windows_suffix(monkeypatch, tmp_path):
 
     resolved = installer.resolve_tool_path("cloudflared")
     assert resolved == exe
+
+
+class TestArchiveExtractionSafety:
+    """Downloaded archives are untrusted — members must not escape tools_dir."""
+
+    def test_rejects_traversal_member_names(self):
+        from chad.util.installer import _is_unsafe_member_name
+
+        for bad in ("../evil", "/etc/passwd", "a/../../b", "\\windows\\system32"):
+            assert _is_unsafe_member_name(bad), bad
+        for good in ("node/bin/node", "pkg/lib/x.js"):
+            assert not _is_unsafe_member_name(good), good
+
+    def test_zip_guard_raises_on_unsafe_member(self):
+        from chad.util.installer import _assert_safe_zip_members
+
+        class FakeZip:
+            def namelist(self):
+                return ["ok/file", "../escape"]
+
+        with pytest.raises(ValueError, match="unsafe archive member"):
+            _assert_safe_zip_members(FakeZip())
+
+    def test_tar_guard_rejects_escaping_symlink(self):
+        from chad.util.installer import _assert_safe_tar_members
+
+        class Member:
+            def __init__(self, name, linkname="", sym=False):
+                self.name = name
+                self.linkname = linkname
+                self._sym = sym
+
+            def islnk(self):
+                return False
+
+            def issym(self):
+                return self._sym
+
+            def isfile(self):
+                return not self._sym
+
+            def isdir(self):
+                return False
+
+        class FakeTar:
+            def getmembers(self):
+                return [Member("pkg/link", "../../etc/passwd", sym=True)]
+
+        with pytest.raises(ValueError, match="escaping"):
+            _assert_safe_tar_members(FakeTar())

@@ -51,12 +51,15 @@ class ConfigManager:
     def __init__(self, config_path: Path | None = None):
         import os
 
-        # Allow override via environment variable (for testing/screenshots)
-        env_config = os.environ.get("CHAD_CONFIG")
-        if env_config:
-            self.config_path = Path(env_config)
+        # An explicit constructor argument always wins — code that names a
+        # config file means that file. CHAD_CONFIG only overrides the default
+        # (it used to shadow explicit args, silently writing test fixtures to
+        # the wrong config).
+        if config_path:
+            self.config_path = Path(config_path)
         else:
-            self.config_path = config_path or Path.home() / ".chad.conf"
+            env_config = os.environ.get("CHAD_CONFIG")
+            self.config_path = Path(env_config) if env_config else Path.home() / ".chad.conf"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_config()
 
@@ -255,47 +258,99 @@ class ConfigManager:
         config = self.load_config()
         return "password_hash" not in config
 
-    def export_config(self) -> dict[str, Any]:
+    def export_config(self, passphrase: str | None = None) -> dict[str, Any]:
         """Export the full config for transfer to another machine.
 
-        Includes provider auth files (Claude OAuth, Codex tokens, etc.)
-        so the destination can run tasks without re-authenticating.
+        Provider auth files (Claude OAuth, Codex tokens, ...) are live
+        credentials, so they are only included when a passphrase is supplied
+        and are encrypted with it. Without a passphrase the export carries
+        settings only and the destination re-authenticates.
+
+        Args:
+            passphrase: Passphrase used to encrypt the credential bundle.
 
         Returns:
-            The full config dictionary with provider_auth embedded.
+            The config dictionary, with credentials_included recording whether
+            an encrypted provider_auth bundle is present.
         """
         data = self.load_config()
-        data["provider_auth"] = self._collect_provider_auth(data)
+        data.pop("provider_auth", None)
+        data.pop("provider_auth_encrypted", None)
+        data.pop("provider_auth_salt", None)
+
+        if not passphrase:
+            data["credentials_included"] = False
+            return data
+
+        auth_files = self._collect_provider_auth(data)
+        salt = bcrypt.gensalt()
+        data["provider_auth_encrypted"] = self.encrypt_value(
+            json.dumps(auth_files), passphrase, salt
+        )
+        data["provider_auth_salt"] = base64.urlsafe_b64encode(salt).decode()
+        data["credentials_included"] = True
         return data
 
-    def import_config(self, data: dict[str, Any]) -> None:
+    def import_config(self, data: dict[str, Any], passphrase: str | None = None) -> None:
         """Import a config exported from another machine.
 
-        Replaces the current config entirely and restores provider auth
-        files. Requires the same master password on the destination.
+        Replaces the current config entirely and restores provider auth files
+        when the export carries an encrypted credential bundle.
 
         Args:
             data: Config dictionary from export_config().
+            passphrase: Passphrase used for the export's credential bundle.
 
         Raises:
-            ValueError: If the data is missing required fields.
+            ValueError: If the data is missing required fields, or the
+                credential bundle cannot be decrypted with this passphrase.
         """
         if "password_hash" not in data or "encryption_salt" not in data:
             raise ValueError(
                 "Invalid config: missing password_hash or encryption_salt"
             )
-        # Extract provider_auth before saving (it's not a config key)
-        provider_auth = data.pop("provider_auth", {})
+
+        data = dict(data)
+        # These are transport fields, not config keys
+        encrypted = data.pop("provider_auth_encrypted", None)
+        salt_b64 = data.pop("provider_auth_salt", None)
+        data.pop("credentials_included", None)
+        data.pop("provider_auth", None)
+
+        provider_auth: dict[str, str] = {}
+        if encrypted:
+            if not passphrase:
+                raise ValueError(
+                    "This export contains encrypted provider credentials — "
+                    "a passphrase is required to import it"
+                )
+            try:
+                salt = base64.urlsafe_b64decode((salt_b64 or "").encode())
+                provider_auth = json.loads(
+                    self.decrypt_value(encrypted, passphrase, salt)
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "Could not decrypt provider credentials — wrong passphrase?"
+                ) from exc
+
         self.save_config(data)
-        self._restore_provider_auth(provider_auth)
+        if provider_auth:
+            self._restore_provider_auth(provider_auth)
 
     # ── Provider auth file helpers ──
 
     # Maps provider type → (home_subdir, auth_file_relative_path)
+    # provider type → (home_subdir under ~/.chad, auth file relative to it).
+    # Every provider with per-account credential isolation belongs here so a
+    # config transfer carries its logins (encrypted — see export_config).
     _PROVIDER_AUTH_PATHS: dict[str, tuple[str, str]] = {
         "anthropic": ("claude-configs", ".claude.json"),
         "openai": ("codex-homes", ".codex/auth.json"),
         "kimi": ("kimi-homes", ".kimi/config.toml"),
+        "gemini": ("gemini-homes", ".gemini/oauth_creds.json"),
+        "qwen": ("qwen-homes", ".qwen/oauth_creds.json"),
+        "mistral": ("vibe-homes", ".env"),
     }
 
     def _collect_provider_auth(self, config: dict[str, Any]) -> dict[str, str]:
@@ -471,6 +526,11 @@ class ConfigManager:
             reasoning: Optional reasoning effort to use for this account
         """
         config = self.load_config()
+        # Server mode skips password setup, so a fresh config may have no
+        # salt yet — initialize one instead of raising KeyError on the first
+        # account registration.
+        if "encryption_salt" not in config:
+            config["encryption_salt"] = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
         encryption_salt = base64.urlsafe_b64decode(config["encryption_salt"].encode())
 
         encrypted_key = self.encrypt_value(api_key, password, encryption_salt)
@@ -593,10 +653,14 @@ class ConfigManager:
             role: Role name ('CODING')
 
         Raises:
-            ValueError: If account doesn't exist
+            ValueError: If account doesn't exist or the role is unsupported
         """
         if not self.has_account(account_name):
             raise ValueError(f"Account '{account_name}' does not exist")
+        if role != "CODING":
+            # Only CODING exists; storing anything else would be silently
+            # invisible (list_role_assignments filters to CODING).
+            raise ValueError(f"Unsupported role '{role}' — only CODING is assignable")
 
         config = self.load_config()
         if "role_assignments" not in config:
@@ -674,9 +738,11 @@ class ConfigManager:
         if "mock_session_reset_time" in config:
             config["mock_session_reset_time"].pop(account_name, None)
 
-        # Clear verification_agent if it points to the deleted account
+        # Clear verification_agent if it points to the deleted account,
+        # along with the model pinned for it
         if config.get("verification_agent") == account_name:
             del config["verification_agent"]
+            config.pop("preferred_verification_model", None)
 
         # Remove action_settings entries that reference this account as target_account
         if "action_settings" in config:

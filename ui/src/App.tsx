@@ -148,8 +148,14 @@ export function App() {
   const [openedSessionIds, setOpenedSessionIds] = useState<Set<string>>(loadOpenedSessionIds);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
-  // Ensures restored tabs are reconciled against the server's session list only once.
+  // Ensures restored tabs are reconciled against the server's session list only
+  // once per server. Reset when the API base URL changes so tabs from the old
+  // server are re-checked against the new one instead of lingering as phantoms.
   const reconciledRef = useRef(false);
+
+  useEffect(() => {
+    reconciledRef.current = false;
+  }, [apiBaseUrl]);
 
   // Load projects when connected
   const loadProjects = useCallback(async () => {
@@ -241,8 +247,10 @@ export function App() {
     }
   }, [connected, sessionsLoaded, sessions, selectedSession]);
 
-  // Get selected session's active state from polled data
-  const selectedSessionActive = sessions.find(s => s.id === selectedSession)?.active ?? false;
+  // Get selected session's active/paused state from polled data
+  const selectedSessionData = sessions.find(s => s.id === selectedSession);
+  const selectedSessionActive = selectedSessionData?.active ?? false;
+  const selectedSessionPaused = selectedSessionData?.paused ?? false;
 
   const refreshSessions = useCallback(() => {
     setSessionVersion((v) => v + 1);
@@ -269,28 +277,38 @@ export function App() {
   const handleNewSession = useCallback(async (projectPath?: string) => {
     // Default to first configured project when none specified
     const effectivePath = projectPath || (projects.length > 0 ? projects[0].project_path : undefined);
-    const session = await createSession(effectivePath);
-    if (session) {
-      setSelectedSession(session.id);
-      setOpenedSessionIds(prev => new Set(prev).add(session.id));
-      if (effectivePath) setSessionProjectPath(effectivePath);
-      setTab("chat");
-      refreshSessions();
+    try {
+      const session = await createSession(effectivePath);
+      if (session) {
+        setSelectedSession(session.id);
+        setOpenedSessionIds(prev => new Set(prev).add(session.id));
+        if (effectivePath) setSessionProjectPath(effectivePath);
+        setTab("chat");
+        refreshSessions();
+      }
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Failed to create session");
     }
   }, [createSession, refreshSessions, projects]);
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    await deleteSession(id);
+    try {
+      await deleteSession(id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Failed to delete session");
+      return;
+    }
     setOpenedSessionIds(prev => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
     if (selectedSession === id) {
-      // Select another opened session, or deselect
+      // Select the NEWEST remaining opened session (tabs render newest-first),
+      // or deselect when the last tab was closed.
       const remaining = sessions.filter(s => s.id !== id && openedSessionIds.has(s.id));
-      setSelectedSession(remaining[0]?.id ?? null);
+      setSelectedSession(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
     }
     refreshSessions();
   }, [deleteSession, selectedSession, sessions, openedSessionIds, refreshSessions]);
@@ -429,6 +447,7 @@ export function App() {
                 apiBaseUrl={apiBaseUrl}
                 token={token}
                 sessionActive={selectedSessionActive}
+                sessionPaused={selectedSessionPaused}
                 projects={projects}
               />
             ) : (
@@ -460,6 +479,7 @@ export function App() {
             <SettingsPanel
               api={api}
               connected={connected}
+              apiBaseUrl={apiBaseUrl}
               connectionInput={connectionInput}
               onConnectionInputChange={setConnectionInput}
               onConnect={(url, newToken) => {

@@ -1,5 +1,7 @@
 """Git worktree management for parallel task execution."""
 
+import json
+import os
 import re
 import subprocess
 import threading
@@ -190,6 +192,36 @@ class GitWorktreeManager:
         result = self._run_git("rev-parse", "--git-dir", check=False)
         return result.returncode == 0
 
+    def _git_path(self, name: str) -> Path:
+        """Resolve a path inside the repo's git dir (handles .git files in
+        linked worktrees/submodules, where project_path/.git is not a dir)."""
+        result = self._run_git("rev-parse", "--git-path", name, check=False)
+        raw = result.stdout.strip()
+        if not raw:
+            return self.project_path / ".git" / name
+        path = Path(raw)
+        if not path.is_absolute():
+            path = self.project_path / path
+        return path
+
+    def _ensure_worktree_dir_excluded(self) -> None:
+        """Make git ignore .chad-worktrees/ via .git/info/exclude.
+
+        Without this, the worktree base dir shows up as untracked in the main
+        checkout: it pollutes `git status`, makes the pre-merge dirty check
+        always fire, and could get committed by `git add -A`.
+        """
+        exclude_path = self._git_path("info/exclude")
+        pattern = f"{self.WORKTREE_DIR}/"
+        try:
+            existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+            if pattern not in existing.splitlines():
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+                joiner = "" if not existing or existing.endswith("\n") else "\n"
+                exclude_path.write_text(existing + joiner + pattern + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def get_main_branch(self) -> str:
         """Get the name of the main/master branch."""
         # Try common main branch names
@@ -255,12 +287,18 @@ class GitWorktreeManager:
         # so git doesn't block the upcoming add with "already used by worktree".
         self._run_git("worktree", "prune", check=False)
 
-        # Ensure worktree base directory exists
+        # Ensure worktree base directory exists and is invisible to git status
         self.worktree_base.mkdir(parents=True, exist_ok=True)
+        self._ensure_worktree_dir_excluded()
 
         # Get current commit to base the new branch on
-        result = self._run_git("rev-parse", "HEAD")
+        result = self._run_git("rev-parse", "HEAD", check=False)
         base_commit = result.stdout.strip()
+        if result.returncode != 0 or not base_commit:
+            raise ValueError(
+                "Cannot create a worktree: the repository has no commits yet. "
+                "Make an initial commit first."
+            )
 
         # Create worktree with new branch
         self._run_git(
@@ -474,7 +512,9 @@ class GitWorktreeManager:
         if result.stdout.strip():
             diff_texts.append(result.stdout)
 
-        # Untracked files - include their content as a diff against /dev/null
+        # Untracked files - include their content as a diff against the null
+        # device. The path must stay relative to the worktree so the parsed
+        # FileDiff paths are repo-relative like every tracked file's.
         untracked = self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False)
         for path in filter(None, untracked.stdout.splitlines()):
             file_path = worktree_path / path
@@ -482,7 +522,7 @@ class GitWorktreeManager:
                 continue
             # git diff --no-index to generate a unified diff for new file
             new_file_diff = self._run_git(
-                "diff", "--no-index", "--", "/dev/null", str(file_path),
+                "diff", "--no-index", "--", os.devnull, path,
                 cwd=worktree_path, check=False
             )
             if new_file_diff.stdout.strip():
@@ -615,20 +655,48 @@ class GitWorktreeManager:
         return True, None
 
     def _has_main_uncommitted_changes(self) -> bool:
-        """Check if the main repo has uncommitted changes."""
-        result = self._run_git("status", "--porcelain", check=False)
+        """Check if the main repo has uncommitted changes to tracked files.
+
+        Untracked files are ignored: `git stash push` (without -u) would not
+        stash them anyway, and they don't block checkout/merge.
+        """
+        result = self._run_git("status", "--porcelain", "--untracked-files=no", check=False)
         return bool(result.stdout.strip())
 
     def _stash_main_changes(self) -> bool:
-        """Stash uncommitted changes in the main repo. Returns True if stash was created."""
+        """Stash uncommitted tracked changes in the main repo.
+
+        Returns True only if a stash entry was actually created — `git stash
+        push` exits 0 with "No local changes to save", which previously set a
+        phantom stashed flag that later popped an unrelated user stash.
+        """
         if not self._has_main_uncommitted_changes():
             return False
+        before = self._run_git("rev-parse", "-q", "--verify", "refs/stash", check=False).stdout.strip()
         result = self._run_git("stash", "push", "-m", "chad-merge-stash", check=False)
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        after = self._run_git("rev-parse", "-q", "--verify", "refs/stash", check=False).stdout.strip()
+        return bool(after) and after != before
+
+    def _find_chad_stash(self) -> str | None:
+        """Find the stash ref of the most recent chad merge stash, if any."""
+        result = self._run_git("stash", "list", "--format=%gd %gs", check=False)
+        for line in result.stdout.splitlines():
+            ref, _, message = line.partition(" ")
+            if "chad-merge-stash" in message:
+                return ref
+        return None
 
     def _pop_stash(self) -> tuple[bool, bool]:
-        """Pop the stash. Returns (success, had_conflicts)."""
-        result = self._run_git("stash", "pop", check=False)
+        """Pop the chad merge stash (never an unrelated user stash).
+
+        Returns (success, had_conflicts).
+        """
+        ref = self._find_chad_stash()
+        if ref is None:
+            return False, False
+        result = self._run_git("stash", "pop", ref, check=False)
         if result.returncode == 0:
             return True, False
         # Check if there was a conflict during stash pop
@@ -636,14 +704,9 @@ class GitWorktreeManager:
             return False, True
         return False, False
 
-    def _has_chad_stash(self) -> bool:
-        """Check if there's a stash created by chad merge."""
-        result = self._run_git("stash", "list", check=False)
-        return "chad-merge-stash" in result.stdout
-
     def _pop_chad_stash_if_exists(self) -> None:
         """Pop the chad merge stash if it exists."""
-        if self._has_chad_stash():
+        if self._find_chad_stash() is not None:
             self._pop_stash()
 
     def merge_to_main(
@@ -699,9 +762,10 @@ class GitWorktreeManager:
             # Stash any uncommitted changes in main repo before checkout/merge
             stashed = self._stash_main_changes()
 
-            # Switch to target branch in the main repo
-            current_branch = self.get_current_branch()
-            if current_branch != merge_target:
+            # Switch to target branch in the main repo, remembering where the
+            # user was so we can put them back afterwards.
+            original_branch = self.get_current_branch()
+            if original_branch and original_branch != merge_target:
                 result = self._run_git("checkout", merge_target, check=False)
                 if result.returncode != 0:
                     # Restore stash if checkout failed
@@ -720,10 +784,15 @@ class GitWorktreeManager:
                 # Check for conflicts
                 if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
                     conflicts = self._parse_conflicts()
-                    # Don't pop stash yet - let user resolve merge conflicts first
+                    # Don't pop stash or switch branches yet — the user
+                    # resolves conflicts first. Persist enough state for
+                    # complete_merge/abort_merge (separate requests, separate
+                    # manager instances) to restore the original branch.
+                    self._save_merge_state(original_branch)
                     return False, conflicts, None
 
-                # Other error - restore stash
+                # Other error - restore branch and stash
+                self._restore_original_branch(original_branch)
                 if stashed:
                     self._pop_stash()
                 detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
@@ -734,15 +803,50 @@ class GitWorktreeManager:
             if commit_result.returncode != 0:
                 # Commit failed - abort the merge and restore state
                 self._run_git("reset", "--hard", "HEAD", check=False)
+                self._restore_original_branch(original_branch)
                 if stashed:
                     self._pop_stash()
                 detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "Commit failed"
                 return False, None, detail
 
-            # Pop stash after successful merge
+            # Return to the branch the user was on, then restore their WIP
+            self._restore_original_branch(original_branch)
             if stashed:
                 self._pop_stash()
             return True, None, None
+
+    # -- merge state across conflict-resolution requests ---------------------
+
+    def _merge_state_path(self) -> Path:
+        return self._git_path("chad-merge-state.json")
+
+    def _save_merge_state(self, original_branch: str) -> None:
+        """Remember the branch the user was on when a conflicted merge began."""
+        try:
+            self._merge_state_path().write_text(
+                json.dumps({"original_branch": original_branch}), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def _consume_merge_state(self) -> str:
+        """Read and clear the saved original branch ('' if none)."""
+        path = self._merge_state_path()
+        branch = ""
+        try:
+            if path.exists():
+                branch = json.loads(path.read_text(encoding="utf-8")).get("original_branch", "")
+                path.unlink()
+        except (OSError, ValueError):
+            pass
+        return branch
+
+    def _restore_original_branch(self, original_branch: str) -> None:
+        """Check out the branch the user was on before the merge, if needed."""
+        if not original_branch:
+            return
+        if self.get_current_branch() != original_branch:
+            self._run_git("checkout", original_branch, check=False)
 
     def _parse_conflicts(self) -> list[MergeConflict]:
         """Parse conflict markers from conflicted files."""
@@ -754,13 +858,17 @@ class GitWorktreeManager:
             if not file_path:
                 continue
             full_path = self.project_path / file_path
-            if not full_path.exists():
-                continue
 
-            content = full_path.read_text(encoding="utf-8")
-            hunks = self._parse_conflict_hunks(file_path, content)
-            if hunks:
-                conflicts.append(MergeConflict(file_path=file_path, hunks=hunks))
+            hunks: list[ConflictHunk] = []
+            if full_path.exists():
+                # errors="replace" keeps binary/mixed-encoding conflicts from
+                # raising out of the merge as a 500
+                content = full_path.read_text(encoding="utf-8", errors="replace")
+                hunks = self._parse_conflict_hunks(file_path, content)
+            # Include the file even without parseable hunks (binary conflict,
+            # delete/modify, …) so the UI shows it instead of a bare
+            # "Merge failed" while the repo sits mid-merge.
+            conflicts.append(MergeConflict(file_path=file_path, hunks=hunks))
 
         return conflicts
 
@@ -815,50 +923,6 @@ class GitWorktreeManager:
 
         return hunks
 
-    def resolve_conflict(self, file_path: str, hunk_index: int, use_incoming: bool) -> bool:
-        """Resolve a single conflict hunk by choosing original or incoming."""
-        full_path = self.project_path / file_path
-        if not full_path.exists():
-            return False
-
-        content = full_path.read_text(encoding="utf-8")
-        lines = content.split("\n")
-        result_lines = []
-        current_hunk = 0
-        i = 0
-
-        while i < len(lines):
-            if lines[i].startswith("<<<<<<<"):
-                if current_hunk == hunk_index:
-                    # This is the hunk to resolve
-                    original_lines = []
-                    incoming_lines = []
-
-                    i += 1
-                    while i < len(lines) and not lines[i].startswith("======="):
-                        original_lines.append(lines[i])
-                        i += 1
-
-                    i += 1  # Skip =======
-                    while i < len(lines) and not lines[i].startswith(">>>>>>>"):
-                        incoming_lines.append(lines[i])
-                        i += 1
-
-                    # Add the chosen resolution
-                    chosen = incoming_lines if use_incoming else original_lines
-                    result_lines.extend(chosen)
-                    current_hunk += 1
-                else:
-                    # Keep this hunk as-is (still conflicted)
-                    result_lines.append(lines[i])
-                    current_hunk += 1
-            else:
-                result_lines.append(lines[i])
-            i += 1
-
-        full_path.write_text("\n".join(result_lines))
-        return True
-
     def resolve_all_conflicts(self, use_incoming: bool) -> bool:
         """Resolve all conflicts by choosing all original or all incoming."""
         result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
@@ -889,14 +953,11 @@ class GitWorktreeManager:
 
     def _is_squash_merge_in_progress(self) -> bool:
         """Check if we're in a squash merge state (not a regular merge)."""
-        squash_msg = self.project_path / ".git" / "SQUASH_MSG"
-        merge_head = self.project_path / ".git" / "MERGE_HEAD"
-        return squash_msg.exists() and not merge_head.exists()
+        return self._git_path("SQUASH_MSG").exists() and not self._git_path("MERGE_HEAD").exists()
 
     def _is_regular_merge_in_progress(self) -> bool:
         """Check if we're in a regular merge state."""
-        merge_head = self.project_path / ".git" / "MERGE_HEAD"
-        return merge_head.exists()
+        return self._git_path("MERGE_HEAD").exists()
 
     def abort_merge(self) -> bool:
         """Abort an in-progress merge (regular or squash)."""
@@ -911,13 +972,15 @@ class GitWorktreeManager:
                 result = self._run_git("reset", "--hard", "HEAD", check=False)
                 if result.returncode != 0:
                     return False
-                squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+                squash_msg = self._git_path("SQUASH_MSG")
                 if squash_msg.exists():
                     squash_msg.unlink()
             else:
                 # No merge in progress
                 return False
-            # Restore any stashed changes from before the merge
+            # Put the user back on their pre-merge branch, then restore any
+            # stashed changes from before the merge
+            self._restore_original_branch(self._consume_merge_state())
             self._pop_chad_stash_if_exists()
             return True
 
@@ -928,12 +991,10 @@ class GitWorktreeManager:
             commit_message: Optional custom commit message (required for squash merge)
         """
         with self._repo_lock():
-            # Stage all resolved files
-            result = self._run_git("add", "-A", check=False)
-            if result.returncode != 0:
-                return False
-
-            # Check if merge is complete
+            # Refuse while unresolved conflicts remain. This check must come
+            # before any staging: a blanket `git add -A` here used to stage
+            # marker-laden files (hiding this guard) and sweep the user's own
+            # untracked files into the merge commit.
             result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
             if result.stdout.strip():
                 return False  # Still have conflicts
@@ -946,9 +1007,10 @@ class GitWorktreeManager:
                 # Nothing to commit - this is OK if we resolved conflict to no net changes
                 # Clean up the squash merge state if present
                 if is_squash:
-                    squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+                    squash_msg = self._git_path("SQUASH_MSG")
                     if squash_msg.exists():
                         squash_msg.unlink()
+                self._restore_original_branch(self._consume_merge_state())
                 self._pop_chad_stash_if_exists()
                 return True
 
@@ -967,7 +1029,9 @@ class GitWorktreeManager:
             if result.returncode != 0:
                 return False
 
-            # Pop any stashed changes from before the merge
+            # Return the user to their pre-merge branch, then restore any
+            # stashed changes from before the merge
+            self._restore_original_branch(self._consume_merge_state())
             self._pop_chad_stash_if_exists()
             return True
 
@@ -995,12 +1059,3 @@ class GitWorktreeManager:
                         worktrees.append((task_id, current_path))
 
         return worktrees
-
-    def cleanup_orphan_worktrees(self) -> list[str]:
-        """Remove worktrees that no longer have active sessions."""
-        # This would be called on startup to clean up from previous runs
-        cleaned = []
-        for task_id, path in self.get_worktree_list():
-            if self.delete_worktree(task_id):
-                cleaned.append(task_id)
-        return cleaned
