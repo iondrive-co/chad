@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -663,51 +664,60 @@ class GitWorktreeManager:
         result = self._run_git("status", "--porcelain", "--untracked-files=no", check=False)
         return bool(result.stdout.strip())
 
-    def _stash_main_changes(self) -> bool:
+    def _stash_main_changes(self) -> str:
         """Stash uncommitted tracked changes in the main repo.
 
-        Returns True only if a stash entry was actually created — `git stash
-        push` exits 0 with "No local changes to save", which previously set a
-        phantom stashed flag that later popped an unrelated user stash.
+        Returns the SHA of the stash commit this merge created, or "" if there
+        was nothing to stash. The SHA — not the "chad-merge-stash" message — is
+        what identifies the entry later: a message match also hits entries left
+        behind by earlier sessions, and popping one of those replays superseded
+        work onto the tree as bogus "Stashed changes" conflicts.
         """
         if not self._has_main_uncommitted_changes():
-            return False
+            return ""
         before = self._run_git("rev-parse", "-q", "--verify", "refs/stash", check=False).stdout.strip()
         result = self._run_git("stash", "push", "-m", "chad-merge-stash", check=False)
         if result.returncode != 0:
-            return False
+            return ""
         after = self._run_git("rev-parse", "-q", "--verify", "refs/stash", check=False).stdout.strip()
-        return bool(after) and after != before
+        return after if after and after != before else ""
 
-    def _find_chad_stash(self) -> str | None:
-        """Find the stash ref of the most recent chad merge stash, if any."""
-        result = self._run_git("stash", "list", "--format=%gd %gs", check=False)
+    def _stash_ref_for(self, stash_sha: str) -> str | None:
+        """Find the stash@{n} ref holding a given stash commit, if still present."""
+        result = self._run_git("stash", "list", "--format=%gd %H", check=False)
         for line in result.stdout.splitlines():
-            ref, _, message = line.partition(" ")
-            if "chad-merge-stash" in message:
+            ref, _, sha = line.partition(" ")
+            if sha.strip() == stash_sha:
                 return ref
         return None
 
-    def _pop_stash(self) -> tuple[bool, bool]:
-        """Pop the chad merge stash (never an unrelated user stash).
+    def _restore_stash(self, stash_sha: str) -> str | None:
+        """Restore the stash this merge created.
 
-        Returns (success, had_conflicts).
+        Returns None when there was nothing to restore or it restored cleanly,
+        otherwise a message describing what the user needs to deal with. A
+        conflicted pop leaves the entry in `git stash list`, so nothing is lost.
         """
-        ref = self._find_chad_stash()
+        if not stash_sha:
+            return None
+        ref = self._stash_ref_for(stash_sha)
         if ref is None:
-            return False, False
+            return None
         result = self._run_git("stash", "pop", ref, check=False)
         if result.returncode == 0:
-            return True, False
-        # Check if there was a conflict during stash pop
-        if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
-            return False, True
-        return False, False
-
-    def _pop_chad_stash_if_exists(self) -> None:
-        """Pop the chad merge stash if it exists."""
-        if self._find_chad_stash() is not None:
-            self._pop_stash()
+            return None
+        conflicted = self._unmerged_paths()
+        if conflicted:
+            return (
+                "Merged, but restoring your uncommitted changes conflicted in "
+                f"{', '.join(conflicted)}. Resolve the markers, then run "
+                "`git stash drop` to discard the saved copy."
+            )
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        return (
+            f"Merged, but your uncommitted changes could not be restored ({detail}). "
+            "They are still available in `git stash list`."
+        )
 
     def merge_to_main(
         self,
@@ -725,9 +735,10 @@ class GitWorktreeManager:
             commit_message: Custom commit message for the squashed commit
             target_branch: Branch to merge into (defaults to main/master)
 
-        Returns (success, conflicts, error_message) where conflicts is None on success
-        or a list of MergeConflict objects on failure. error_message is populated for
-        non-conflict failures (e.g., commit hooks preventing commits).
+        Returns (success, conflicts, message) where conflicts is None on success
+        or a list of MergeConflict objects on failure. message carries the reason
+        for non-conflict failures (e.g. commit hooks preventing commits), and on
+        success a warning if the user's stashed changes did not restore cleanly.
         """
         with self._repo_lock():
             worktree_path = self._worktree_path(task_id)
@@ -760,7 +771,7 @@ class GitWorktreeManager:
                 return False, None, detail
 
             # Stash any uncommitted changes in main repo before checkout/merge
-            stashed = self._stash_main_changes()
+            stash_sha = self._stash_main_changes()
 
             # Switch to target branch in the main repo, remembering where the
             # user was so we can put them back afterwards.
@@ -769,8 +780,7 @@ class GitWorktreeManager:
                 result = self._run_git("checkout", merge_target, check=False)
                 if result.returncode != 0:
                     # Restore stash if checkout failed
-                    if stashed:
-                        self._pop_stash()
+                    self._restore_stash(stash_sha)
                     detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
                     return False, None, detail
 
@@ -787,14 +797,14 @@ class GitWorktreeManager:
                     # Don't pop stash or switch branches yet — the user
                     # resolves conflicts first. Persist enough state for
                     # complete_merge/abort_merge (separate requests, separate
-                    # manager instances) to restore the original branch.
-                    self._save_merge_state(original_branch)
+                    # manager instances) to restore the original branch and the
+                    # stash this merge created.
+                    self._save_merge_state(original_branch, stash_sha)
                     return False, conflicts, None
 
                 # Other error - restore branch and stash
                 self._restore_original_branch(original_branch)
-                if stashed:
-                    self._pop_stash()
+                self._restore_stash(stash_sha)
                 detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
                 return False, None, detail
 
@@ -804,42 +814,43 @@ class GitWorktreeManager:
                 # Commit failed - abort the merge and restore state
                 self._run_git("reset", "--hard", "HEAD", check=False)
                 self._restore_original_branch(original_branch)
-                if stashed:
-                    self._pop_stash()
+                self._restore_stash(stash_sha)
                 detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "Commit failed"
                 return False, None, detail
 
             # Return to the branch the user was on, then restore their WIP
             self._restore_original_branch(original_branch)
-            if stashed:
-                self._pop_stash()
-            return True, None, None
+            return True, None, self._restore_stash(stash_sha)
 
     # -- merge state across conflict-resolution requests ---------------------
 
     def _merge_state_path(self) -> Path:
         return self._git_path("chad-merge-state.json")
 
-    def _save_merge_state(self, original_branch: str) -> None:
-        """Remember the branch the user was on when a conflicted merge began."""
+    def _save_merge_state(self, original_branch: str, stash_sha: str) -> None:
+        """Remember the branch the user was on, and the stash we took, at merge start."""
         try:
             self._merge_state_path().write_text(
-                json.dumps({"original_branch": original_branch}), encoding="utf-8"
+                json.dumps({"original_branch": original_branch, "stash_sha": stash_sha}),
+                encoding="utf-8",
             )
         except OSError:
             pass
 
-    def _consume_merge_state(self) -> str:
-        """Read and clear the saved original branch ('' if none)."""
+    def _consume_merge_state(self) -> tuple[str, str]:
+        """Read and clear the saved (original branch, stash SHA); '' for either if none."""
         path = self._merge_state_path()
         branch = ""
+        stash_sha = ""
         try:
             if path.exists():
-                branch = json.loads(path.read_text(encoding="utf-8")).get("original_branch", "")
+                state = json.loads(path.read_text(encoding="utf-8"))
+                branch = state.get("original_branch", "")
+                stash_sha = state.get("stash_sha", "")
                 path.unlink()
         except (OSError, ValueError):
             pass
-        return branch
+        return branch, stash_sha
 
     def _restore_original_branch(self, original_branch: str) -> None:
         """Check out the branch the user was on before the merge, if needed."""
@@ -850,13 +861,8 @@ class GitWorktreeManager:
 
     def _parse_conflicts(self) -> list[MergeConflict]:
         """Parse conflict markers from conflicted files."""
-        result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
-        conflicted_files = result.stdout.strip().split("\n") if result.stdout.strip() else []
-
         conflicts = []
-        for file_path in conflicted_files:
-            if not file_path:
-                continue
+        for file_path in self._unmerged_paths():
             full_path = self.project_path / file_path
 
             hunks: list[ConflictHunk] = []
@@ -923,33 +929,96 @@ class GitWorktreeManager:
 
         return hunks
 
-    def resolve_all_conflicts(self, use_incoming: bool) -> bool:
-        """Resolve all conflicts by choosing all original or all incoming."""
-        result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
-        conflicted_files = result.stdout.strip().split("\n") if result.stdout.strip() else []
+    def _conflict_stage_shas(self, file_path: str) -> dict[int, str]:
+        """Blob SHAs for a conflicted path, keyed by stage (1=base, 2=ours, 3=theirs)."""
+        result = self._run_git("ls-files", "-u", "--", file_path, check=False)
+        stages: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            meta, _, _name = line.partition("\t")
+            fields = meta.split()
+            if len(fields) >= 3:
+                stages[int(fields[2])] = fields[1]
+        return stages
 
-        for file_path in conflicted_files:
-            if not file_path:
-                continue
+    def _write_blob(self, sha: str, dest: Path) -> None:
+        """Write a blob to disk verbatim (bytes, so binary content survives)."""
+        with dest.open("wb") as handle:
+            subprocess.run(
+                ["git", "cat-file", "blob", sha],
+                cwd=self.project_path,
+                stdout=handle,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+    def _merge_conflicted_file(self, file_path: str, use_incoming: bool) -> bool:
+        """Rewrite a conflicted file, giving one side only the overlapping hunks.
+
+        Returns False when there is nothing to merge hunk-wise — a one-sided
+        (add/delete) or binary conflict, where the whole file is the only
+        meaningful unit of choice.
+        """
+        stages = self._conflict_stage_shas(file_path)
+        if 2 not in stages or 3 not in stages:
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            ours, base, theirs = tmp_dir / "ours", tmp_dir / "base", tmp_dir / "theirs"
+            self._write_blob(stages[2], ours)
+            self._write_blob(stages[3], theirs)
+            if 1 in stages:
+                self._write_blob(stages[1], base)
+            else:
+                base.write_bytes(b"")
+
+            ours_bytes = ours.read_bytes()
+            if b"\0" in ours_bytes or b"\0" in theirs.read_bytes():
+                return False
+
+            # merge-file keeps every hunk only one side touched and applies
+            # the chosen side to the rest, writing the result into `ours`.
+            side = "--theirs" if use_incoming else "--ours"
+            result = self._run_git(
+                "merge-file", side, str(ours), str(base), str(theirs), check=False
+            )
+            if result.returncode < 0:
+                return False
+            (self.project_path / file_path).write_bytes(ours.read_bytes())
+
+        return True
+
+    def resolve_all_conflicts(self, use_incoming: bool) -> bool:
+        """Resolve all conflicts by favouring the original or the incoming side.
+
+        The choice applies hunk by hunk within each file: regions only one side
+        changed are kept from that side, and use_incoming decides only the
+        regions that genuinely overlap. Taking the whole file with
+        `git checkout --ours/--theirs` instead silently discarded every
+        non-conflicting change the losing side had made elsewhere in it.
+        """
+        for file_path in self._unmerged_paths():
             full_path = self.project_path / file_path
             if not full_path.exists():
                 continue
 
-            if use_incoming:
-                # Use theirs (incoming from task branch)
-                self._run_git("checkout", "--theirs", file_path, check=False)
-            else:
-                # Use ours (main branch)
-                self._run_git("checkout", "--ours", file_path, check=False)
+            if not self._merge_conflicted_file(file_path, use_incoming):
+                # One-sided or binary conflict — take the whole file
+                side = "--theirs" if use_incoming else "--ours"
+                self._run_git("checkout", side, file_path, check=False)
 
             self._run_git("add", file_path, check=False)
 
         return True
 
+    def _unmerged_paths(self) -> list[str]:
+        """Repo-relative paths that still have conflict stages in the index."""
+        result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
+        return [path for path in result.stdout.strip().split("\n") if path]
+
     def has_remaining_conflicts(self) -> bool:
         """Check if there are any unresolved conflicts."""
-        result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
-        return bool(result.stdout.strip())
+        return bool(self._unmerged_paths())
 
     def _is_squash_merge_in_progress(self) -> bool:
         """Check if we're in a squash merge state (not a regular merge)."""
@@ -978,62 +1047,50 @@ class GitWorktreeManager:
             else:
                 # No merge in progress
                 return False
-            # Put the user back on their pre-merge branch, then restore any
-            # stashed changes from before the merge
-            self._restore_original_branch(self._consume_merge_state())
-            self._pop_chad_stash_if_exists()
+            # Put the user back on their pre-merge branch, then restore the
+            # changes this merge stashed (never an earlier session's leftovers)
+            original_branch, stash_sha = self._consume_merge_state()
+            self._restore_original_branch(original_branch)
+            self._restore_stash(stash_sha)
             return True
 
-    def complete_merge(self, commit_message: str | None = None) -> bool:
+    def complete_merge(self, commit_message: str) -> tuple[bool, str | None]:
         """Complete the merge after all conflicts resolved.
 
         Args:
-            commit_message: Optional custom commit message (required for squash merge)
+            commit_message: Message for the resolved merge commit. Always passed
+                explicitly — letting git fall back to SQUASH_MSG produces commits
+                titled "Squashed commit of the following:" with a WIP body.
+
+        Returns (success, warning) where warning describes a stash that did not
+        restore cleanly; the merge commit itself has still landed.
         """
         with self._repo_lock():
             # Refuse while unresolved conflicts remain. This check must come
             # before any staging: a blanket `git add -A` here used to stage
             # marker-laden files (hiding this guard) and sweep the user's own
             # untracked files into the merge commit.
-            result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
-            if result.stdout.strip():
-                return False  # Still have conflicts
+            if self._unmerged_paths():
+                return False, None  # Still have conflicts
 
             # Check if there's anything to commit (may be empty if conflict resolved to no changes)
             result = self._run_git("diff", "--cached", "--quiet", check=False)
-            is_squash = self._is_squash_merge_in_progress()
 
             if result.returncode == 0:
                 # Nothing to commit - this is OK if we resolved conflict to no net changes
-                # Clean up the squash merge state if present
-                if is_squash:
-                    squash_msg = self._git_path("SQUASH_MSG")
-                    if squash_msg.exists():
-                        squash_msg.unlink()
-                self._restore_original_branch(self._consume_merge_state())
-                self._pop_chad_stash_if_exists()
-                return True
-
-            # Commit the merge
-            if is_squash:
-                # Squash merge - need to provide a message or use SQUASH_MSG
-                if commit_message:
-                    result = self._run_git("commit", "-m", commit_message, check=False)
-                else:
-                    # Use the default SQUASH_MSG
-                    result = self._run_git("commit", "--no-edit", check=False)
+                squash_msg = self._git_path("SQUASH_MSG")
+                if squash_msg.exists():
+                    squash_msg.unlink()
             else:
-                # Regular merge - can use --no-edit
-                result = self._run_git("commit", "--no-edit", check=False)
+                result = self._run_git("commit", "-m", commit_message, check=False)
+                if result.returncode != 0:
+                    return False, None
 
-            if result.returncode != 0:
-                return False
-
-            # Return the user to their pre-merge branch, then restore any
-            # stashed changes from before the merge
-            self._restore_original_branch(self._consume_merge_state())
-            self._pop_chad_stash_if_exists()
-            return True
+            # Return the user to their pre-merge branch, then restore the
+            # changes this merge stashed (never an earlier session's leftovers)
+            original_branch, stash_sha = self._consume_merge_state()
+            self._restore_original_branch(original_branch)
+            return True, self._restore_stash(stash_sha)
 
     def cleanup_after_merge(self, task_id: str) -> bool:
         """Delete worktree and branch after successful merge."""

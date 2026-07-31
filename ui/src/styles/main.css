@@ -346,6 +346,7 @@ button {
   border-radius: 4px;
   cursor: pointer;
   font-size: 15px;
+  font-family: inherit;
   white-space: nowrap;
 }
 
@@ -831,7 +832,10 @@ label {
 .composer-right {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
 }
 
 .chat-composer.drag-over {
@@ -846,72 +850,84 @@ label {
   margin-bottom: 8px;
 }
 
-.reasoning-select,
-.model-select {
-  background: transparent;
+.composer-control {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: auto;
+  min-height: 34px;
   border: 1px solid var(--border);
-  color: var(--text-muted);
-  padding: 6px 10px;
-  font-size: 15px;
-  cursor: pointer;
+  padding: 6px 8px;
   border-radius: 6px;
-  transition: border-color 0.2s, color 0.2s;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
-.reasoning-select:hover:not(:disabled),
-.model-select:hover:not(:disabled) {
+.composer-control-secondary {
+  background: var(--bg);
+  color: var(--text-muted);
+}
+
+.composer-control-secondary:not(.slack-toggle):hover:not(:disabled),
+.slack-toggle.composer-control-secondary:hover:not(:has(.slack-toggle-checkbox:disabled)) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.reasoning-select:disabled,
-.model-select:disabled {
+.composer-control-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  padding-inline: 12px;
+}
+
+.composer-control-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.composer-control:disabled,
+.slack-toggle:has(.slack-toggle-checkbox:disabled) {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
 .slack-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 15px;
-  cursor: pointer;
   user-select: none;
 }
 
 .slack-toggle .slack-toggle-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
   cursor: pointer;
-}
-
-.slack-toggle:has(.slack-toggle-checkbox:disabled) {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .slack-toggle .slack-toggle-checkbox:disabled {
   cursor: not-allowed;
 }
 
+.model-select,
+.reasoning-select {
+  flex: 1 1 150px;
+  min-width: 140px;
+  max-width: 178px;
+}
+
 .attach-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  padding: 6px 12px;
-  font-size: 15px;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: border-color 0.2s, color 0.2s;
+  padding-inline: 12px;
 }
 
-.attach-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.attach-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.send-btn {
+  min-width: 104px;
 }
 
 .terminal-area {

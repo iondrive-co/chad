@@ -244,7 +244,7 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
         raise HTTPException(status_code=400, detail="Worktree does not exist")
 
     commit_msg = request.commit_message.strip() if request.commit_message else None
-    success, conflicts, error_msg = wt_mgr.merge_to_main(
+    success, conflicts, detail = wt_mgr.merge_to_main(
         session_id,
         commit_message=commit_msg,
         target_branch=request.target_branch,
@@ -258,9 +258,11 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
         session.worktree_base_commit = None
         session.has_worktree_changes = False
         session.merge_conflicts = None
+        # `detail` on success is a warning (e.g. the user's stashed changes did
+        # not restore cleanly) — surface it rather than claiming a clean merge.
         return MergeResponse(
             success=True,
-            message="Changes merged successfully",
+            message=detail or "Changes merged successfully",
             conflicts=None,
         )
 
@@ -291,7 +293,7 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
 
     return MergeResponse(
         success=False,
-        message=error_msg or "Merge failed",
+        message=detail or "Merge failed",
         conflicts=None,
     )
 
@@ -397,8 +399,12 @@ async def resolve_conflicts(session_id: str, request: ResolveConflictsRequest) -
             conflicts=None,
         )
 
-    # Complete the merge
-    if wt_mgr.complete_merge():
+    # Complete the merge, carrying the message the user typed in the merge form
+    # through to the commit — git would otherwise reuse SQUASH_MSG.
+    commit_msg = request.commit_message.strip() if request.commit_message else ""
+    branch = session.worktree_branch or f"chad-task-{session_id}"
+    success, warning = wt_mgr.complete_merge(commit_msg or f"Merge {branch}")
+    if success:
         # Cleanup after successful merge
         wt_mgr.cleanup_after_merge(session_id)
         session.worktree_path = None
@@ -408,7 +414,7 @@ async def resolve_conflicts(session_id: str, request: ResolveConflictsRequest) -
         session.merge_conflicts = None
         return MergeResponse(
             success=True,
-            message="Conflicts resolved and merged successfully",
+            message=warning or "Conflicts resolved and merged successfully",
             conflicts=None,
         )
 

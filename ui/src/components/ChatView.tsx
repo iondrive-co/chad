@@ -292,18 +292,22 @@ export function ChatView({
   useEffect(() => {
     let cancelled = false;
     setConversation([]);
+    setHasRunTask(false);
     conversationSeqRef.current = 0;
 
     (async () => {
       try {
         const convo = await api.getConversation(sessionId, 0);
         if (cancelled) return;
-        setConversation(convo.items);
-        setTaskDescription(convo.task.task_description || null);
-        setVerificationAgent((convo.task as { verification_account?: string }).verification_account || null);
-        setTaskScreenshots((convo.task as { screenshots?: string[] }).screenshots || []);
-        setHasRunTask(true);
-        conversationSeqRef.current = convo.latest_seq;
+        const conversationHasTask = Boolean(
+          convo.task.task_description.trim() || convo.items.length > 0,
+        );
+        setConversation(conversationHasTask ? convo.items : []);
+        setTaskDescription(conversationHasTask ? convo.task.task_description || null : null);
+        setVerificationAgent(conversationHasTask ? convo.task.verification_account || null : null);
+        setTaskScreenshots(conversationHasTask ? convo.task.screenshots || [] : []);
+        setHasRunTask(conversationHasTask);
+        conversationSeqRef.current = conversationHasTask ? convo.latest_seq : 0;
       } catch {
         if (!cancelled) {
           setConversation([]);
@@ -1223,7 +1227,7 @@ export function ChatView({
                   {taskActive && <span className="running-indicator">Running…</span>}
                   {codingModels.length > 1 && (
                     <select
-                      className="model-select"
+                      className="model-select composer-control composer-control-secondary"
                       value={codingModel}
                       onChange={(e) => setCodingModel(e.target.value)}
                       disabled={sending}
@@ -1242,7 +1246,7 @@ export function ChatView({
                   )}
                   {codingSupportsReasoning && (
                     <select
-                      className="reasoning-select"
+                      className="reasoning-select composer-control composer-control-secondary"
                       value={codingReasoning}
                       onChange={(e) => setCodingReasoning(e.target.value)}
                       disabled={sending}
@@ -1257,7 +1261,7 @@ export function ChatView({
                     </select>
                   )}
                   <label
-                    className="slack-toggle"
+                    className="slack-toggle composer-control composer-control-secondary"
                     title={slackEnabled
                       ? "Post milestone updates for this task to Slack"
                       : "Enable Slack in Settings to post task updates"}
@@ -1276,13 +1280,15 @@ export function ChatView({
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={uploading || sending}
-                      className="attach-btn"
+                      className="attach-btn composer-control composer-control-secondary"
                       title="Attach screenshots"
                     >
                       Attach
                     </button>
                   )}
                   <button
+                    type="button"
+                    className="send-btn composer-control composer-control-primary"
                     onClick={handleSendMessage}
                     disabled={sending || uploading || (!taskActive && !inputText.trim())}
                   >

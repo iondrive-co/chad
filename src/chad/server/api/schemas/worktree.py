@@ -110,6 +110,9 @@ class ResolveConflictsRequest(BaseModel):
     """Request model for resolving merge conflicts."""
 
     use_incoming: bool = Field(description="If true, accept all incoming changes; if false, keep original")
+    commit_message: str | None = Field(
+        default=None, description="Custom commit message for the resolved merge commit"
+    )
 
 
 class BranchesResponse(BaseModel):

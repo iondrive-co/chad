@@ -323,9 +323,11 @@ export class ChadAPI {
   resolveConflicts(
     sessionId: string,
     useIncoming: boolean,
+    commitMessage?: string | null,
   ): Promise<MergeResult> {
     return this.post(`/api/v1/sessions/${sessionId}/worktree/resolve-conflicts`, {
       use_incoming: useIncoming,
+      commit_message: commitMessage ?? null,
     });
   }
 

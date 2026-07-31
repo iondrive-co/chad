@@ -200,7 +200,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.resolveConflicts(sessionId, useIncoming);
+      const result = await api.resolveConflicts(sessionId, useIncoming, commitMessage || null);
       if (result.success) {
         setPhase("success");
       } else {
@@ -213,7 +213,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [api, sessionId]);
+  }, [api, sessionId, commitMessage]);
 
   const handleAbortMerge = useCallback(async () => {
     setLoading(true);

@@ -238,6 +238,122 @@ class TestInterruptFollowups:
             "Interrupt follow-up text should not be appended to raw Ctrl+C PTY input"
         )
 
+
+class TestComposerInitialState:
+    """Verify new-session composer state is derived from real task history."""
+
+    def test_session_change_resets_followup_state_before_async_history_load(self):
+        """A newly selected session should start in first-task mode while history loads."""
+        content = CHATVIEW_FILE.read_text()
+
+        load_effect_match = re.search(
+            r"// Load latest conversation for this session \(latest task only\)(.*?)"
+            r"\(async \(\) => \{",
+            content,
+            re.DOTALL,
+        )
+        assert load_effect_match, "Should reset state before loading latest conversation"
+        prefetch_reset = load_effect_match.group(1)
+
+        assert "setConversation([])" in prefetch_reset, (
+            "Session changes should immediately clear stale conversation items"
+        )
+        assert "setHasRunTask(false)" in prefetch_reset, (
+            "Session changes should immediately clear stale follow-up state"
+        )
+
+    def test_empty_conversation_response_does_not_mark_session_as_followup(self):
+        """A placeholder/empty conversation response should keep the composer in start-task mode."""
+        content = CHATVIEW_FILE.read_text()
+
+        load_effect_match = re.search(
+            r"// Load latest conversation for this session \(latest task only\)(.*?)"
+            r"// Load this session's own coding agent/model",
+            content,
+            re.DOTALL,
+        )
+        assert load_effect_match, "Should have latest conversation loading effect"
+        load_effect = load_effect_match.group(1)
+
+        assert "conversationHasTask" in load_effect, (
+            "The conversation effect should derive whether a real task exists"
+        )
+        assert "convo.task.task_description" in load_effect, (
+            "Task history should be detected from task metadata"
+        )
+        assert "convo.items.length" in load_effect, (
+            "Task history should also be detected from conversation items"
+        )
+        assert "setHasRunTask(conversationHasTask)" in load_effect, (
+            "Empty conversation responses must not unconditionally mark the session as follow-up"
+        )
+        assert "setHasRunTask(true);" not in load_effect, (
+            "The conversation effect should not force follow-up mode for empty sessions"
+        )
+
+    def test_send_button_has_distinct_start_and_followup_labels(self):
+        """The composer submit button should still distinguish first task from follow-up."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert '"Start task"' in content
+        assert '"Send follow-up"' in content
+        assert 'hasRunTask ? "Send follow-up" : "Start task"' in content
+
+
+class TestComposerControlStyling:
+    """Verify the composer action row uses one shared control contract."""
+
+    def test_composer_controls_share_common_classes(self):
+        """Model, reasoning, Slack, attach, and send controls should opt into shared styling."""
+        content = CHATVIEW_FILE.read_text()
+
+        expected_classes = [
+            'className="model-select composer-control composer-control-secondary"',
+            'className="reasoning-select composer-control composer-control-secondary"',
+            'className="slack-toggle composer-control composer-control-secondary"',
+            'className="attach-btn composer-control composer-control-secondary"',
+            'className="send-btn composer-control composer-control-primary"',
+        ]
+        for class_name in expected_classes:
+            assert class_name in content, f"Missing shared composer control class: {class_name}"
+
+    def test_composer_control_rule_sets_shared_font_and_box(self):
+        """Shared composer controls should define font, height, radius, and box styling once."""
+        content = CSS_FILE.read_text()
+
+        match = re.search(r"\.composer-control\s*\{([^}]+)\}", content)
+        assert match, "Should define .composer-control CSS rule"
+        rule_content = match.group(1)
+
+        for declaration in [
+            "font-family: var(--font-mono)",
+            "font-size: 15px",
+            "min-height:",
+            "border: 1px solid var(--border)",
+            "border-radius: 6px",
+            "display: inline-flex",
+            "flex-direction: row",
+            "align-items: center",
+        ]:
+            assert declaration in rule_content, (
+                f".composer-control should include {declaration}"
+            )
+
+    def test_slack_checkbox_overrides_global_input_width(self):
+        """The Slack checkbox should not inherit the full-width form input rule."""
+        content = CSS_FILE.read_text()
+
+        match = re.search(
+            r"\.slack-toggle \.slack-toggle-checkbox\s*\{([^}]+)\}",
+            content,
+        )
+        assert match, "Should style .slack-toggle-checkbox"
+        rule_content = match.group(1)
+
+        assert "width:" in rule_content, "Slack checkbox should set its own width"
+        assert "height:" in rule_content, "Slack checkbox should set its own height"
+        assert "margin: 0" in rule_content, "Slack checkbox should reset input margin"
+
     def test_pending_followup_auto_starts_real_followup_task(self):
         """Queued interrupt follow-ups should auto-start a real is_followup task."""
         content = CHATVIEW_FILE.read_text()

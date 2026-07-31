@@ -827,6 +827,60 @@ class TestWorktreeEndpoints:
         # Should return 200 or 400, not 404 (endpoint must exist)
         assert response.status_code != 404
 
+    def test_resolve_conflicts_keeps_user_commit_message(self, client, tmp_path):
+        """A merge finished via conflict resolution must use the typed message.
+
+        Regression: the resolve-conflicts route called complete_merge() with no
+        message, so git fell back to SQUASH_MSG and the commit landed as
+        "Squashed commit of the following:" with a WIP body.
+        """
+        import subprocess
+
+        def git(*args, cwd):
+            return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        git("init", cwd=project_dir)
+        git("config", "user.email", "test@test.com", cwd=project_dir)
+        git("config", "user.name", "Test", cwd=project_dir)
+        (project_dir / "file.txt").write_text("initial\n")
+        git("add", ".", cwd=project_dir)
+        git("commit", "-m", "initial", cwd=project_dir)
+
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+        worktree_resp = client.post(f"/api/v1/sessions/{session_id}/worktree")
+        assert worktree_resp.status_code == 201, worktree_resp.text
+        worktree_path = Path(worktree_resp.json()["path"])
+
+        # Diverge the worktree and the main checkout on the same file
+        (worktree_path / "file.txt").write_text("from worktree\n")
+        (project_dir / "file.txt").write_text("from main\n")
+        git("commit", "-am", "main edit", cwd=project_dir)
+
+        merge_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/merge",
+            json={"commit_message": "Fix button styling"},
+        )
+        assert merge_resp.status_code == 200, merge_resp.text
+        assert merge_resp.json()["conflicts"], merge_resp.text
+
+        resolve_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/resolve-conflicts",
+            json={"use_incoming": True, "commit_message": "Fix button styling"},
+        )
+        assert resolve_resp.status_code == 200, resolve_resp.text
+        assert resolve_resp.json()["success"], resolve_resp.text
+
+        body = git("log", "-1", "--format=%B", cwd=project_dir).stdout.strip()
+        assert body == "Fix button styling", body
+        assert "Squashed commit" not in body
+        assert "WIP" not in body
+
     def test_abort_merge_endpoint(self, client, tmp_path):
         """POST /worktree/abort-merge should exist."""
         # Create a test git repo
