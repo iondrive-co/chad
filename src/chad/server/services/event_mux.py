@@ -308,16 +308,24 @@ class EventMultiplexer:
                             if self.event_log:
                                 self._sync_seq_with_log()
 
-                            # Yield the terminal output
-                            yield MuxEvent(
-                                type="terminal",
-                                data={
-                                    "data": pty_event.data,
-                                    "has_ansi": pty_event.has_ansi,
-                                    "text": getattr(pty_event, "text", False),
-                                },
-                                seq=self._seq or self._next_seq(),
-                            )
+                            # Suppressed chunks (e.g. raw stream-json noise) carry
+                            # no data — don't spend a seq on an empty event.
+                            if pty_event.data:
+                                # Each logged chunk carries its own EventLog seq so
+                                # distinct chunks never share a seq (clients dedupe
+                                # by seq) and replays collapse onto the live copy.
+                                chunk_seq = getattr(pty_event, "seq", None)
+                                if chunk_seq:
+                                    self._seq = max(self._seq, chunk_seq)
+                                yield MuxEvent(
+                                    type="terminal",
+                                    data={
+                                        "data": pty_event.data,
+                                        "has_ansi": pty_event.has_ansi,
+                                        "text": getattr(pty_event, "text", False),
+                                    },
+                                    seq=chunk_seq or self._next_seq(),
+                                )
 
                             # Drain any pending EventLog events (skip terminal_output)
                             if include_events:
@@ -456,15 +464,19 @@ class EventMultiplexer:
                                 if pty_event.type == "output":
                                     if self.event_log:
                                         self._sync_seq_with_log()
-                                    yield MuxEvent(
-                                        type="terminal",
-                                        data={
-                                            "data": pty_event.data,
-                                            "has_ansi": pty_event.has_ansi,
-                                            "text": getattr(pty_event, "text", False),
-                                        },
-                                        seq=self._seq or self._next_seq(),
-                                    )
+                                    if pty_event.data:
+                                        chunk_seq = getattr(pty_event, "seq", None)
+                                        if chunk_seq:
+                                            self._seq = max(self._seq, chunk_seq)
+                                        yield MuxEvent(
+                                            type="terminal",
+                                            data={
+                                                "data": pty_event.data,
+                                                "has_ansi": pty_event.has_ansi,
+                                                "text": getattr(pty_event, "text", False),
+                                            },
+                                            seq=chunk_seq or self._next_seq(),
+                                        )
                                     if include_events:
                                         for event in self._drain_event_log(skip_terminal=True):
                                             yield event

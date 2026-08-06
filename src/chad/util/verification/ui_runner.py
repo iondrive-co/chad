@@ -274,10 +274,25 @@ def stop_chad(instance: ChadInstance) -> None:
 
 
 def _select_tab(page, tab: str) -> None:
-    """Click a tab button in the React UI header nav."""
+    """Open a view in the React UI header.
+
+    Projects/Providers/Settings live in the dropdown behind the "Chad"
+    button; anything else is matched against the session tabs in the nav.
+    """
+    if tab.lower() in ("projects", "providers", "settings"):
+        page.locator(".chad-btn").click()
+        page.wait_for_timeout(200)
+        items = page.locator(".chad-menu button")
+        for i in range(items.count()):
+            item = items.nth(i)
+            if item.inner_text().strip().lower() == tab.lower():
+                item.click()
+                page.wait_for_timeout(500)
+                return
+        raise ChadLaunchError(f"Could not find menu entry matching '{tab}'")
+
     buttons = page.locator("nav.tabs button")
-    count = buttons.count()
-    for i in range(count):
+    for i in range(buttons.count()):
         btn = buttons.nth(i)
         if btn.inner_text().strip().lower() == tab.lower():
             btn.click()

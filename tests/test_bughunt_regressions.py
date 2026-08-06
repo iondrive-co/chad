@@ -506,3 +506,16 @@ class TestCredentialIsolation:
         (creds / "kimi-code.json").write_text("{}")
 
         assert provider_login.is_logged_in("kimi", "mine") is True
+
+
+class TestServerVersionParity:
+    """The API must report the real package version, not a stale constant."""
+
+    def test_server_version_matches_package(self):
+        from chad import __version__ as package_version
+        from chad.server import __version__ as server_version
+
+        assert server_version == package_version, (
+            "chad.server.__version__ has drifted from chad.__version__; "
+            "/status reports the wrong version"
+        )

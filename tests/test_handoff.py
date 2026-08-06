@@ -261,17 +261,19 @@ class TestBuildHandoffSummary:
     def test_summary_includes_terminal_output_when_no_assistant_messages(self, event_log):
         """Test that terminal output is included when no assistant_message events exist.
 
-        Terminal output events are cumulative screen snapshots, so only the
-        last event is used (it contains the most recent screen state).
+        Terminal output events are streamed deltas, so the work log joins all
+        of them — using only the last event would drop everything before the
+        final chunk.
         """
         event_log.log(UserMessageEvent(content="Fix the bug"))
-        event_log.log(TerminalOutputEvent(data="Reading src/main.py..."))
-        event_log.log(TerminalOutputEvent(data="Reading src/main.py...\nFound issue on line 42"))
+        event_log.log(TerminalOutputEvent(data="Reading src/main.py...\n"))
+        event_log.log(TerminalOutputEvent(data="Found issue on line 42\n"))
 
         summary = build_handoff_summary("Fix the bug", event_log)
 
         assert "## Agent Work Log" in summary
-        # Only the last (cumulative) snapshot is used
+        # All deltas are joined into the work log
+        assert "Reading src/main.py..." in summary
         assert "Found issue on line 42" in summary
 
     def test_summary_terminal_output_truncated(self, event_log):

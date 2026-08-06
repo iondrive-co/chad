@@ -73,6 +73,10 @@ class PTYEvent:
     error: str | None = None
     has_ansi: bool = True
     text: bool = False  # True when data is plain text (not base64)
+    # EventLog seq of the terminal_output event logged for this chunk. Live
+    # streams and EventLog replays share one seq space so clients can dedupe
+    # replayed chunks by seq.
+    seq: int | None = None
 
 
 class PTYStreamService:

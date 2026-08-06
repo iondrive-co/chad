@@ -35,7 +35,7 @@ from chad.util.utils import safe_home
 from chad.util.providers import CLAUDE_THINKING_BUDGETS
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
-from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
+from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
 
 
 _CLI_INSTALLER = AIToolInstaller()
@@ -492,7 +492,6 @@ class Task:
     _thread: threading.Thread | None = field(default=None, repr=False)
     _event_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _provider: Any = field(default=None, repr=False)
-    _last_terminal_snapshot: str = field(default="", repr=False)
     _mock_duration_applied: bool = field(default=False, repr=False)
     _session_event_loop: Any = field(default=None, repr=False)
 
@@ -899,12 +898,10 @@ class TaskExecutor:
         config_manager,
         session_manager,
         inactivity_timeout: float | None = 900.0,
-        terminal_flush_interval: float = 0.5,
     ):
         self.config_manager = config_manager
         self.session_manager = session_manager
         self.inactivity_timeout = inactivity_timeout
-        self.terminal_flush_interval = terminal_flush_interval
         self._tasks: dict[str, Task] = {}
         # Track activity across all channels (PTY output AND tool calls) so timeouts
         # don't ignore heavy Read/Grep usage with no terminal writes.
@@ -1130,43 +1127,27 @@ class TaskExecutor:
 
         last_output_time = time.time()
         last_warning_time = 0.0
-        last_log_flush = time.time()
         # Reset the activity timestamp for this task so a stale timestamp from a
         # prior phase (e.g., the coding phase before an await_reset pause) does
         # not cause the inactivity check to fire immediately when a new phase starts.
         with self._lock:
             self._activity_times[task.id] = last_output_time
-        terminal_buffer = bytearray()
-        terminal_lock = threading.Lock()
         captured_output: list[str] = []
-
-        # Terminal emulator for extracting meaningful text from PTY output
-        log_emulator = TerminalEmulator(cols=cols, rows=rows)
-        # Persist dedupe baseline across phases to avoid duplicate terminal_output
-        # rows when a new phase starts with an unchanged screen.
-        last_logged_text = task._last_terminal_snapshot
         pty_service = get_pty_stream_service()
 
-        def flush_terminal_buffer():
-            nonlocal last_logged_text, last_log_flush
-            with terminal_lock:
-                if not terminal_buffer:
-                    last_log_flush = time.time()
-                    return
-                data_bytes = bytes(terminal_buffer)
-                terminal_buffer.clear()
+        def log_terminal_delta(text: str) -> int | None:
+            """Log one chunk of new terminal text and return its log seq.
 
-            # Feed data to terminal emulator and extract visible text
-            log_emulator.feed(data_bytes)
-            current_text = log_emulator.get_text()
-
-            # Only log if there's meaningful new content
-            if current_text != last_logged_text and current_text.strip():
-                if task.event_log:
-                    task.event_log.log(TerminalOutputEvent(data=current_text))
-                last_logged_text = current_text
-                task._last_terminal_snapshot = current_text
-            last_log_flush = time.time()
+            Terminal events are deltas in the EventLog's seq space: replay
+            consumers (WS catchup, the UI's history view) append them in order,
+            and live PTY chunks carry the same seq so client-side seq dedup
+            collapses replays instead of dropping or duplicating output.
+            """
+            if not task.event_log:
+                return None
+            ev = TerminalOutputEvent(data=text)
+            task.event_log.log(ev)
+            return ev.seq
 
         # Build agent command for this phase
         mock_run_duration_seconds = 0
@@ -1237,11 +1218,10 @@ class TaskExecutor:
                         event.data = readable_text
                         event.has_ansi = False
                         event.text = True
+                        event.seq = log_terminal_delta(readable_text)
 
                         encoded = base64.b64encode(readable_text.encode()).decode()
                         emit("stream", chunk=encoded)
-                        with terminal_lock:
-                            terminal_buffer.extend(readable_text.encode())
                         _feed_captured(readable_text)
                     else:
                         # Suppress raw stream-json chunks from reaching subscribers
@@ -1268,9 +1248,8 @@ class TaskExecutor:
                         event.data = readable_text
                         event.has_ansi = False
                         event.text = True
+                        event.seq = log_terminal_delta(readable_text)
                         emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                        with terminal_lock:
-                            terminal_buffer.extend(readable_text.encode())
                         _feed_captured(readable_text)
                     else:
                         # Suppress banner / prompt echo / command output from subscribers.
@@ -1283,11 +1262,9 @@ class TaskExecutor:
                     decoded = chunk_bytes.decode(errors="replace")
                     cleaned = _strip_binary_garbage(decoded)
                     if cleaned.strip():
-                        cleaned_bytes = cleaned.encode()
-                        encoded = base64.b64encode(cleaned_bytes).decode()
+                        event.seq = log_terminal_delta(cleaned)
+                        encoded = base64.b64encode(cleaned.encode()).decode()
                         emit("stream", chunk=encoded)
-                        with terminal_lock:
-                            terminal_buffer.extend(cleaned_bytes)
                         _feed_captured(cleaned)
 
         # Start PTY session
@@ -1344,15 +1321,9 @@ class TaskExecutor:
                     last_warning_time = now
 
                 if idle_secs > self.inactivity_timeout:
-                    flush_terminal_buffer()
                     pty_service.terminate(stream_id)
                     pty_service.cleanup_session(stream_id)
                     return -2, ""  # -2 indicates timeout
-
-            # Periodically flush decoded terminal snapshots to EventLog so
-            # long-running sessions are observable before process exit.
-            if time.time() - last_log_flush >= self.terminal_flush_interval:
-                flush_terminal_buffer()
 
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
@@ -1391,28 +1362,20 @@ class TaskExecutor:
                     prose_parts.append(payload)
             readable_text = _strip_binary_garbage("".join(prose_parts))
             if readable_text.strip():
+                log_terminal_delta(readable_text)
                 emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                with terminal_lock:
-                    terminal_buffer.extend(readable_text.encode())
                 _feed_captured(readable_text)
-                captured_output.append(readable_text)
 
         # Flush any remaining data in the JSON parser (last event may lack trailing newline)
         if json_parser:
             remaining = json_parser.flush()
             if remaining:
                 readable_text = _render_stream_json_text_chunks(remaining)
-                if not readable_text:
-                    readable_text = ""
-                # Emit final parsed output to stream and logs
                 if readable_text:
+                    log_terminal_delta(readable_text)
                     emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                    with terminal_lock:
-                        terminal_buffer.extend(readable_text.encode())
                     _feed_captured(readable_text)
-                    captured_output.append(readable_text)
 
-        flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
 
         if task.cancel_requested:
@@ -1673,13 +1636,19 @@ class TaskExecutor:
                 )
             else:
                 task.state = TaskState.FAILED
-                task.error = f"Agent exited with code {final_exit_code}"
-                task.result = task.error
+                # Surface the agent's last words (e.g. an auth error asking the
+                # user to re-login) — a bare exit code tells the user nothing.
+                error = f"Agent exited with code {final_exit_code}"
+                tail = accumulated_output.strip()[-500:]
+                if tail:
+                    error = f"{error}: {tail}"
+                task.error = error
+                task.result = error
                 session.status = "completed"
                 emit(
                     "complete",
                     success=False,
-                    message=f"Agent exited with code {final_exit_code}",
+                    message=error,
                     exit_code=final_exit_code,
                 )
                 emit("message_complete", speaker="CODING AI", content=f"Task failed (exit {final_exit_code})")

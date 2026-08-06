@@ -245,14 +245,15 @@ class ContextCondensedEvent(EventBase):
 
 @dataclass
 class TerminalOutputEvent(EventBase):
-    """Logged for terminal screen content.
+    """Logged for each chunk of new terminal output.
 
-    Contains human-readable text extracted from the terminal screen,
-    with ANSI sequences processed by the terminal emulator. Only logged
-    when screen content meaningfully changes.
+    Contains only the NEW human-readable text of one output chunk (a delta,
+    never a cumulative screen snapshot): consumers replay these events
+    append-only, and live streams reuse each event's seq so clients can
+    dedupe replayed chunks.
     """
 
-    data: str = ""  # Human-readable screen text (processed by terminal emulator)
+    data: str = ""  # Human-readable text of this chunk only
 
 
 @dataclass

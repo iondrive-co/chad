@@ -123,6 +123,10 @@ Pydantic models for request/response validation: SessionCreate, TaskCreate, Acco
 When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware
 tools instead—do not invoke `rg`.
 
+Read a file once. `src/chad/ui/cli/app.py` was read 12 times in a single session (10 of them re-reads of a file nothing
+had written to), and `src/chad/util/providers.py` 6 times in six minutes. Grep for the symbol and read the range around
+it; a whole-file read is for the first pass. If you have already read it and no edit has landed since, you still have it.
+
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
@@ -212,11 +216,13 @@ Use `chad.util.verification.ui_runner` to launch the API server and capture scre
 from chad.util.verification.ui_runner import create_temp_env, start_chad, stop_chad, open_playwright_page
 env = create_temp_env()
 instance = start_chad(env)
-with open_playwright_page(instance.port, tab="chat", headless=True) as page:
+with open_playwright_page(instance.port, tab="projects", headless=True) as page:
     page.screenshot(path="/tmp/chad/screenshot.png")
 stop_chad(instance)
 env.cleanup()
 ```
+`tab` accepts the Chad-menu views ("projects", "providers", "settings") or a
+session tab's name; omit it for the default view.
 Release screenshots: `python scripts/release_screenshots.py`
 
 ### CLI Terminal Screenshots

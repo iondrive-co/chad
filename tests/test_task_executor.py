@@ -820,7 +820,6 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
         ConfigManager(),
         session_manager,
         inactivity_timeout=10.0,
-        terminal_flush_interval=0.1,
     )
 
     import chad.server.services.task_executor as te
@@ -868,7 +867,6 @@ def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeyp
         ConfigManager(),
         session_manager,
         inactivity_timeout=10.0,
-        terminal_flush_interval=0.05,
     )
 
     import chad.server.services.task_executor as te
@@ -1435,3 +1433,112 @@ class TestCaptureProviderCommand:
         assert "--model" in result.cmd
         idx = result.cmd.index("--model")
         assert result.cmd[idx + 1] == "claude-opus-4-6"
+
+
+def test_raw_provider_terminal_events_are_deltas(tmp_path, monkeypatch):
+    """Raw-path providers must log each output chunk once, never snapshots.
+
+    The EventLog terminal_output stream is replayed append-only by the UI and
+    the WS catchup path, so a cumulative screen snapshot duplicates every
+    earlier line each time it is logged.
+    """
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"rawmock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="delta-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=10.0)
+
+    import chad.server.services.task_executor as te
+
+    script = (
+        "import sys, time, json\n"
+        "for i in range(5):\n"
+        "    sys.stdout.write(f'delta line {i}\\n')\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.2)\n"
+        "print('```json')\n"
+        "print(json.dumps({'change_summary': 'Done', 'files_changed': [],"
+        " 'completion_status': 'success'}))\n"
+        "print('```', flush=True)\n"
+    )
+
+    def raw_command(provider, account_name, project_path, task_description=None,
+                    screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", raw_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="delta semantics",
+        coding_account="rawmock",
+    )
+    task._thread.join(timeout=15)
+
+    terminal_events = [
+        e for e in task.event_log.get_events() if e.get("type") == "terminal_output"
+    ]
+    combined = "".join(e.get("data") or "" for e in terminal_events)
+    for i in range(5):
+        marker = f"delta line {i}"
+        count = combined.count(marker)
+        assert count == 1, (
+            f"{marker!r} logged {count} times across terminal_output events; "
+            "the log must contain deltas, not cumulative snapshots"
+        )
+
+
+def test_failed_task_result_includes_terminal_tail(tmp_path, monkeypatch):
+    """A nonzero agent exit must surface the last terminal output in the result.
+
+    A user whose agent dies (e.g. expired OAuth token printing 'API Error:
+    401 ... Please run /login') should see that reason on the task, not just
+    'Agent exited with code 1'.
+    """
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"claude-fail": {"provider": "anthropic"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="fail-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=10.0)
+
+    import chad.server.services.task_executor as te
+
+    script = (
+        "import sys\n"
+        "sys.stdout.write('API Error: 401 OAuth token expired - Please run /login\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.exit(1)\n"
+    )
+
+    def failing_command(provider, account_name, project_path, task_description=None,
+                        screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", failing_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="fail loudly",
+        coding_account="claude-fail",
+    )
+    task._thread.join(timeout=15)
+
+    assert task.state == TaskState.FAILED
+    assert "exited with code 1" in (task.result or "")
+    assert "401" in (task.result or ""), (
+        f"failure result should carry the agent's last output, got: {task.result!r}"
+    )

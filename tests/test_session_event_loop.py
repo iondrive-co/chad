@@ -1435,7 +1435,6 @@ class TestQuotaCheckerAfterSwitch:
         task = type("Task", (), {
             "cancel_requested": False,
             "stream_id": None,
-            "_last_terminal_snapshot": "",
             "_mock_duration_applied": False,
         })()
 
@@ -1934,7 +1933,6 @@ class TestNegativeExitCodeWithPendingAction:
         task = type("Task", (), {
             "cancel_requested": False,
             "stream_id": None,
-            "_last_terminal_snapshot": "",
             "_mock_duration_applied": False,
         })()
 
