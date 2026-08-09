@@ -915,11 +915,22 @@ label {
   cursor: not-allowed;
 }
 
-.model-select,
-.reasoning-select {
+.model-select {
   flex: 1 1 150px;
   min-width: 140px;
   max-width: 178px;
+}
+
+.reasoning-select {
+  /* min-width (not just max-width) must already fit the longest option,
+     "Reasoning: default", plus the native <select> arrow the browser draws
+     inside the box (not accounted for by padding/border): when the composer
+     row is tight on space, flexbox freezes this item at its min-width
+     rather than growing it toward max-width, so max-width alone doesn't
+     guarantee the text fits. See test_reasoning_dropdown.py. */
+  flex: 1 1 150px;
+  min-width: 200px;
+  max-width: 220px;
 }
 
 .attach-btn {
