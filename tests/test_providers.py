@@ -3197,9 +3197,11 @@ class TestUsagePercentageCalculation:
             provider._usage_data_last_success -= provider._USAGE_CACHE_STALE_TTL + 1
             with patch("requests.get", side_effect=mock_failure):
                 pct = provider.get_weekly_usage_percentage()
-            # Cache should be expired → returns 0.0 (credentials exist but no data)
-            assert pct == pytest.approx(0.0), (
-                "Prolonged API failure should expire cache so await_reset can resume"
+            # Cache expired → unknown. Reporting 0% here would have claimed the
+            # account was idle; an await_reset wait handles the None itself
+            # (see _UNKNOWN_USAGE_POLLS_BEFORE_RESUME) rather than being lied to.
+            assert pct is None, (
+                "Prolonged API failure should expire the cache rather than invent a number"
             )
 
     def test_claude_provider_usage_reset_eta_format(self, tmp_path):

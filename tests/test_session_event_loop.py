@@ -1752,6 +1752,64 @@ class TestAwaitResetPollingLoop:
         # Verify we actually polled (slept at least twice at 10s each)
         assert len(sleeps) >= 2
 
+    def test_await_reset_resumes_when_usage_readings_stop_arriving(self, monkeypatch):
+        """An unreadable usage number must not pause the session forever.
+
+        Usage reads None once the provider's cache goes stale (API down for over
+        half an hour) or the account is logged out. Waiting for a value that may
+        never come left the session paused indefinitely; instead the wait ends
+        and the resumed run surfaces whatever is actually wrong.
+        """
+        from chad.server.services.session_event_loop import (
+            _UNKNOWN_USAGE_POLLS_BEFORE_RESUME,
+        )
+
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+        polls = [0]
+
+        def usage_fn():
+            polls[0] += 1
+            return None
+
+        monkeypatch.setattr(
+            "chad.server.services.session_event_loop.time.sleep", lambda s: None
+        )
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False})(),
+            run_phase_fn=lambda **kw: (phases_run.append(kw.get("phase")), (0, "done"))[1],
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+        )
+        loop._running = True
+
+        loop._handle_await_reset(
+            action={"event": "session_usage", "threshold": 100, "action": "await_reset", "label": "session"},
+            session=None,
+            task_description="test task",
+            previous_output="",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_account="mock-1",
+            coding_provider="mock",
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert polls[0] == _UNKNOWN_USAGE_POLLS_BEFORE_RESUME
+        summaries = [e[1]["summary"] for e in emitted if e[0] == "milestone"]
+        assert any("unavailable" in s for s in summaries), summaries
+        assert phases_run == ["continuation"]
+
     def test_await_reset_with_eta(self, monkeypatch):
         """ETA from provider is included in the paused milestone."""
         event_log = FakeEventLog()

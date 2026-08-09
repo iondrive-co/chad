@@ -157,6 +157,8 @@ export interface AccountUsage {
   session_reset_eta: string | null;
   weekly_reset_eta: string | null;
   usage_as_of: string | null;
+  /** No usable credentials — usage is unknown until the user logs in again. */
+  logged_out: boolean;
 }
 
 // ── Config types ──

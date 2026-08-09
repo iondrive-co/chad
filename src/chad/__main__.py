@@ -204,8 +204,9 @@ def run_server(
         tunnel: Start a Cloudflare tunnel for remote access
     """
     import uvicorn
-    from chad.server.main import create_app
+    from chad.server.main import create_app, start_provider_cli_updates
 
+    start_provider_cli_updates()
     port = resolve_port(port)
 
     # Write port for autodiscovery by other clients
@@ -278,8 +279,9 @@ def run_unified(
     else:
         # Start local API server
         import uvicorn
-        from chad.server.main import create_app
+        from chad.server.main import create_app, start_provider_cli_updates
 
+        start_provider_cli_updates()
         api_port = resolve_port(api_port)
 
         # Generate auth token when tunnel is active

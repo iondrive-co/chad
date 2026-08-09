@@ -1,5 +1,6 @@
 """Provider and account management endpoints."""
 
+import asyncio
 import os
 import threading
 
@@ -41,6 +42,7 @@ def _account_to_response(
     name: str,
     provider: str,
     config_mgr,
+    ready: bool,
 ) -> AccountResponse:
     """Convert account info to AccountResponse."""
     model = config_mgr.get_account_model(name)
@@ -53,8 +55,13 @@ def _account_to_response(
         model=model if model != "default" else None,
         reasoning=reasoning if reasoning != "default" else None,
         role=role,
-        ready=provider_login.is_logged_in(provider, name),
+        ready=ready,
     )
+
+
+async def _is_logged_in(provider: str, name: str) -> bool:
+    """Readiness check off the event loop — it may refresh an OAuth token."""
+    return await asyncio.to_thread(provider_login.is_logged_in, provider, name)
 
 
 @router.get("/providers", response_model=ProviderListResponse)
@@ -95,9 +102,14 @@ async def list_accounts() -> AccountListResponse:
     config_mgr = get_config_manager()
     accounts_dict = config_mgr.list_accounts()
 
+    # Checked concurrently: one dead account's token refresh must not add its
+    # latency to every other account's.
+    readiness = await asyncio.gather(
+        *(_is_logged_in(provider, name) for name, provider in accounts_dict.items())
+    )
     accounts = [
-        _account_to_response(name, provider, config_mgr)
-        for name, provider in accounts_dict.items()
+        _account_to_response(name, provider, config_mgr, ready)
+        for (name, provider), ready in zip(accounts_dict.items(), readiness)
     ]
 
     return AccountListResponse(
@@ -131,7 +143,12 @@ async def create_account(request: AccountCreate) -> AccountResponse:
         password="",  # Not used for OAuth accounts
     )
 
-    return _account_to_response(request.name, request.provider, config_mgr)
+    return _account_to_response(
+        request.name,
+        request.provider,
+        config_mgr,
+        await _is_logged_in(request.provider, request.name),
+    )
 
 
 @router.post("/accounts/{name}/login", response_model=AccountLoginResponse)
@@ -149,7 +166,7 @@ async def login_account(name: str, request: AccountLoginRequest) -> AccountLogin
 
     provider = config_mgr.list_accounts().get(name)
 
-    if provider_login.is_logged_in(provider, name):
+    if await _is_logged_in(provider, name):
         return AccountLoginResponse(
             account_name=name, success=True, ready=True, message="Already logged in"
         )
@@ -191,7 +208,9 @@ async def get_account(name: str) -> AccountResponse:
     accounts_dict = config_mgr.list_accounts()
     provider = accounts_dict.get(name)
 
-    return _account_to_response(name, provider, config_mgr)
+    return _account_to_response(
+        name, provider, config_mgr, await _is_logged_in(provider, name)
+    )
 
 
 @router.delete("/accounts/{name}", response_model=AccountDeleteResponse)
@@ -224,7 +243,9 @@ async def set_account_model(name: str, request: AccountModelUpdate) -> AccountRe
     accounts_dict = config_mgr.list_accounts()
     provider = accounts_dict.get(name)
 
-    return _account_to_response(name, provider, config_mgr)
+    return _account_to_response(
+        name, provider, config_mgr, await _is_logged_in(provider, name)
+    )
 
 
 @router.put("/accounts/{name}/reasoning", response_model=AccountResponse)
@@ -240,7 +261,9 @@ async def set_account_reasoning(name: str, request: AccountReasoningUpdate) -> A
     accounts_dict = config_mgr.list_accounts()
     provider = accounts_dict.get(name)
 
-    return _account_to_response(name, provider, config_mgr)
+    return _account_to_response(
+        name, provider, config_mgr, await _is_logged_in(provider, name)
+    )
 
 
 @router.put("/accounts/{name}/role", response_model=AccountResponse)
@@ -261,7 +284,9 @@ async def set_account_role(name: str, request: AccountRoleUpdate) -> AccountResp
     accounts_dict = config_mgr.list_accounts()
     provider = accounts_dict.get(name)
 
-    return _account_to_response(name, provider, config_mgr)
+    return _account_to_response(
+        name, provider, config_mgr, await _is_logged_in(provider, name)
+    )
 
 
 @router.get("/accounts/{name}/usage", response_model=AccountUsage)
@@ -303,6 +328,7 @@ async def get_account_usage(name: str) -> AccountUsage:
         session_reset_eta=session_eta,
         weekly_reset_eta=weekly_eta,
         usage_as_of=usage_as_of,
+        logged_out=not await _is_logged_in(provider_type, name),
     )
 
 

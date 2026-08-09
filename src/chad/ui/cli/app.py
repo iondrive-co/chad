@@ -631,7 +631,8 @@ def run_accounts_menu(client: APIClient) -> None:
             print("Configured Accounts:")
             for acc in accounts:
                 role_marker = f" [{acc.role}]" if acc.role else ""
-                print(f"  - {acc.name} ({acc.provider}){role_marker}")
+                status = "" if acc.ready else "  ← logged out"
+                print(f"  - {acc.name} ({acc.provider}){role_marker}{status}")
             print()
         else:
             print("No accounts configured.")
@@ -641,6 +642,7 @@ def run_accounts_menu(client: APIClient) -> None:
         print("  [1] Add account")
         print("  [2] Delete account")
         print("  [3] Set as coding agent")
+        print("  [4] Log in to an account")
         print("  [b] Back to settings")
         print()
 
@@ -731,6 +733,25 @@ def run_accounts_menu(client: APIClient) -> None:
                 if selected:
                     client.set_account_role(selected, "CODING")
                     print(f"Coding agent set to: {selected}")
+            _pause()
+
+        elif choice == "4":
+            # Re-authorizing an existing account used to mean deleting and
+            # re-adding it — the only route back from an expired login.
+            print()
+            if not accounts:
+                print("No accounts configured.")
+            else:
+                options = [
+                    (f"{acc.name} ({acc.provider})" + ("" if acc.ready else "  ← logged out"), acc.name)
+                    for acc in accounts
+                ]
+                selected = select_from_list("Select account to log in:", options)
+                if selected:
+                    provider = next(acc.provider for acc in accounts if acc.name == selected)
+                    print()
+                    success, message = _run_provider_oauth(provider, selected)
+                    print(f"{'✓' if success else '✗'} {message}")
             _pause()
 
 

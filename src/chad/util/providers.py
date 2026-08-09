@@ -751,22 +751,19 @@ def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
 
 
 def _find_claude_credentials(account_name: str) -> Path | None:
-    """Find the Claude credentials file for an account.
+    """Find the Claude credentials file for an account, or None if absent.
 
-    Checks the per-account config directory first, then falls back to
-    the default ``~/.claude`` location.
+    A named account is isolated: its credentials live in its own config dir
+    (matching ClaudeCodeProvider._get_claude_config_dir) and nowhere else.
+    Falling back to ``~/.claude`` made a logged-out account report the machine
+    owner's usage and models instead of admitting it was logged out.
     """
     base_home = safe_home()
-    candidates = []
     if account_name:
-        # Per-account isolated dir (matches ClaudeCodeProvider._get_claude_config_dir)
-        candidates.append(Path(base_home) / ".chad" / "claude-configs" / account_name / ".credentials.json")
-    # Default location
-    candidates.append(Path(base_home) / ".claude" / ".credentials.json")
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
+        path = Path(base_home) / ".chad" / "claude-configs" / account_name / ".credentials.json"
+    else:
+        path = Path(base_home) / ".claude" / ".credentials.json"
+    return path if path.exists() else None
 
 
 _CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -859,6 +856,75 @@ def _claude_oauth_token(account_name: str) -> str | None:
         return access_token
     except Exception:
         return None
+
+
+# A refused refresh means the account is logged out until the user signs in
+# again, so re-attempting it on every account-list poll only adds latency.
+_CLAUDE_REFRESH_REFUSED_TTL = 300.0
+_claude_refresh_refused_at: dict[str, float] = {}
+# Anthropic's refresh tokens are single-use: two threads refreshing the same
+# account at once would spend the token twice and log a working account out.
+_claude_refresh_locks: dict[str, threading.Lock] = {}
+_claude_refresh_locks_guard = threading.Lock()
+
+
+def clear_claude_auth_cache() -> None:
+    """Forget cached refresh refusals (used by tests and after a fresh login)."""
+    _claude_refresh_refused_at.clear()
+
+
+def _claude_refresh_lock(cache_key: str) -> threading.Lock:
+    with _claude_refresh_locks_guard:
+        return _claude_refresh_locks.setdefault(cache_key, threading.Lock())
+
+
+def claude_account_authenticated(account_name: str) -> bool:
+    """True when the account's Claude token is valid, or can still be refreshed.
+
+    An expired access token is the normal state for an account idle for a few
+    hours — the CLI refreshes it on use — so expiry alone does not mean logged
+    out. Logged out is when the refresh itself is refused, which is the only
+    thing the user can fix (by logging in again).
+    """
+    def read_oauth() -> dict | None:
+        try:
+            with open(creds_file, encoding="utf-8") as f:
+                return json.load(f).get("claudeAiOauth", {})
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    creds_file = _find_claude_credentials(account_name)
+    if not creds_file:
+        return False
+
+    oauth_data = read_oauth()
+    if not oauth_data or not oauth_data.get("accessToken"):
+        return False
+
+    def usable_now(data: dict) -> bool:
+        expires_ms = data.get("expiresAt", 0)
+        return bool(expires_ms) and expires_ms / 1000 > time.time()
+
+    if usable_now(oauth_data):
+        return True
+
+    cache_key = str(creds_file)
+    with _claude_refresh_lock(cache_key):
+        # Another thread may have refreshed this account while we waited.
+        current = read_oauth()
+        if current and usable_now(current):
+            return True
+
+        refused_at = _claude_refresh_refused_at.get(cache_key)
+        if refused_at is not None and time.monotonic() - refused_at < _CLAUDE_REFRESH_REFUSED_TTL:
+            return False
+
+        if _refresh_claude_token(creds_file, current or oauth_data):
+            _claude_refresh_refused_at.pop(cache_key, None)
+            return True
+
+        _claude_refresh_refused_at[cache_key] = time.monotonic()
+        return False
 
 
 def _fetch_claude_usage_data(account_name: str) -> dict | None:
@@ -1942,19 +2008,22 @@ class ClaudeCodeProvider(AIProvider):
         return True
 
     def get_session_usage_percentage(self) -> float | None:
-        """Get Claude session (5-hour) usage percentage from Anthropic API."""
+        """Get Claude session (5-hour) usage percentage from Anthropic API.
+
+        None when the reading is unavailable — a logged-out account or a failed
+        call. Reporting 0% instead told the user their untouched-looking quota
+        was full of room when the truth was that Chad could not ask.
+        """
         data = self._get_usage_data()
         if data is None:
-            # Return 0.0 (not None) if credentials exist but API call failed,
-            # so the UI shows a bar at 0% rather than hiding usage entirely.
-            return 0.0 if _find_claude_credentials(self.config.account_name) else None
+            return None
         return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
 
     def get_weekly_usage_percentage(self) -> float | None:
         """Get Claude weekly (7-day) usage percentage from Anthropic API."""
         data = self._get_usage_data()
         if data is None:
-            return 0.0 if _find_claude_credentials(self.config.account_name) else None
+            return None
         return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
 
     def get_session_reset_eta(self) -> str | None:

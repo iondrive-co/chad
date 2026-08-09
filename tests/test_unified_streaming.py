@@ -3180,6 +3180,9 @@ class TestTerminalEventSemantics:
             return [sys.executable, "-c", script], {}, None
 
         monkeypatch.setattr(te, "build_agent_command", fake_command)
+        # The agent command is faked above, so this account has no credentials on
+        # disk; skip the logged-out preflight, which isn't what this test covers.
+        monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
 
         client.post("/api/v1/accounts", json={"name": "seq-claude", "provider": "anthropic"})
         create_resp = client.post("/api/v1/sessions", json={"name": "Seq-Test"})

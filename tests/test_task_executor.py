@@ -858,6 +858,9 @@ def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeyp
 
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"accounts": {"claude-test": {"provider": "anthropic"}}}), encoding="utf-8")
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
     monkeypatch.setenv("CHAD_CONFIG", str(config_path))
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
@@ -1107,6 +1110,9 @@ def test_continuation_loop_uses_full_resume_prompt(tmp_path, monkeypatch):
         json.dumps({"accounts": {"test": {"provider": "openai"}}}),
         encoding="utf-8",
     )
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
     monkeypatch.setenv("CHAD_CONFIG", str(config_path))
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
@@ -1507,6 +1513,9 @@ def test_failed_task_result_includes_terminal_tail(tmp_path, monkeypatch):
 
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"accounts": {"claude-fail": {"provider": "anthropic"}}}), encoding="utf-8")
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
     monkeypatch.setenv("CHAD_CONFIG", str(config_path))
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 

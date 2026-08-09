@@ -37,8 +37,21 @@ export class ChadAPIError extends Error {
     public status: number,
     public body: unknown,
   ) {
-    super(`HTTP ${status}`);
+    super(ChadAPIError.describe(status, body));
     this.name = "ChadAPIError";
+  }
+
+  /** Prefer the server's own explanation — "HTTP 400" tells the user nothing. */
+  private static describe(status: number, body: unknown): string {
+    if (typeof body === "string" && body.trim()) {
+      try {
+        const detail = (JSON.parse(body) as { detail?: unknown }).detail;
+        if (typeof detail === "string" && detail.trim()) return detail;
+      } catch {
+        return body.length <= 300 ? body : `HTTP ${status}`;
+      }
+    }
+    return `HTTP ${status}`;
   }
 }
 

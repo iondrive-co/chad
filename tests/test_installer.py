@@ -166,6 +166,149 @@ def test_resolve_prefers_windows_suffix(monkeypatch, tmp_path):
     assert resolved == exe
 
 
+class TestManagedToolUpdates:
+    """Installed provider CLIs must not rot.
+
+    ``ensure_tool`` returns the moment a binary exists, so a CLI installed once
+    stayed at that version forever: Chad was still running Claude Code 2.1.12
+    seven months later, which turned an expired token into a 3-minute retry
+    stall instead of a 1-second "log in again". Staleness is refreshed on a
+    timer, away from the task path.
+    """
+
+    def _installed(self, tmp_path, tool="claude"):
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        npm_bin = installer.tools_dir / "node_modules" / ".bin"
+        npm_bin.mkdir(parents=True, exist_ok=True)
+        (npm_bin / tool).write_text("#!/bin/sh\n", encoding="utf-8")
+        return installer
+
+    def test_ensure_tool_never_shells_out_when_already_installed(self, monkeypatch, tmp_path):
+        """The task path must stay fast — no npm on the way to spawning an agent."""
+        installer = self._installed(tmp_path)
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda *a, **k: pytest.fail("ensure_tool must not install over an existing tool"),
+        )
+
+        ok, detail = installer.ensure_tool("claude")
+
+        assert ok
+        assert detail.endswith("claude")
+
+    def test_stale_tool_is_reinstalled_at_latest(self, monkeypatch, tmp_path):
+        installer = self._installed(tmp_path)
+        # Only node/npm come from PATH; real provider CLIs on this machine must
+        # not make the temp tools dir look populated.
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        commands = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (commands.append(cmd), (0, "", ""))[1],
+        )
+
+        updated = installer.update_stale_tools(max_age_days=7)
+
+        assert "claude" in updated
+        assert any("@anthropic-ai/claude-code@latest" in " ".join(c) for c in commands)
+
+    def test_recently_updated_tool_is_left_alone(self, monkeypatch, tmp_path):
+        installer = self._installed(tmp_path)
+        # Only node/npm come from PATH; real provider CLIs on this machine must
+        # not make the temp tools dir look populated.
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        monkeypatch.setattr("chad.util.installer.run_command", lambda *a, **k: (0, "", ""))
+
+        assert installer.update_stale_tools(max_age_days=7) == ["claude"]
+
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda *a, **k: pytest.fail("a freshly updated tool must not be reinstalled"),
+        )
+        assert installer.update_stale_tools(max_age_days=7) == []
+
+    def test_tools_that_were_never_installed_are_not_installed_by_the_updater(
+        self, monkeypatch, tmp_path
+    ):
+        """Updating refreshes what the user has; it doesn't install the whole catalog."""
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        monkeypatch.setattr("chad.util.installer.is_tool_installed", lambda _b: False)
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda *a, **k: pytest.fail("nothing is installed, so nothing to update"),
+        )
+
+        assert installer.update_stale_tools(max_age_days=7) == []
+
+    def test_pip_tool_install_cannot_strip_chad_own_environment(self, monkeypatch, tmp_path):
+        """A prefixed pip install must not uninstall from the running interpreter.
+
+        pip resolves against the active site-packages even with --prefix, so
+        upgrading a pip-installed CLI moved shared dependencies out of Chad's
+        virtualenv and into the tools prefix — breaking Chad itself.
+        """
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        commands = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (commands.append(cmd), (0, "", ""))[1],
+        )
+
+        installer._install_with_pip(installer.tool_specs["vibe"])
+
+        assert commands, "expected a pip invocation"
+        assert "--ignore-installed" in commands[0]
+        assert "--prefix" in commands[0]
+
+    def test_a_cli_the_user_installed_themselves_is_left_alone(self, monkeypatch, tmp_path):
+        """Only Chad's own installs are refreshed — a PATH binary isn't ours.
+
+        This also keeps test runs and temp-home launches inert: with an empty
+        tools dir, the real CLIs on PATH would otherwise all look installable.
+        """
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        user_bin = tmp_path / "usr-local-bin"
+        user_bin.mkdir()
+        (user_bin / "claude").write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr("chad.util.installer.is_tool_installed", lambda b: b == "claude")
+        monkeypatch.setattr("shutil.which", lambda b: str(user_bin / b) if b == "claude" else None)
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda *a, **k: pytest.fail("must not npm-install over a user's own CLI"),
+        )
+
+        assert installer.update_stale_tools(max_age_days=7) == []
+
+    def test_failed_update_keeps_the_working_install_and_retries_later(
+        self, monkeypatch, tmp_path
+    ):
+        """A broken network must not stamp the tool as fresh, nor break the CLI."""
+        installer = self._installed(tmp_path)
+        # Only node/npm come from PATH; real provider CLIs on this machine must
+        # not make the temp tools dir look populated.
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        monkeypatch.setattr(
+            "chad.util.installer.run_command", lambda *a, **k: (1, "", "network down")
+        )
+
+        assert installer.update_stale_tools(max_age_days=7) == []
+        assert installer.resolve_tool_path("claude") is not None
+
+        calls = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (calls.append(cmd), (0, "", ""))[1],
+        )
+        assert installer.update_stale_tools(max_age_days=7) == ["claude"]
+        assert calls, "a failed update must be retried on the next check"
+
+
 class TestArchiveExtractionSafety:
     """Downloaded archives are untrusted — members must not escape tools_dir."""
 

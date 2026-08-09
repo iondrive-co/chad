@@ -993,6 +993,20 @@ class TaskExecutor:
         if coding_account not in accounts:
             raise ValueError(f"Account '{coding_account}' not found")
 
+        # Refuse a logged-out account here rather than letting the provider CLI
+        # discover it: the CLI retries a doomed token refresh for minutes before
+        # printing a raw 401, which reads as a hung agent. A local model server
+        # has no login to be logged out of, so it is not checked.
+        from chad.util import provider_login
+
+        coding_provider_type = accounts[coding_account]
+        if coding_provider_type != "local" and not provider_login.is_logged_in(
+            coding_provider_type, coding_account
+        ):
+            raise ValueError(
+                f"Account '{coding_account}' is logged out — open Providers and log in again."
+            )
+
         # Check git repo
         git_mgr = GitWorktreeManager(path_obj)
         if not git_mgr.is_git_repo():

@@ -130,6 +130,29 @@ def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
     return _package_ui_paths()
 
 
+def start_provider_cli_updates() -> None:
+    """Refresh stale provider CLIs in the background, once per server start.
+
+    Provider CLIs are installed once and then never touched, so they silently
+    fall months behind — an old Claude Code build spent three minutes retrying a
+    dead OAuth refresh where the current one reports "log in again" in a second.
+    Runs off the request path, at startup, before any task can be using them.
+    """
+    import threading
+
+    from chad.util.installer import AIToolInstaller
+
+    def run() -> None:
+        try:
+            updated = AIToolInstaller().update_stale_tools()
+        except Exception:
+            return  # A failed update must never stop the server from starting
+        if updated:
+            print(f"Updated provider CLI: {', '.join(sorted(updated))}")
+
+    threading.Thread(target=run, daemon=True, name="provider-cli-update").start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""

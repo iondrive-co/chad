@@ -14,6 +14,12 @@ from chad.util.event_log import EventLog, MilestoneEvent, ProviderSwitchedEvent,
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.util.prompts import extract_coding_summary, CodingSummary
 
+# Consecutive 10s polls with no usage reading before an await_reset wait gives up
+# (~5 minutes). The provider only reports "unknown" after its own cache has gone
+# stale, so by this point the number has been unavailable for well over half an
+# hour and the session must not stay paused on it forever.
+_UNKNOWN_USAGE_POLLS_BEFORE_RESUME = 30
+
 
 class SessionEventLoop:
     """Per-session event loop that orchestrates coding → verification → revision.
@@ -969,6 +975,7 @@ class SessionEventLoop:
 
             # Poll until usage drops below threshold or resume is requested
             resume_reason = None
+            unknown_polls = 0
             while self._running and not getattr(self.task, "cancel_requested", False):
                 # Check if user requested resume
                 if session is not None and getattr(session, "resume_requested", False):
@@ -980,7 +987,19 @@ class SessionEventLoop:
                     current = usage_fn()
                 except Exception:
                     continue
-                if current is not None and current < threshold:
+                if current is None:
+                    # No reading available: the usage API has been failing long
+                    # enough for the provider's cache to expire, or the account
+                    # is logged out. Waiting on a number that may never arrive
+                    # would pause the session indefinitely, so give up waiting
+                    # and let the resumed run report what's actually wrong.
+                    unknown_polls += 1
+                    if unknown_polls >= _UNKNOWN_USAGE_POLLS_BEFORE_RESUME:
+                        resume_reason = "usage reading unavailable"
+                        break
+                    continue
+                unknown_polls = 0
+                if current < threshold:
                     resume_reason = f"{label.title()} reset detected"
                     break
 

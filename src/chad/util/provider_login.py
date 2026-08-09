@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
-from chad.util.providers import is_mistral_configured
+from chad.util.providers import claude_account_authenticated, is_mistral_configured
 from chad.util.utils import safe_home
 
 _INSTALLER = AIToolInstaller()
@@ -147,13 +147,18 @@ def _codex_authenticated(account_name: str) -> bool:
 
 
 def is_logged_in(provider: str, account_name: str) -> bool:
-    """Return True if the account has valid credentials on disk."""
+    """Return True if the account has usable credentials.
+
+    For Claude this means the token still works: the credentials file merely
+    existing said "Ready" for accounts whose OAuth session had died weeks
+    earlier, and the user only found out three minutes into a task.
+    """
     try:
         if provider == "openai":
             return _codex_authenticated(account_name)
 
         if provider == "anthropic":
-            return (claude_config_dir(account_name) / ".credentials.json").exists()
+            return claude_account_authenticated(account_name)
 
         if provider == "gemini":
             return (gemini_home(account_name) / ".gemini" / "oauth_creds.json").exists()

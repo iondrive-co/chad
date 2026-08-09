@@ -612,3 +612,41 @@ class TestProviderHomeIsolationOnWindows:
         expected = str(tmp_path / ".chad" / "qwen-homes" / "acct")
         assert extra_env["HOME"] == expected
         assert extra_env["USERPROFILE"] == expected
+
+
+class TestToolUpdatesOnWindows:
+    """The periodic CLI update must find npm's Windows wrappers, not just bare names."""
+
+    def test_stale_cmd_wrapper_is_recognised_and_updated(self, tmp_path, monkeypatch):
+        import types
+
+        from chad.util.installer import AIToolInstaller
+
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        npm_bin = installer.tools_dir / "node_modules" / ".bin"
+        npm_bin.mkdir(parents=True, exist_ok=True)
+        # npm on Windows installs claude.cmd, with no extension-less sibling.
+        (npm_bin / "claude.cmd").write_text("@echo off\n", encoding="utf-8")
+
+        import os as real_os
+
+        class FakeOS(types.SimpleNamespace):
+            def __getattr__(self, item):
+                return getattr(real_os, item)
+
+        monkeypatch.setitem(sys.modules, "os", FakeOS(name="nt"))
+        # Only node/npm come from PATH; real provider CLIs on this machine must
+        # not make the temp tools dir look populated.
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        commands = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (commands.append(cmd), (0, "", ""))[1],
+        )
+
+        updated = installer.update_stale_tools(max_age_days=7)
+
+        assert updated == ["claude"]
+        assert any("@anthropic-ai/claude-code@latest" in " ".join(c) for c in commands)

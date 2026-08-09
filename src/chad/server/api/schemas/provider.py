@@ -86,6 +86,10 @@ class AccountUsage(BaseModel):
         default=None,
         description="ISO-8601 time the usage reading was sampled, for staleness display",
     )
+    logged_out: bool = Field(
+        default=False,
+        description="Account has no usable credentials — usage is unknown until re-login",
+    )
 
 
 class AccountModelUpdate(BaseModel):

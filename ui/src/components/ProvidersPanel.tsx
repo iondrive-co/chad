@@ -257,14 +257,16 @@ export function ProvidersPanel({ api, connected }: Props) {
                 <span className="account-name">{a.name}</span>
                 <span className="account-provider">{a.provider}</span>
                 <span className={`account-status ${a.ready ? "ready" : ""}`}>
-                  {a.ready ? "Ready" : "Not ready"}
+                  {a.ready ? "Ready" : "Logged out"}
                 </span>
                 <button className="delete-rule-btn" onClick={() => handleDelete(a.name)} disabled={dis}>x</button>
               </div>
 
               {!a.ready && (
                 <div className="account-login">
-                  <span className="login-hint">Log in to authorize this account.</span>
+                  <span className="login-hint">
+                    Log in to authorize this account. Tasks can't run until you do.
+                  </span>
                   {isApiKeyProvider(a.provider) && (
                     <input
                       type="password"
@@ -335,8 +337,19 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </div>
                 )}
 
+                {/* A logged-out account has no usage to report — say so, rather
+                    than leaving the row blank or showing a fabricated 0%. */}
+                {usage?.logged_out && (
+                  <div className="account-usage">
+                    <div className="usage-row">
+                      <span className="field-label">Usage:</span>
+                      <span className="usage-bar">Logged out — log in to see usage</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Usage display */}
-                {usage && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
+                {usage && !usage.logged_out && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
                   <div className="account-usage">
                     {usage.session_usage_pct !== null && (
                       <div className="usage-row">
