@@ -5,10 +5,55 @@ and persisting project-specific configuration in the main chad config file.
 """
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A preview command is spawned directly (no shell), so shell syntax cannot work:
+# "cd ui && npm run dev" made `cd` argv[0] and failed with ENOENT at start time.
+# Reject it where it is entered instead, so a preview command that saves runs.
+_SHELL_METACHARACTERS = ("&&", "||", ";", "|", "&", ">", "<", "`", "$(", "\n")
+
+PREVIEW_COMMAND_HELP = (
+    "A preview command is run directly, without a shell, so shell syntax "
+    "({bad}) cannot be used. Use a single program invocation that works from "
+    "the project root — e.g. 'npm --prefix ui run dev' instead of "
+    "'cd ui && npm run dev'."
+)
+
+
+def validate_preview_command(command: str) -> str:
+    """Check a preview command can actually be spawned without a shell.
+
+    Args:
+        command: The command as typed by the user or returned by autoconfigure.
+
+    Returns:
+        The command, stripped.
+
+    Raises:
+        ValueError: If the command is empty, unparseable, or uses shell syntax.
+    """
+    stripped = command.strip()
+    if not stripped:
+        raise ValueError("Preview command is empty")
+
+    for meta in _SHELL_METACHARACTERS:
+        if meta in stripped:
+            raise ValueError(PREVIEW_COMMAND_HELP.format(bad=meta.strip() or "newline"))
+
+    try:
+        argv = shlex.split(stripped)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse preview command: {exc}") from exc
+    if not argv:
+        raise ValueError("Preview command is empty")
+    if argv[0] == "cd":
+        raise ValueError(PREVIEW_COMMAND_HELP.format(bad="cd"))
+
+    return stripped
 
 
 @dataclass
@@ -514,7 +559,7 @@ def save_project_settings(
         config.preview_port = preview_port
 
     if preview_command is not ...:
-        config.preview_command = preview_command or None
+        config.preview_command = validate_preview_command(preview_command) if preview_command else None
 
     if preferred_coding_agent is not ...:
         config.preferred_coding_agent = preferred_coding_agent or None

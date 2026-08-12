@@ -517,6 +517,65 @@ class TestExplorationMilestoneDetection:
         ]
         assert len(exploration_emits) == 1
 
+    def test_truncates_long_summary_instead_of_dropping_it(self):
+        """A detailed finding must still reach the chat panel, truncated.
+
+        Session 3d8c2c1b emitted a single 841-char EXPLORATION_RESULT and it was
+        discarded for exceeding the length cap, so the chat panel held nothing
+        but the user's prompt for a 20-minute run.
+        """
+        loop, event_log, emitted = self._make_loop()
+
+        finding = (
+            "The reasoning dropdown clipping was not a max-width bug: "
+            + "the composer row is tight so flexbox freezes the item at min-width. "
+            * 12
+        )
+        assert len(finding) > 400, "fixture must exceed the cap to be a regression test"
+        loop.feed_output(f"EXPLORATION_RESULT: {finding}\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        summary = exploration_emits[0][1]["summary"]
+        assert len(summary) == 400
+        assert summary.startswith("The reasoning dropdown clipping was not a max-width bug")
+        assert summary.endswith("…")
+
+    def test_keeps_summary_at_the_length_cap_verbatim(self):
+        """A summary exactly at the cap is passed through untouched."""
+        loop, event_log, emitted = self._make_loop()
+
+        finding = "A" + "b" * 398 + "C"
+        assert len(finding) == 400
+        loop.feed_output(f"EXPLORATION_RESULT: {finding}\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert exploration_emits[0][1]["summary"] == finding
+
+    def test_still_drops_long_narration(self):
+        """Truncation must not smuggle narration past the narration filter."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output(
+            "EXPLORATION_RESULT: " + "I'll go read the composer styles next. " * 15 + "\n"
+        )
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 0
+
     def test_ignores_invalid_terminal_metadata_summaries(self):
         """Discovery markers with terminal metadata should be ignored."""
         loop, event_log, emitted = self._make_loop()

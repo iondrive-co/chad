@@ -551,10 +551,33 @@ class TestPreviewCommandWindows:
 
         monkeypatch.setattr(pts.os, "name", "posix")
         assert pts.resolve_command_target("npm run dev") == ["npm", "run", "dev"]
-        # Shell metacharacters are inert — they become plain arguments
-        assert pts.resolve_command_target("npm run dev; rm -rf /") == [
-            "npm", "run", "dev;", "rm", "-rf", "/",
+        assert pts.resolve_command_target("npm --prefix ui run dev") == [
+            "npm", "--prefix", "ui", "run", "dev",
         ]
+
+    def test_shell_syntax_rejected_on_both_platforms(self, monkeypatch):
+        """Metacharacters were inert, but silently so — the command still broke.
+
+        Passing "cd ui && npm run dev" through made `cd` argv[0] and failed at
+        launch with ENOENT, so it is refused on Windows too rather than being
+        split into harmless-but-useless arguments.
+        """
+        from chad.server.services import preview_tunnel_service as pts
+
+        for os_name in ("nt", "posix"):
+            monkeypatch.setattr(pts.os, "name", os_name)
+            for command in ("cd ui && npm run dev", "npm run dev; rm -rf /"):
+                with pytest.raises(ValueError):
+                    pts.resolve_command_target(command)
+
+    def test_windows_paths_with_backslashes_still_accepted(self, monkeypatch):
+        """The rejection must not catch ordinary Windows paths."""
+        from chad.server.services import preview_tunnel_service as pts
+
+        monkeypatch.setattr(pts.os, "name", "nt")
+        assert pts.resolve_command_target(r"C:\tools\npm.cmd --prefix ui run dev") == (
+            r"C:\tools\npm.cmd --prefix ui run dev"
+        )
 
     def test_empty_command_rejected(self, monkeypatch):
         from chad.server.services import preview_tunnel_service as pts

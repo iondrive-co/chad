@@ -289,8 +289,12 @@ export function SettingsPanel({
             <label className="toggle-label">
               <input type="checkbox" checked={verification.enabled}
                 onChange={() => toggleVerification("enabled")} disabled={saving || dis} />
-              Verification enabled
+              Verify tasks by default
             </label>
+            <p className="instructions-hint">
+              Seeds the Verification Agent picker for new sessions. Choosing an
+              agent there verifies that session either way.
+            </p>
           </>
         )}
         <label>

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
+from chad.util.project_setup import validate_preview_command
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,10 @@ AUTOCONFIGURE_PROMPT = (
     "lint_command - shell command to lint (null if none)\n"
     "test_command - shell command to run tests (null if none)\n"
     "preview_port - dev server port number (null if none)\n"
-    "preview_command - shell command to start the dev server from the project root, "
-    "e.g. 'npm run dev', 'cd ui && npm run dev', 'python manage.py runserver' "
-    "(null if none)\n"
+    "preview_command - command to start the dev server from the project root. It is "
+    "run WITHOUT a shell, so it must be a single program invocation with no 'cd', "
+    "'&&', pipes or redirection: e.g. 'npm run dev', 'npm --prefix ui run dev' for a "
+    "dev server in a subdirectory, 'python manage.py runserver' (null if none)\n"
     "instructions_paths - list of existing doc files like AGENTS.md, CLAUDE.md, "
     "CONTRIBUTING.md (empty list if none)\n"
     "Output ONLY the JSON object, nothing else. Do not read more files than necessary."
@@ -146,6 +148,26 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
+def _drop_invalid_preview_command(discovered: dict) -> str | None:
+    """Clear a preview command the launcher could not spawn, in place.
+
+    An agent that answers "cd ui && npm run dev" would otherwise have the whole
+    settings save rejected, losing the lint/test/docs it got right.
+
+    Returns:
+        A warning line for the job output, or None if the command was fine.
+    """
+    command = discovered.get("preview_command")
+    if not command:
+        return None
+    try:
+        discovered["preview_command"] = validate_preview_command(command)
+    except ValueError as exc:
+        discovered["preview_command"] = None
+        return f"Ignored preview command {command!r}: {exc}"
+    return None
+
+
 def _write_debug_log(job_id: str, output: str, project_path: Path) -> None:
     """Write autoconfigure output to a debug log file."""
     log_dir = Path.home() / ".chad" / "logs"
@@ -203,6 +225,13 @@ def start_autoconfigure(
     job = AutoconfigureJob()
     _jobs[job_id] = job
 
+    def _complete(discovered: dict) -> None:
+        warning = _drop_invalid_preview_command(discovered)
+        if warning:
+            job.output_lines.append(warning)
+        job.result = discovered
+        job.status = "completed"
+
     def _run():
         try:
             cmd, env, stdin_input = _build_command(
@@ -241,8 +270,7 @@ def start_autoconfigure(
                     _write_debug_log(job_id, output, project_path)
                     discovered = _extract_json(output)
                     if discovered:
-                        job.result = discovered
-                        job.status = "completed"
+                        _complete(discovered)
                     else:
                         job.status = "failed"
                         job.error = "Timed out"
@@ -265,8 +293,7 @@ def start_autoconfigure(
             discovered = _extract_json(output)
 
             if discovered:
-                job.result = discovered
-                job.status = "completed"
+                _complete(discovered)
             else:
                 job.status = "failed"
                 snippet = output[:200]

@@ -1,3 +1,4 @@
+import inspect
 import json
 import re
 import subprocess
@@ -938,6 +939,22 @@ class TestChatUILayoutSource:
             "Verification picker should not be disabled based on verificationSettings"
         )
 
+    def test_verification_pick_is_sent_regardless_of_global_flag(self):
+        """The picked account must be sent, not filtered by verificationSettings.
+
+        The picker was fully interactive while the send path dropped its value
+        whenever verification was globally disabled, so the UI showed a
+        verification agent that silently never ran.
+        """
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert re.search(
+            r"verification_agent:\s*verificationAccount\s*\?\s*verificationAccount\.name\s*:\s*undefined",
+            chat_view,
+        ), "verification_agent must be sent whenever the picker holds an account"
+        assert "verificationSettings?.enabled && verificationAccount" not in chat_view, (
+            "the global enable flag must not gate the per-session pick"
+        )
+
     def test_verification_agent_picker_css_exists(self):
         """CSS should define chat-verification-picker styling."""
         css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
@@ -1551,3 +1568,86 @@ def test_failed_task_result_includes_terminal_tail(tmp_path, monkeypatch):
     assert "401" in (task.result or ""), (
         f"failure result should carry the agent's last output, got: {task.result!r}"
     )
+
+
+class TestVerificationSelectionOverridesGlobalFlag:
+    """A verification agent picked for one task must win over the global flag.
+
+    Session 3d8c2c1b logged verification_account=null and never verified,
+    because verification_enabled was false globally and the executor discarded
+    the requested account outright instead of treating the flag as a default.
+    """
+
+    def _capture_verification_config(self, tmp_path, monkeypatch, config, **start_kwargs):
+        repo_path = tmp_path / "repo"
+        _init_git_repo(repo_path)
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        session_manager = SessionManager()
+        session = session_manager.create_session(project_path=str(repo_path), name="ver-gate")
+        executor = TaskExecutor(ConfigManager(), session_manager)
+
+        captured = {}
+        # Name the positional args from the real signature so this test keeps
+        # working if _run_task's parameter list grows or is reordered.
+        param_names = list(inspect.signature(TaskExecutor._run_task).parameters)
+
+        def fake_run_task(*args):
+            captured.update(dict(zip(param_names, args)))
+
+        monkeypatch.setattr(TaskExecutor, "_run_task", fake_run_task)
+
+        task = executor.start_task(
+            session_id=session.id,
+            project_path=str(repo_path),
+            task_description="fix it",
+            coding_account="coder",
+            **start_kwargs,
+        )
+        task._thread.join(timeout=10)
+        return captured["verification_config"]
+
+    def test_explicit_account_verifies_while_globally_disabled(self, tmp_path, monkeypatch):
+        """The picker's choice runs even when verification_enabled is false."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}, "checker": {"provider": "mock"}},
+                "verification_enabled": False,
+            },
+            verification_account="checker",
+        )
+        assert result is not None, "explicit verification pick was discarded"
+        assert result["verification_account"] == "checker"
+
+    def test_global_default_used_when_nothing_picked(self, tmp_path, monkeypatch):
+        """With no pick, the configured agent still runs when globally enabled."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}, "checker": {"provider": "mock"}},
+                "verification_enabled": True,
+                "verification_agent": "checker",
+            },
+        )
+        assert result is not None
+        assert result["verification_account"] == "checker"
+
+    def test_no_verification_when_disabled_and_nothing_picked(self, tmp_path, monkeypatch):
+        """The global flag still governs the no-pick case."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}},
+                "verification_enabled": False,
+                "verification_agent": "checker",
+            },
+        )
+        assert result is None

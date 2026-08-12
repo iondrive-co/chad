@@ -2131,6 +2131,17 @@ label {
   font-style: italic;
 }
 
+.preview-command-error {
+  font-size: 0.925rem;
+  color: var(--error);
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+.project-settings-row input[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
 /* ── Prompts Panel ── */
 
 .prompts-toggle {

@@ -537,6 +537,135 @@ class TestProjectConfigPreviewFields:
             assert config.preview_command == "npm start"
 
 
+class TestPreviewCommandValidation:
+    """A preview command that cannot be spawned must be refused when entered.
+
+    "cd ui && npm run dev" was stored happily and then failed at launch with
+    `[Errno 2] No such file or directory: 'cd'`, because preview commands are
+    spawned without a shell.
+    """
+
+    # Forms that need a shell, so the launcher can never run them.
+    SHELL_FORMS = [
+        "cd ui && npm run dev",
+        "cd ui; npm run dev",
+        "npm run dev | tee log",
+        "npm run dev > out.log",
+        "npm run dev & npm run api",
+        "echo $(pwd) && npm run dev",
+        "npm run dev\nnpm run api",
+        "cd ui",
+    ]
+
+    # Forms a real project needs, which must keep working.
+    VALID_FORMS = [
+        "npm run dev",
+        "npm --prefix ui run dev",
+        "npm --prefix ui run dev -- --host 127.0.0.1 --no-open",
+        "python manage.py runserver",
+        'python -m http.server 8080 --directory "my dir"',
+    ]
+
+    @pytest.mark.parametrize("command", SHELL_FORMS)
+    def test_shell_syntax_rejected(self, command):
+        from chad.util.project_setup import validate_preview_command
+
+        with pytest.raises(ValueError):
+            validate_preview_command(command)
+
+    @pytest.mark.parametrize("command", VALID_FORMS)
+    def test_spawnable_commands_accepted(self, command):
+        from chad.util.project_setup import validate_preview_command
+
+        assert validate_preview_command(command) == command
+
+    def test_rejection_names_the_working_alternative(self):
+        """The message has to tell the user what to type instead."""
+        from chad.util.project_setup import validate_preview_command
+
+        with pytest.raises(ValueError) as excinfo:
+            validate_preview_command("cd ui && npm run dev")
+        assert "npm --prefix ui run dev" in str(excinfo.value)
+
+    def test_empty_command_rejected(self):
+        from chad.util.project_setup import validate_preview_command
+
+        with pytest.raises(ValueError):
+            validate_preview_command("   ")
+
+    @pytest.mark.parametrize("command", SHELL_FORMS)
+    def test_launcher_refuses_shell_syntax(self, command):
+        """A command stored before this check existed must fail with a reason."""
+        from chad.server.services.preview_tunnel_service import resolve_command_target
+
+        with pytest.raises(ValueError):
+            resolve_command_target(command)
+
+    def test_launcher_still_splits_valid_commands(self):
+        from chad.server.services.preview_tunnel_service import resolve_command_target
+
+        assert resolve_command_target("npm --prefix ui run dev -- --host 127.0.0.1") == [
+            "npm", "--prefix", "ui", "run", "dev", "--", "--host", "127.0.0.1",
+        ]
+
+    def test_save_project_settings_rejects_shell_syntax(self, tmp_path):
+        """The config write refuses it, so it can never reach the launcher."""
+        from unittest.mock import patch as mock_patch
+        from chad.util.project_setup import save_project_settings
+
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+
+        mock_cm = MagicMock()
+        mock_cm.get_project_config.return_value = None
+
+        with mock_patch("chad.util.config_manager.ConfigManager", return_value=mock_cm):
+            with pytest.raises(ValueError):
+                save_project_settings(project_dir, preview_command="cd ui && npm run dev")
+            mock_cm.set_project_config.assert_not_called()
+
+    def test_project_settings_endpoint_returns_400(self, tmp_path):
+        """The API surfaces the explanation instead of a 500."""
+        from chad.server.main import app
+
+        with TestClient(app) as client:
+            response = client.put("/api/v1/config/project", json={
+                "project_path": str(tmp_path),
+                "preview_command": "cd ui && npm run dev",
+            })
+        assert response.status_code == 400
+        assert "npm --prefix ui run dev" in response.json()["detail"]
+
+    def test_autoconfigure_drops_unspawnable_command(self):
+        """A bad command from the agent must not sink the rest of the settings."""
+        from chad.server.services.autoconfigure_service import _drop_invalid_preview_command
+
+        discovered = {
+            "lint_command": "flake8 .",
+            "test_command": "pytest",
+            "preview_command": "cd ui && npm run dev",
+        }
+        warning = _drop_invalid_preview_command(discovered)
+
+        assert discovered["preview_command"] is None
+        assert discovered["lint_command"] == "flake8 ."
+        assert warning and "cd ui && npm run dev" in warning
+
+    def test_autoconfigure_keeps_spawnable_command(self):
+        from chad.server.services.autoconfigure_service import _drop_invalid_preview_command
+
+        discovered = {"preview_command": "npm --prefix ui run dev"}
+        assert _drop_invalid_preview_command(discovered) is None
+        assert discovered["preview_command"] == "npm --prefix ui run dev"
+
+    def test_autoconfigure_prompt_does_not_teach_shell_syntax(self):
+        """The prompt used to offer 'cd ui && npm run dev' as an example."""
+        from chad.server.services.autoconfigure_service import AUTOCONFIGURE_PROMPT
+
+        assert "cd ui && npm run dev" not in AUTOCONFIGURE_PROMPT
+        assert "npm --prefix ui run dev" in AUTOCONFIGURE_PROMPT
+
+
 class TestPreviewPortMode:
     """Tests for preview_port_mode in project config."""
 

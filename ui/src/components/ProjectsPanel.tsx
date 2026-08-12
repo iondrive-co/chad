@@ -24,6 +24,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   const [previewPortMode, setPreviewPortMode] = useState<"disabled" | "auto" | "manual">("disabled");
   const [previewPort, setPreviewPort] = useState("");
   const [previewCommand, setPreviewCommand] = useState("");
+  const [previewCommandError, setPreviewCommandError] = useState<string | null>(null);
   const [preferredCodingAgent, setPreferredCodingAgent] = useState<Account | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -82,6 +83,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       setPreviewPortMode(s.preview_port_mode || "disabled");
       setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
       setPreviewCommand(s.preview_command || "");
+      setPreviewCommandError(null);
       // Load preferred coding agent
       if (s.preferred_coding_agent) {
         const account = accountsResult.accounts.find((a) => a.name === s.preferred_coding_agent);
@@ -234,14 +236,35 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       await saveProjectSettings(overrides);
       flash("Saved");
       onProjectsChange?.();
-    } catch {
-      flash("Error saving");
+    } catch (err) {
+      // Show the server's reason — a rejected preview command blocks the whole
+      // save, and "Error saving" would leave the user with no idea which field.
+      flash(err instanceof Error ? err.message : "Error saving");
     } finally {
       setSaving(false);
     }
   }, [selectedProject, saveProjectSettings, flash, onProjectsChange]);
 
   const handleSave = useCallback(() => { void persistSettings(); }, [persistSettings]);
+
+  // The server rejects a preview command it could not spawn without a shell.
+  // Its explanation is multi-sentence and actionable, so it goes inline under
+  // the field and stays until the command is edited — the 3s flash used for
+  // "Saved" would be missed.
+  const handlePreviewCommandBlur = useCallback(async () => {
+    if (!selectedProject) return;
+    setSaving(true);
+    try {
+      await saveProjectSettings();
+      setPreviewCommandError(null);
+      flash("Saved");
+      onProjectsChange?.();
+    } catch (err) {
+      setPreviewCommandError(err instanceof Error ? err.message : "Error saving");
+    } finally {
+      setSaving(false);
+    }
+  }, [selectedProject, saveProjectSettings, flash, onProjectsChange]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -285,6 +308,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
             setPreviewPortMode(updated.preview_port_mode || "disabled");
             setPreviewPort(updated.preview_port != null ? String(updated.preview_port) : "");
             setPreviewCommand(updated.preview_command || "");
+            setPreviewCommandError(null);
             flash("Autoconfigured");
           } else {
             flash(result.error || "Autoconfigure failed");
@@ -505,11 +529,18 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                       <input
                         type="text"
                         value={previewCommand}
-                        onChange={(e) => setPreviewCommand(e.target.value)}
-                        onBlur={handleSave}
+                        onChange={(e) => {
+                          setPreviewCommand(e.target.value);
+                          setPreviewCommandError(null);
+                        }}
+                        onBlur={handlePreviewCommandBlur}
                         placeholder="e.g., npm run dev"
+                        aria-invalid={previewCommandError ? true : undefined}
                       />
                     </label>
+                    {previewCommandError && (
+                      <div className="preview-command-error">{previewCommandError}</div>
+                    )}
                     {previewPortMode === "manual" && (
                       <label>
                         Preview Port

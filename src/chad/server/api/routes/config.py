@@ -560,17 +560,22 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
     # Fields not sent should use ellipsis (...) to signal "leave unchanged".
     fields_set = request.model_fields_set
 
-    config = save_project_settings(
-        path,
-        lint_command=request.lint_command if "lint_command" in fields_set else ...,
-        test_command=request.test_command if "test_command" in fields_set else ...,
-        instructions_paths=request.instructions_paths if "instructions_paths" in fields_set else ...,
-        preview_port_mode=request.preview_port_mode if "preview_port_mode" in fields_set else ...,
-        preview_port=request.preview_port if "preview_port" in fields_set else ...,
-        preview_command=request.preview_command if "preview_command" in fields_set else ...,
-        preferred_coding_agent=request.preferred_coding_agent if "preferred_coding_agent" in fields_set else ...,
-        autoconfigure_agent=request.autoconfigure_agent if "autoconfigure_agent" in fields_set else ...,
-    )
+    try:
+        config = save_project_settings(
+            path,
+            lint_command=request.lint_command if "lint_command" in fields_set else ...,
+            test_command=request.test_command if "test_command" in fields_set else ...,
+            instructions_paths=request.instructions_paths if "instructions_paths" in fields_set else ...,
+            preview_port_mode=request.preview_port_mode if "preview_port_mode" in fields_set else ...,
+            preview_port=request.preview_port if "preview_port" in fields_set else ...,
+            preview_command=request.preview_command if "preview_command" in fields_set else ...,
+            preferred_coding_agent=request.preferred_coding_agent if "preferred_coding_agent" in fields_set else ...,
+            autoconfigure_agent=request.autoconfigure_agent if "autoconfigure_agent" in fields_set else ...,
+        )
+    except ValueError as exc:
+        # An unrunnable preview command (shell syntax) is rejected here so it can
+        # never be stored and fail later at launch.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return ProjectSettingsResponse(
         project_path=str(path),

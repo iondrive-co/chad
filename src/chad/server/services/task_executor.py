@@ -1035,32 +1035,25 @@ class TaskExecutor:
         # Get provider info
         coding_provider = accounts[coding_account]
 
-        # Build verification config gated by runtime verification settings
+        # Build verification config. An account picked for this task wins over
+        # the global verification_enabled flag, which only supplies the default:
+        # the per-session picker used to be silently ignored while verification
+        # was globally off, so a task the user asked to verify never was.
         verification_config = None
-        ver_enabled = self.config_manager.get_runtime_verification_settings()
-
-        if ver_enabled:
-            if verification_account:
+        if verification_account:
+            verification_config = {
+                "verification_account": verification_account,
+                "verification_model": verification_model,
+                "verification_reasoning": verification_reasoning,
+            }
+        elif self.config_manager.get_runtime_verification_settings():
+            auto_account = self.config_manager.get_verification_agent()
+            if auto_account and auto_account != self.config_manager.VERIFICATION_NONE:
                 verification_config = {
-                    "verification_account": verification_account,
+                    "verification_account": auto_account,
                     "verification_model": verification_model,
                     "verification_reasoning": verification_reasoning,
                 }
-            else:
-                # Run verification using configured verification agent when enabled
-                try:
-                    auto_account = self.config_manager.get_verification_agent()
-                except Exception:
-                    auto_account = None
-                if auto_account and auto_account != self.config_manager.VERIFICATION_NONE:
-                    verification_config = {
-                        "verification_account": auto_account,
-                        "verification_model": verification_model,
-                        "verification_reasoning": verification_reasoning,
-                    }
-        else:
-            # Runtime verification disabled – ignore any requested verification
-            verification_config = None
 
         # Start execution thread
         thread = threading.Thread(

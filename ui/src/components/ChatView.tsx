@@ -145,7 +145,6 @@ export function ChatView({
 
   // Verification agent selection for new tasks
   const [verificationAccount, setVerificationAccount] = useState<Account | null>(null);
-  const [verificationSettings, setVerificationSettings] = useState<VerificationSettings | null>(null);
   const verificationDefaultsApplied = useRef(false);
 
   // Guards the pending-followup effect against double-sends when its deps
@@ -417,43 +416,35 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, codingAccount, sessionCodingAgent, sessionCodingModel]);
 
-  // Load verification settings and default verification agent
+  // Seed the verification agent picker. The global settings only supply its
+  // initial value — whatever the picker ends up holding is what runs, so the
+  // enabled flag and the default account are resolved in one chain rather than
+  // racing to set it.
   useEffect(() => {
     let cancelled = false;
     // Claim the defaults BEFORE any await so concurrent/repeat runs can't both
     // apply them — a later run must never wipe a manual account pick.
-    const applyDefaults = !verificationDefaultsApplied.current;
+    if (verificationDefaultsApplied.current) return;
     verificationDefaultsApplied.current = true;
 
     api.getVerificationSettings()
-      .then((settings) => {
+      .catch((): VerificationSettings => ({ enabled: true }))
+      .then(async (settings) => {
         if (cancelled) return;
-        setVerificationSettings(settings);
-        // Only the first load clears the account when verification is disabled.
-        if (applyDefaults && !settings.enabled) {
+        // Verification off globally → the picker starts at None. Picking an
+        // account there still verifies this session.
+        if (!settings.enabled) {
           setVerificationAccount(null);
+          return;
         }
+        const r = await api.getVerificationAgent();
+        if (cancelled) return;
+        const name = r.account_name;
+        if (!name || name === "__verification_none__") return;
+        const acct = await api.getAccount(name);
+        if (!cancelled) setVerificationAccount(acct);
       })
-      .catch(() => {
-        if (!cancelled) {
-          setVerificationSettings({ enabled: true });
-        }
-      });
-
-    if (applyDefaults) {
-      api.getVerificationAgent()
-        .then((r) => {
-          if (cancelled) return;
-          const name = r.account_name;
-          if (!name || name === "__verification_none__") return;
-          api.getAccount(name)
-            .then((acct) => {
-              if (!cancelled) setVerificationAccount(acct);
-            })
-            .catch(() => { /* ignore missing account */ });
-        })
-        .catch(() => {});
-    }
+      .catch(() => { /* no default account to seed */ });
 
     return () => { cancelled = true; };
   }, [api]);
@@ -847,14 +838,15 @@ export function ChatView({
       streamSinceSeqRef.current = undefined;
     }
 
-    const verificationAllowed = verificationSettings?.enabled && verificationAccount;
     await api.startTask(sessionId, {
       project_path: projectPath,
       task_description: message,
       coding_agent: codingAccount.name,
       coding_model: codingModel || undefined,
       coding_reasoning: codingReasoning || undefined,
-      verification_agent: verificationAllowed ? verificationAccount.name : undefined,
+      // Whatever the picker shows is what runs: an explicit pick overrides the
+      // global verification_enabled flag, which only seeds the picker's default.
+      verification_agent: verificationAccount ? verificationAccount.name : undefined,
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
       notify_slack: slackEnabled && postToSlack,
@@ -868,7 +860,6 @@ export function ChatView({
     codingModel,
     codingReasoning,
     verificationAccount,
-    verificationSettings,
     currentProjectPath,
     defaultProjectPath,
     handleTaskStart,

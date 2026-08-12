@@ -336,6 +336,10 @@ class SessionEventLoop:
         "analyzing ",
     )
     _NARRATION_SUBSTRINGS = ("let me ", "let's ", "lets ")
+    # A finding longer than this is truncated, never dropped. Dropping it meant
+    # the most detailed discoveries — the valuable ones — were the ones the chat
+    # panel silently lost, leaving whole sessions with no Discovery bubbles.
+    _MAX_EXPLORATION_SUMMARY = 400
 
     def _sanitize_exploration_text(self, text: str) -> str:
         """Strip ANSI/control characters before parsing exploration markers."""
@@ -348,17 +352,20 @@ class SessionEventLoop:
     def _normalize_exploration_summary(self, summary: str) -> str | None:
         """Normalize and validate an exploration summary line."""
         cleaned = " ".join(summary.split()).strip()
-        if len(cleaned) < 8 or len(cleaned) > 400:
+        if len(cleaned) < 8:
             return None
         lower = cleaned.lower()
         if lower.startswith(self._INVALID_EXPLORATION_PREFIXES):
             return None
         # Drop step narration ("Let me read X", "Now I'll check Y") — only
-        # actual findings become Discovery milestones.
+        # actual findings become Discovery milestones. Checked against the full
+        # text, before truncation, so a late narration marker still counts.
         if lower.startswith(self._NARRATION_PREFIXES):
             return None
         if any(marker in lower for marker in self._NARRATION_SUBSTRINGS):
             return None
+        if len(cleaned) > self._MAX_EXPLORATION_SUMMARY:
+            cleaned = cleaned[:self._MAX_EXPLORATION_SUMMARY - 1].rstrip() + "…"
         return cleaned
 
     def _scan_exploration_markers(self, new_text: str, finalize: bool = False) -> None:

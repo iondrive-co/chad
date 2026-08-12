@@ -22,6 +22,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from chad.server.auth import mint_browser_ticket, validate_browser_ticket
 from chad.util.installer import AIToolInstaller
+from chad.util.project_setup import validate_preview_command
 from chad.util.process_registry import get_global_registry
 
 logger = logging.getLogger(__name__)
@@ -171,21 +172,17 @@ def resolve_command_target(command: str) -> str | list[str]:
     through for CreateProcess to parse (still no shell) because shlex would
     mangle backslash paths there.
 
-    Raises:
-        ValueError: If the command is empty or cannot be parsed.
-    """
-    if os.name == "nt":
-        if not command.strip():
-            raise ValueError("Preview command is empty")
-        return command
+    Shell syntax is rejected on both platforms by the same validator that guards
+    the config write, so a command stored before that check existed fails with
+    the actionable message rather than a bare ENOENT.
 
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        raise ValueError(f"Could not parse preview command: {exc}") from exc
-    if not argv:
-        raise ValueError("Preview command is empty")
-    return argv
+    Raises:
+        ValueError: If the command is empty, unparseable, or uses shell syntax.
+    """
+    stripped = validate_preview_command(command)
+    if os.name == "nt":
+        return stripped
+    return shlex.split(stripped)
 
 
 def create_preview_proxy_app(target_port: int, auth_token: str) -> FastAPI:
