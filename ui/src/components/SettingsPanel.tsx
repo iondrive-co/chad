@@ -7,6 +7,7 @@ import { parseConnectionInput } from "../App.tsx";
 interface Props {
   api: ChadAPI;
   connected: boolean;
+  apiBaseUrl: string;
   connectionInput?: string;
   onConnectionInputChange?: (value: string) => void;
   onConnect?: (url: string, token?: string) => void;
@@ -15,15 +16,18 @@ interface Props {
 export function SettingsPanel({
   api,
   connected,
+  apiBaseUrl,
   connectionInput = "",
   onConnectionInputChange,
   onConnect,
 }: Props) {
   const [verification, setVerification] = useState<VerificationSettings | null>(null);
   const [maxAttempts, setMaxAttempts] = useState<number>(3);
+  const [maxAttemptsInput, setMaxAttemptsInput] = useState<string>("3");
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [retentionDays, setRetentionDays] = useState<number>(7);
+  const [retentionInput, setRetentionInput] = useState<string>("7");
   const [localEndpoint, setLocalEndpoint] = useState("");
   const [slackEnabled, setSlackEnabled] = useState(false);
   const [slackChannel, setSlackChannel] = useState("");
@@ -44,12 +48,25 @@ export function SettingsPanel({
     setTimeout(() => setStatus(null), 2000);
   }, []);
 
+  // Keep the connection field in sync when the parent-owned value changes
+  // (e.g. after a QR scan or a connect initiated elsewhere).
   useEffect(() => {
+    setLocalConnectionInput(connectionInput);
+  }, [connectionInput]);
+
+  useEffect(() => {
+    if (!connected) return;
     api.getVerificationSettings().then(setVerification).catch(() => {});
-    api.getMaxVerificationAttempts().then((r) => setMaxAttempts(r.attempts)).catch(() => {});
+    api.getMaxVerificationAttempts().then((r) => {
+      setMaxAttempts(r.attempts);
+      setMaxAttemptsInput(String(r.attempts));
+    }).catch(() => {});
     api.getVerificationAgent().then((r) => setVerificationAgent(r.account_name)).catch(() => {});
     api.listAccounts().then((r) => setAccounts(r.accounts)).catch(() => {});
-    api.getCleanupSettings().then((r) => setRetentionDays(r.cleanup_days)).catch(() => {});
+    api.getCleanupSettings().then((r) => {
+      setRetentionDays(r.cleanup_days);
+      setRetentionInput(String(r.cleanup_days));
+    }).catch(() => {});
     api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
     api.getSlackSettings().then((r) => {
       setSlackEnabled(r.enabled);
@@ -62,7 +79,7 @@ export function SettingsPanel({
       setTunnelSubdomain(r.subdomain);
       setTunnelError(r.error);
     }).catch(() => {});
-  }, [api]);
+  }, [api, connected]);
 
   // ── Verification ──
 
@@ -80,13 +97,25 @@ export function SettingsPanel({
     }
   }, [api, verification, flash]);
 
-  const saveMaxAttempts = useCallback(async (val: number) => {
-    setMaxAttempts(val);
+  // Commit-on-blur: keep local text state while typing, validate, and only
+  // persist a valid value. Invalid input restores the last known good value.
+  const commitMaxAttempts = useCallback(async () => {
+    const val = Number(maxAttemptsInput);
+    if (!Number.isInteger(val) || val < 1) {
+      setMaxAttemptsInput(String(maxAttempts));
+      return;
+    }
+    if (val === maxAttempts) return;
     try {
-      await api.setMaxVerificationAttempts(val);
+      const r = await api.setMaxVerificationAttempts(val);
+      setMaxAttempts(r.attempts);
+      setMaxAttemptsInput(String(r.attempts));
       flash("Saved");
-    } catch { /* */ }
-  }, [api, flash]);
+    } catch {
+      setMaxAttemptsInput(String(maxAttempts));
+      flash("Failed to save max verification attempts");
+    }
+  }, [api, maxAttempts, maxAttemptsInput, flash]);
 
   const saveVerificationAgent = useCallback(async (name: string) => {
     const val = name || null;
@@ -99,14 +128,23 @@ export function SettingsPanel({
 
   // ── Cleanup ──
 
-  const saveRetention = useCallback(async (days: number) => {
-    if (days < 1) return;
-    setRetentionDays(days);
+  const commitRetention = useCallback(async () => {
+    const days = Number(retentionInput);
+    if (!Number.isInteger(days) || days < 1) {
+      setRetentionInput(String(retentionDays));
+      return;
+    }
+    if (days === retentionDays) return;
     try {
-      await api.setCleanupSettings({ cleanup_days: days });
+      const r = await api.setCleanupSettings({ cleanup_days: days });
+      setRetentionDays(r.cleanup_days);
+      setRetentionInput(String(r.cleanup_days));
       flash("Saved");
-    } catch { /* */ }
-  }, [api, flash]);
+    } catch {
+      setRetentionInput(String(retentionDays));
+      flash("Failed to save retention days");
+    }
+  }, [api, retentionDays, retentionInput, flash]);
 
   // ── Local model ──
 
@@ -145,12 +183,18 @@ export function SettingsPanel({
       setTunnelUrl(r.url);
       setTunnelSubdomain(r.subdomain);
       setTunnelError(r.error);
+      // Starting a tunnel publishes this server, so the server requires auth
+      // from now on. Adopt the token it returned or this tab's next request
+      // 401s.
+      if (r.token && onConnect) {
+        onConnect(apiBaseUrl, r.token);
+      }
     } catch {
       setTunnelError("Request failed");
     } finally {
       setTunnelLoading(false);
     }
-  }, [api, tunnelRunning]);
+  }, [api, tunnelRunning, onConnect, apiBaseUrl]);
 
   // ── Connection ──
 
@@ -245,14 +289,21 @@ export function SettingsPanel({
             <label className="toggle-label">
               <input type="checkbox" checked={verification.enabled}
                 onChange={() => toggleVerification("enabled")} disabled={saving || dis} />
-              Verification enabled
+              Verify tasks by default
             </label>
+            <p className="instructions-hint">
+              Seeds the Verification Agent picker for new sessions. Choosing an
+              agent there verifies that session either way.
+            </p>
           </>
         )}
         <label>
           Max verification attempts
-          <input type="number" min={1} max={20} value={maxAttempts}
-            onChange={(e) => saveMaxAttempts(Number(e.target.value))} disabled={dis} />
+          <input type="number" min={1} max={20} value={maxAttemptsInput}
+            onChange={(e) => setMaxAttemptsInput(e.target.value)}
+            onBlur={() => commitMaxAttempts()}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            disabled={dis} />
         </label>
         <label>
           Verification agent
@@ -274,8 +325,11 @@ export function SettingsPanel({
         <h3>Cleanup</h3>
         <label>
           Retention days
-          <input type="number" min={1} value={retentionDays}
-            onChange={(e) => saveRetention(Number(e.target.value))} disabled={dis} />
+          <input type="number" min={1} value={retentionInput}
+            onChange={(e) => setRetentionInput(e.target.value)}
+            onBlur={() => commitRetention()}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            disabled={dis} />
         </label>
       </section>
 
@@ -327,14 +381,21 @@ export function SettingsPanel({
       <section>
         <h3>Config Transfer</h3>
         <p style={{ fontSize: "0.85rem", color: "#999", marginBottom: "0.5rem" }}>
-          Export your config (with encrypted keys) to set up a headless server.
+          Export your settings to set up another machine. Provider logins are only
+          included if you give a passphrase, and are encrypted with it.
         </p>
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           <button
             disabled={dis}
             onClick={async () => {
+              const passphrase = window.prompt(
+                "Passphrase to encrypt provider logins in the export.\n" +
+                "Leave blank to export settings only (no credentials).",
+                "",
+              );
+              if (passphrase === null) return;
               try {
-                const data = await api.exportConfig();
+                const data = await api.exportConfig(passphrase || null);
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -342,7 +403,11 @@ export function SettingsPanel({
                 a.download = "chad-config.json";
                 a.click();
                 URL.revokeObjectURL(url);
-                flash("Config exported");
+                flash(
+                  data.credentials_included
+                    ? "Config exported with encrypted logins"
+                    : "Config exported (settings only)",
+                );
               } catch {
                 flash("Export failed");
               }
@@ -359,11 +424,24 @@ export function SettingsPanel({
               input.onchange = async () => {
                 const file = input.files?.[0];
                 if (!file) return;
+                let passphrase: string | null = null;
+                let data: Record<string, unknown>;
+                try {
+                  data = JSON.parse(await file.text());
+                } catch {
+                  flash("Import failed — check file format");
+                  return;
+                }
+                if (data.provider_auth_encrypted) {
+                  passphrase = window.prompt(
+                    "This export contains encrypted provider logins.\nEnter the passphrase used to create it:",
+                    "",
+                  );
+                  if (passphrase === null) return;
+                }
                 setImporting(true);
                 try {
-                  const text = await file.text();
-                  const data = JSON.parse(text);
-                  const result = await api.importConfig(data);
+                  const result = await api.importConfig(data, passphrase);
                   if (result.install_errors && Object.keys(result.install_errors).length > 0) {
                     const failed = Object.entries(result.install_errors)
                       .map(([tool, err]) => `${tool}: ${err.split("\n")[0]}`)
@@ -372,8 +450,10 @@ export function SettingsPanel({
                   } else {
                     flash("Config imported successfully");
                   }
-                } catch {
-                  flash("Import failed — check file format");
+                } catch (err) {
+                  // Surface the server's reason (e.g. wrong passphrase)
+                  const body = (err as { body?: { detail?: string } })?.body;
+                  flash(body?.detail ? `Import failed — ${body.detail}` : "Import failed");
                 } finally {
                   setImporting(false);
                 }

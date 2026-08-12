@@ -1,10 +1,12 @@
 """Tests for the UI autobuild helper."""
 
+import os
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import call, patch
 
-from chad.util.ui_build import ensure_ui_built
+from chad.util.ui_build import _is_stale, ensure_ui_built
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,12 +67,15 @@ class TestEnsureUiBuilt:
         (project_root / "client" / "node_modules").mkdir(parents=True)
         (project_root / "ui" / "node_modules").mkdir(parents=True)
 
-        def fake_is_stale(src: Path, built: Path) -> bool:
+        def fake_is_stale(sources, built: Path) -> bool:
             if built == project_root / "client" / "dist" / "index.js":
                 return False
             if built == project_root / "ui" / "dist" / "index.html":
+                # UI bundles must consider client/src too — it is bundled in.
+                assert project_root / "client" / "src" in list(sources)
                 return True
             if built == project_root / "ui" / "dist-portable" / "index.html":
+                assert project_root / "client" / "src" in list(sources)
                 return True
             raise AssertionError(f"Unexpected stale check for {built}")
 
@@ -96,3 +101,51 @@ class TestEnsureUiBuilt:
                 cwd=project_root / "ui",
             ),
         ]
+
+
+class TestIsStale:
+    """The staleness check must consider every source tree bundled into a build."""
+
+    def test_newer_client_src_makes_ui_dist_stale(self, tmp_path):
+        """A newer file in client/src ⇒ ui/dist is stale.
+
+        Regression: the check compared only ui/src against ui/dist, but the
+        chad-client TS source is bundled into the UI, so client/src changes
+        never triggered a rebuild and stale UI was served forever.
+        """
+        ui_src = tmp_path / "ui" / "src"
+        client_src = tmp_path / "client" / "src"
+        ui_dist = tmp_path / "ui" / "dist" / "index.html"
+        _touch(ui_src / "main.tsx", "export {};")
+        _touch(client_src / "api.ts", "export {};")
+        _touch(ui_dist, "<html></html>")
+
+        now = time.time()
+        os.utime(ui_src / "main.tsx", (now - 200, now - 200))
+        os.utime(ui_dist, (now - 100, now - 100))
+        os.utime(client_src / "api.ts", (now, now))  # newest: only client/src changed
+
+        assert _is_stale([ui_src, client_src], ui_dist) is True
+        # Sanity: ui/src alone is older than the build.
+        assert _is_stale([ui_src], ui_dist) is False
+
+    def test_repo_ui_is_stale_considers_client_src(self, tmp_path):
+        """The server-side staleness gate must also see client/src changes."""
+        from chad.server.main import _repo_ui_is_stale
+
+        ui_src = tmp_path / "ui" / "src"
+        client_src = tmp_path / "client" / "src"
+        ui_dist = tmp_path / "ui" / "dist" / "index.html"
+        _touch(ui_src / "main.tsx", "export {};")
+        _touch(client_src / "api.ts", "export {};")
+        _touch(ui_dist, "<html></html>")
+
+        now = time.time()
+        os.utime(ui_src / "main.tsx", (now - 200, now - 200))
+        os.utime(client_src / "api.ts", (now - 200, now - 200))
+        os.utime(ui_dist, (now - 100, now - 100))
+
+        assert _repo_ui_is_stale(tmp_path) is False
+
+        os.utime(client_src / "api.ts", (now, now))
+        assert _repo_ui_is_stale(tmp_path) is True

@@ -16,7 +16,8 @@ import tempfile
 from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
-from chad.util.providers import is_mistral_configured
+from chad.util.providers import claude_account_authenticated, is_mistral_configured
+from chad.util.utils import safe_home
 
 _INSTALLER = AIToolInstaller()
 
@@ -46,17 +47,44 @@ _LOGIN_TIMEOUT_SECS = 120
 
 def codex_home(account_name: str) -> Path:
     """Isolated HOME directory for a Codex account."""
-    return Path.home() / ".chad" / "codex-homes" / account_name
+    return safe_home() / ".chad" / "codex-homes" / account_name
 
 
 def claude_config_dir(account_name: str) -> Path:
     """Isolated CLAUDE_CONFIG_DIR for a Claude account."""
-    return Path.home() / ".chad" / "claude-configs" / account_name
+    return safe_home() / ".chad" / "claude-configs" / account_name
 
 
 def kimi_home(account_name: str) -> Path:
     """Isolated HOME directory for a Kimi account."""
-    return Path.home() / ".chad" / "kimi-homes" / account_name
+    return safe_home() / ".chad" / "kimi-homes" / account_name
+
+
+def gemini_home(account_name: str) -> Path:
+    """Isolated Gemini CLI home (via GEMINI_CLI_HOME) for a Gemini account."""
+    return safe_home() / ".chad" / "gemini-homes" / account_name
+
+
+def qwen_home(account_name: str) -> Path:
+    """Isolated HOME directory for a Qwen account."""
+    return safe_home() / ".chad" / "qwen-homes" / account_name
+
+
+def vibe_home(account_name: str) -> Path:
+    """Isolated Vibe config dir (via VIBE_HOME) for a Mistral account.
+
+    VIBE_HOME is the config dir itself: ``config.toml``/``.env`` live directly
+    inside it (no nested ``.vibe``).
+    """
+    return safe_home() / ".chad" / "vibe-homes" / account_name
+
+
+def _home_redirect_env(home: Path) -> dict:
+    """Env vars that redirect a CLI's home directory lookup to ``home``."""
+    env = {"HOME": str(home)}
+    if os.name == "nt":
+        env["USERPROFILE"] = str(home)
+    return env
 
 
 def write_kimi_default_config(config_file: Path) -> None:
@@ -119,31 +147,38 @@ def _codex_authenticated(account_name: str) -> bool:
 
 
 def is_logged_in(provider: str, account_name: str) -> bool:
-    """Return True if the account has valid credentials on disk."""
+    """Return True if the account has usable credentials.
+
+    For Claude this means the token still works: the credentials file merely
+    existing said "Ready" for accounts whose OAuth session had died weeks
+    earlier, and the user only found out three minutes into a task.
+    """
     try:
         if provider == "openai":
             return _codex_authenticated(account_name)
 
         if provider == "anthropic":
-            return (claude_config_dir(account_name) / ".credentials.json").exists()
+            return claude_account_authenticated(account_name)
 
         if provider == "gemini":
-            return (Path.home() / ".gemini" / "oauth_creds.json").exists()
+            return (gemini_home(account_name) / ".gemini" / "oauth_creds.json").exists()
 
         if provider == "qwen":
-            return (Path.home() / ".qwen" / "oauth_creds.json").exists()
+            return (qwen_home(account_name) / ".qwen" / "oauth_creds.json").exists()
 
         if provider == "local":
             # No credentials needed — ready once the Qwen Code CLI is installed.
             return _resolve_cli(provider) is not None
 
         if provider == "mistral":
-            return is_mistral_configured(Path.home() / ".vibe")
+            return is_mistral_configured(vibe_home(account_name))
 
         if provider == "kimi":
+            # Only this account's own credentials count. Accepting the real
+            # ~/.kimi login here made every never-logged-in kimi account
+            # report ready and silently run as the global identity.
             creds_file = kimi_home(account_name) / ".kimi" / "credentials" / "kimi-code.json"
-            global_creds = Path.home() / ".kimi" / "credentials" / "kimi-code.json"
-            if not (creds_file.exists() or global_creds.exists()):
+            if not creds_file.exists():
                 return False
             config_file = kimi_home(account_name) / ".kimi" / "config.toml"
             if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
@@ -187,7 +222,7 @@ def run_login(
         return True, "Ready"
 
     if provider in API_KEY_PROVIDERS:
-        return _login_api_key(provider, api_key)
+        return _login_api_key(provider, account_name, api_key)
 
     if provider == "openai":
         home = codex_home(account_name)
@@ -221,9 +256,15 @@ def _tty_login_command(provider: str, account_name: str, cli_path: str) -> tuple
     if provider == "kimi":
         home = kimi_home(account_name)
         home.mkdir(parents=True, exist_ok=True)
-        return [cli_path, "login"], {"HOME": str(home)}
-    # gemini / qwen authenticate against their global home in YOLO mode.
-    return [cli_path, "-y"], {}
+        return [cli_path, "login"], _home_redirect_env(home)
+    if provider == "gemini":
+        home = gemini_home(account_name)
+        home.mkdir(parents=True, exist_ok=True)
+        return [cli_path, "-y"], {"GEMINI_CLI_HOME": str(home)}
+    # qwen authenticates in YOLO mode against its per-account HOME.
+    home = qwen_home(account_name)
+    home.mkdir(parents=True, exist_ok=True)
+    return [cli_path, "-y"], _home_redirect_env(home)
 
 
 def _run_tty_login(
@@ -250,9 +291,9 @@ def _run_tty_login(
     return False, "Login failed or was cancelled"
 
 
-def _login_api_key(provider: str, api_key: str) -> tuple[bool, str]:
+def _login_api_key(provider: str, account_name: str, api_key: str) -> tuple[bool, str]:
     if provider == "mistral":
-        vibe_dir = Path.home() / ".vibe"
+        vibe_dir = vibe_home(account_name)
         if is_mistral_configured(vibe_dir):
             return True, "Already logged in"
         if not api_key:

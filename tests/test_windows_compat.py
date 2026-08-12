@@ -7,11 +7,40 @@ all critical import chains succeed.
 
 import importlib
 import sys
+import pytest
 from pathlib import Path
 
 
 # Unix-only modules that must not be imported at top level
 UNIX_ONLY_MODULES = ["fcntl", "termios", "tty", "pty"]
+
+
+@pytest.fixture(autouse=True)
+def restore_module_tree():
+    """Undo the sys.modules surgery these tests perform.
+
+    _force_reimport drops packages from sys.modules so they re-import fresh.
+    Restoring the dict alone is not enough: importing a submodule also sets it
+    as an attribute on its parent package, and that link is lost when a fresh
+    parent object replaces the original. A later
+    `monkeypatch.setattr("chad.ui.cli.app.X")` then fails with
+    "module 'chad.ui' has no attribute 'cli'" — which used to break ~10
+    unrelated CLI tests whenever this module ran before them.
+    """
+    snapshot = dict(sys.modules)
+    yield
+    sys.modules.clear()
+    sys.modules.update(snapshot)
+    for name, module in list(sys.modules.items()):
+        if "." not in name or module is None:
+            continue
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and not hasattr(parent, child):
+            try:
+                setattr(parent, child, module)
+            except (AttributeError, TypeError):
+                pass
 
 
 def _hide_unix_modules(monkeypatch):
@@ -504,3 +533,143 @@ class TestWindowsPipeStreaming:
         finally:
             service.terminate(stream_id)
             time.sleep(0.5)
+
+
+class TestPreviewCommandWindows:
+    """The preview command must never go through a shell, on any platform."""
+
+    def test_windows_passes_command_string_without_shell(self, monkeypatch):
+        """shlex would eat backslashes, so Windows hands the string to CreateProcess."""
+        from chad.server.services import preview_tunnel_service as pts
+
+        monkeypatch.setattr(pts.os, "name", "nt")
+        target = pts.resolve_command_target(r"C:\tools\npm.cmd run dev")
+        assert target == r"C:\tools\npm.cmd run dev"
+
+    def test_posix_splits_into_argv(self, monkeypatch):
+        from chad.server.services import preview_tunnel_service as pts
+
+        monkeypatch.setattr(pts.os, "name", "posix")
+        assert pts.resolve_command_target("npm run dev") == ["npm", "run", "dev"]
+        assert pts.resolve_command_target("npm --prefix ui run dev") == [
+            "npm", "--prefix", "ui", "run", "dev",
+        ]
+
+    def test_shell_syntax_rejected_on_both_platforms(self, monkeypatch):
+        """Metacharacters were inert, but silently so — the command still broke.
+
+        Passing "cd ui && npm run dev" through made `cd` argv[0] and failed at
+        launch with ENOENT, so it is refused on Windows too rather than being
+        split into harmless-but-useless arguments.
+        """
+        from chad.server.services import preview_tunnel_service as pts
+
+        for os_name in ("nt", "posix"):
+            monkeypatch.setattr(pts.os, "name", os_name)
+            for command in ("cd ui && npm run dev", "npm run dev; rm -rf /"):
+                with pytest.raises(ValueError):
+                    pts.resolve_command_target(command)
+
+    def test_windows_paths_with_backslashes_still_accepted(self, monkeypatch):
+        """The rejection must not catch ordinary Windows paths."""
+        from chad.server.services import preview_tunnel_service as pts
+
+        monkeypatch.setattr(pts.os, "name", "nt")
+        assert pts.resolve_command_target(r"C:\tools\npm.cmd --prefix ui run dev") == (
+            r"C:\tools\npm.cmd --prefix ui run dev"
+        )
+
+    def test_empty_command_rejected(self, monkeypatch):
+        from chad.server.services import preview_tunnel_service as pts
+
+        for os_name in ("nt", "posix"):
+            monkeypatch.setattr(pts.os, "name", os_name)
+            with pytest.raises(ValueError, match="empty"):
+                pts.resolve_command_target("   ")
+
+
+class TestProviderHomeIsolationOnWindows:
+    """Per-account CLI home redirection must also cover USERPROFILE on Windows.
+
+    Node CLIs (qwen) resolve os.homedir() from USERPROFILE on Windows, so
+    setting only HOME would silently fall back to the real, shared login.
+    """
+
+    def test_qwen_runtime_env_sets_userprofile(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        from chad.util.providers import ModelConfig, QwenCodeProvider
+
+        monkeypatch.setattr("os.name", "nt")
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env = QwenCodeProvider(
+                ModelConfig(provider="qwen", model_name="default", account_name="acct")
+            ).runtime_env()
+
+        expected = str(tmp_path / ".chad" / "qwen-homes" / "acct")
+        assert env["HOME"] == expected
+        assert env["USERPROFILE"] == expected
+
+    def test_build_agent_command_qwen_sets_userprofile(self, tmp_path, monkeypatch):
+        from chad.server.services.task_executor import build_agent_command
+
+        monkeypatch.setattr("os.name", "nt")
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+
+        _, env, _ = build_agent_command("qwen", "acct", tmp_path)
+
+        # tmp_path was created before the os.name patch, so joining on it
+        # stays a PosixPath (mirrors what platform_path produces here).
+        expected = str(tmp_path / ".chad" / "qwen-homes" / "acct")
+        assert env["HOME"] == expected
+        assert env["USERPROFILE"] == expected
+
+    def test_tty_login_qwen_sets_userprofile(self, tmp_path, monkeypatch):
+        from chad.util import provider_login
+
+        monkeypatch.setattr("os.name", "nt")
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+
+        _, extra_env = provider_login._tty_login_command("qwen", "acct", "/fake/qwen")
+
+        expected = str(tmp_path / ".chad" / "qwen-homes" / "acct")
+        assert extra_env["HOME"] == expected
+        assert extra_env["USERPROFILE"] == expected
+
+
+class TestToolUpdatesOnWindows:
+    """The periodic CLI update must find npm's Windows wrappers, not just bare names."""
+
+    def test_stale_cmd_wrapper_is_recognised_and_updated(self, tmp_path, monkeypatch):
+        import types
+
+        from chad.util.installer import AIToolInstaller
+
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        npm_bin = installer.tools_dir / "node_modules" / ".bin"
+        npm_bin.mkdir(parents=True, exist_ok=True)
+        # npm on Windows installs claude.cmd, with no extension-less sibling.
+        (npm_bin / "claude.cmd").write_text("@echo off\n", encoding="utf-8")
+
+        import os as real_os
+
+        class FakeOS(types.SimpleNamespace):
+            def __getattr__(self, item):
+                return getattr(real_os, item)
+
+        monkeypatch.setitem(sys.modules, "os", FakeOS(name="nt"))
+        # Only node/npm come from PATH; real provider CLIs on this machine must
+        # not make the temp tools dir look populated.
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        commands = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (commands.append(cmd), (0, "", ""))[1],
+        )
+
+        updated = installer.update_stale_tools(max_age_days=7)
+
+        assert updated == ["claude"]
+        assert any("@anthropic-ai/claude-code@latest" in " ".join(c) for c in commands)

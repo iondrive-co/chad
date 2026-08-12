@@ -129,9 +129,22 @@ def get_chad_dir() -> Path:
 
 
 def write_server_port(port: int) -> None:
-    """Write the server port to a file for autodiscovery."""
+    """Write the server port to a file for autodiscovery.
+
+    Registers an atexit hook to remove the file on shutdown so
+    `--server-url auto` can't point at a dead server.
+    """
     port_file = get_chad_dir() / "server.port"
     port_file.write_text(f"{port}\n")
+
+    def _clear_port_file() -> None:
+        try:
+            if port_file.exists() and port_file.read_text().strip() == str(port):
+                port_file.unlink()
+        except OSError:
+            pass
+
+    atexit.register(_clear_port_file)
 
 
 def read_server_port() -> int | None:
@@ -191,8 +204,9 @@ def run_server(
         tunnel: Start a Cloudflare tunnel for remote access
     """
     import uvicorn
-    from chad.server.main import create_app
+    from chad.server.main import create_app, start_provider_cli_updates
 
+    start_provider_cli_updates()
     port = resolve_port(port)
 
     # Write port for autodiscovery by other clients
@@ -234,12 +248,11 @@ def run_server(
 
 def run_unified(
     main_password: str | None,
-    ui_port: int,
     api_port: int,
-    dev_mode: bool,
     ui_mode: str = "react",
     server_url: str | None = None,
     tunnel: bool = False,
+    api_host: str = "127.0.0.1",
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -248,12 +261,11 @@ def run_unified(
 
     Args:
         main_password: Main password for config encryption
-        ui_port: Port for UI (0 for ephemeral)
         api_port: Port for API server (0 for ephemeral)
-        dev_mode: Enable development mode
         ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
         tunnel: Start a Cloudflare tunnel for remote access
+        api_host: Host to bind the local API server to
     """
     import webbrowser
 
@@ -267,8 +279,9 @@ def run_unified(
     else:
         # Start local API server
         import uvicorn
-        from chad.server.main import create_app
+        from chad.server.main import create_app, start_provider_cli_updates
 
+        start_provider_cli_updates()
         api_port = resolve_port(api_port)
 
         # Generate auth token when tunnel is active
@@ -278,7 +291,7 @@ def run_unified(
             auth_token = generate_token()
 
         app = create_app(auth_token=auth_token)
-        server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
+        server_config = uvicorn.Config(app, host=api_host, port=api_port, log_level="warning")
         server = uvicorn.Server(server_config)
 
         server_thread = threading.Thread(target=server.run, daemon=True)
@@ -335,13 +348,12 @@ def main() -> int:
         help="Run mode: unified (default, UI + local server), server (API only)",
     )
     parser.add_argument(
-        "--port", type=int, default=3184, help="Port for UI (default: 3184)"
+        "--api-port", type=int, default=CHAD_DEFAULT_PORT,
+        help=f"Port for API server (default: {CHAD_DEFAULT_PORT})",
     )
     parser.add_argument(
-        "--api-port", type=int, default=3184, help="Port for API server (default: 3184)"
-    )
-    parser.add_argument(
-        "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"
+        "--api-host", type=str, default=None,
+        help="Host for API server (default: 0.0.0.0 in server mode, 127.0.0.1 in unified mode)",
     )
     parser.add_argument(
         "--server-url", type=str, default=None,
@@ -366,6 +378,10 @@ def main() -> int:
     print(f"It is {now} and {random.choice(SCS)}")
     sys.stdout.flush()
 
+    # Dev mode gates the mock provider in the providers list
+    if args.dev:
+        os.environ["CHAD_DEV_MODE"] = "1"
+
     # Ensure all child agents inherit the active project root
     project_root = Path(__file__).resolve().parents[2]
     ensure_project_root_env(project_root)
@@ -383,10 +399,17 @@ def main() -> int:
         except Exception as exc:  # pragma: no cover - best effort
             print(f"UI autobuild skipped: {exc}")
 
-    # Run startup cleanup (worktrees, logs, screenshots older than N days)
+    # Run startup cleanup (worktrees, logs, screenshots older than N days).
+    # Worktree cleanup targets the user's configured projects — cleaning
+    # chad's own install directory did nothing useful.
     config_mgr = ConfigManager()
     cleanup_days = config_mgr.get_cleanup_days()
-    cleanup_results = cleanup_on_startup(project_root, cleanup_days)
+    cleanup_paths: set[str] = set(config_mgr.list_project_configs().keys())
+    prefs = config_mgr.load_preferences()
+    if prefs and prefs.get("last_project_path"):
+        cleanup_paths.add(prefs["last_project_path"])
+    project_dirs = [Path(p) for p in cleanup_paths if Path(p).is_dir()]
+    cleanup_results = cleanup_on_startup(project_dirs, cleanup_days)
     if cleanup_results:
         total = sum(len(items) for items in cleanup_results.values())
         print(f"Cleaned up {total} old files/directories (>{cleanup_days} days old)")
@@ -410,7 +433,7 @@ def main() -> int:
                     main_password = config_mgr.verify_main_password()
 
             run_server(
-                host=args.api_host,
+                host=args.api_host or "0.0.0.0",
                 port=args.api_port,
                 tunnel=True,
             )
@@ -420,7 +443,7 @@ def main() -> int:
         # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
             run_server(
-                host=args.api_host,
+                host=args.api_host or "0.0.0.0",
                 port=args.api_port,
                 tunnel=args.tunnel,
             )
@@ -455,12 +478,11 @@ def main() -> int:
         # Run UI with optional local server (--server-url skips local server)
         run_unified(
             main_password,
-            ui_port=args.port,
             api_port=args.api_port,
-            dev_mode=args.dev,
             ui_mode=ui_mode,
             server_url=server_url,
             tunnel=args.tunnel,
+            api_host=args.api_host or "127.0.0.1",
         )
 
         return 0

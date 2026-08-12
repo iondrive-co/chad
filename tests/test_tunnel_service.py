@@ -149,7 +149,13 @@ class TestTunnelEndpoints:
         data = resp.json()
         assert "running" in data
 
-        resp = self.client.post("/api/v1/tunnel/stop")
+        # Starting a tunnel publishes the server, so it must now require auth
+        token = data["token"]
+        assert token, "start must mint and return an auth token"
+        assert self.client.post("/api/v1/tunnel/stop").status_code == 401
+
+        auth = {"Authorization": f"Bearer {token}"}
+        resp = self.client.post("/api/v1/tunnel/stop", headers=auth)
         assert resp.status_code == 200
         data = resp.json()
         assert data["running"] is False

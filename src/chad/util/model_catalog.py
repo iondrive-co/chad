@@ -162,6 +162,19 @@ class ModelCatalog:
 
         models: set[str] = set()
 
+        # Guard: the account must belong to this provider. ConfigManager
+        # exposes list_accounts() as a name->provider dict; API clients
+        # return account objects. (ConfigManager.get_account requires a
+        # password, so the object path below never worked for it.)
+        try:
+            accounts = self.api_client.list_accounts()
+            if isinstance(accounts, dict):
+                acct_provider = accounts.get(account_name)
+                if acct_provider and str(acct_provider).strip() != provider:
+                    return set()
+        except Exception:
+            pass
+
         # Primary: model stored on the account object (used throughout the UI)
         try:
             account = self.api_client.get_account(account_name)
@@ -335,9 +348,10 @@ class ModelCatalog:
                     dest_path = dest_dir / rel_path
                     sync_file_if_missing(src_path, dest_path)
 
-        # Only sync auth.json if the isolated home doesn't have one yet
-        # This prevents overwriting account-specific credentials
-        sync_file_if_missing(real_home / "auth.json", isolated_home / "auth.json")
+        # NEVER sync auth.json: copying the real home's credentials into an
+        # isolated account home makes a never-logged-in account impersonate
+        # the real login (is_logged_in reports ready, CLI calls bill the
+        # wrong account). Model/config discovery only needs config + sessions.
         sync_file_if_missing(real_home / "config.toml", isolated_home / "config.toml")
         if (real_home / "sessions").exists():
             sync_tree_if_missing(real_home / "sessions", isolated_home / "sessions")

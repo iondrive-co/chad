@@ -51,6 +51,104 @@ class TestProviderLoginUtil:
         auth.write_text(json.dumps({"tokens": {}}), encoding="utf-8")
         assert provider_login.is_logged_in("openai", "acct") is False
 
+    def test_is_logged_in_gemini_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Gemini login state comes from the per-account home, never ~/.gemini."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        # A global ~/.gemini login must NOT make accounts appear logged in.
+        global_creds = tmp_path / ".gemini" / "oauth_creds.json"
+        global_creds.parent.mkdir(parents=True, exist_ok=True)
+        global_creds.write_text("{}", encoding="utf-8")
+        assert provider_login.is_logged_in("gemini", "acct") is False
+
+        creds = tmp_path / ".chad" / "gemini-homes" / "acct" / ".gemini" / "oauth_creds.json"
+        creds.parent.mkdir(parents=True, exist_ok=True)
+        creds.write_text("{}", encoding="utf-8")
+        assert provider_login.is_logged_in("gemini", "acct") is True
+        assert provider_login.is_logged_in("gemini", "other") is False
+
+    def test_is_logged_in_qwen_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Qwen login state comes from the per-account home, never ~/.qwen."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        global_creds = tmp_path / ".qwen" / "oauth_creds.json"
+        global_creds.parent.mkdir(parents=True, exist_ok=True)
+        global_creds.write_text("{}", encoding="utf-8")
+        assert provider_login.is_logged_in("qwen", "acct") is False
+
+        creds = tmp_path / ".chad" / "qwen-homes" / "acct" / ".qwen" / "oauth_creds.json"
+        creds.parent.mkdir(parents=True, exist_ok=True)
+        creds.write_text("{}", encoding="utf-8")
+        assert provider_login.is_logged_in("qwen", "acct") is True
+        assert provider_login.is_logged_in("qwen", "other") is False
+
+    def test_is_logged_in_mistral_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Mistral login state comes from the per-account VIBE_HOME, never ~/.vibe."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        global_env = tmp_path / ".vibe" / ".env"
+        global_env.parent.mkdir(parents=True, exist_ok=True)
+        global_env.write_text("MISTRAL_API_KEY='global-key'\n", encoding="utf-8")
+        assert provider_login.is_logged_in("mistral", "acct") is False
+
+        acct_env = tmp_path / ".chad" / "vibe-homes" / "acct" / ".env"
+        acct_env.parent.mkdir(parents=True, exist_ok=True)
+        acct_env.write_text("MISTRAL_API_KEY='acct-key'\n", encoding="utf-8")
+        assert provider_login.is_logged_in("mistral", "acct") is True
+        assert provider_login.is_logged_in("mistral", "other") is False
+
+    def test_tty_login_gemini_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Gemini login runs with GEMINI_CLI_HOME so creds land in the account home."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        cmd, extra_env = provider_login._tty_login_command("gemini", "acct", "/fake/gemini")
+        assert cmd == ["/fake/gemini", "-y"]
+        expected = tmp_path / ".chad" / "gemini-homes" / "acct"
+        assert extra_env["GEMINI_CLI_HOME"] == str(expected)
+        assert expected.is_dir()
+
+    def test_tty_login_qwen_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Qwen login runs with HOME redirected so creds land in the account home."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        cmd, extra_env = provider_login._tty_login_command("qwen", "acct", "/fake/qwen")
+        assert cmd == ["/fake/qwen", "-y"]
+        expected = tmp_path / ".chad" / "qwen-homes" / "acct"
+        assert extra_env["HOME"] == str(expected)
+        assert expected.is_dir()
+
+    def test_run_login_mistral_writes_isolated_env(self, tmp_path, monkeypatch):
+        """The Mistral API key is written to the account's VIBE_HOME, not ~/.vibe."""
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, "/fake/vibe")
+        )
+        ok, msg = provider_login.run_login("mistral", "acct", api_key="sk-test")
+        assert ok is True
+        env_file = tmp_path / ".chad" / "vibe-homes" / "acct" / ".env"
+        assert env_file.exists()
+        assert "sk-test" in env_file.read_text(encoding="utf-8")
+        assert not (tmp_path / ".vibe").exists()
+        # Only this account is now logged in.
+        assert provider_login.is_logged_in("mistral", "acct") is True
+        assert provider_login.is_logged_in("mistral", "other") is False
+
     def test_ensure_cli_delegates_to_installer(self, monkeypatch):
         from chad.util import provider_login
         from chad.util.installer import AIToolInstaller
@@ -236,6 +334,22 @@ class TestLocalProvider:
         assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:4242/v1"
         assert env["OPENAI_MODEL"] == "pinned"
 
+    def test_runtime_env_isolates_account_home(self, tmp_path, monkeypatch):
+        """Local accounts get the same per-account qwen HOME isolation as qwen."""
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+        from chad.util.config_manager import ConfigManager
+
+        ConfigManager().set_local_endpoint("http://127.0.0.1:4242")
+        provider = LocalProvider(
+            ModelConfig(provider="local", model_name="pinned", account_name="my-local")
+        )
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env = provider.runtime_env()
+        assert env["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "my-local")
+        # build_local_env must still apply on top of the isolated home
+        assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:4242/v1"
+        assert env["OPENAI_MODEL"] == "pinned"
+
     def test_local_endpoint_default(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
         from chad.util.config_manager import ConfigManager
@@ -257,6 +371,32 @@ class TestLocalProvider:
 
         monkeypatch.setattr(provider_login, "_resolve_cli", lambda p: "/bin/qwen")
         assert provider_login.is_logged_in("local", "my-local") is True
+
+
+class TestQwenCodeProviderIsolation:
+    """Per-account credential isolation for the Qwen Code CLI."""
+
+    def test_runtime_env_isolates_account_home(self, tmp_path):
+        """Each Qwen account runs with HOME pointed at its own qwen home."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env_a = QwenCodeProvider(
+                ModelConfig(provider="qwen", model_name="default", account_name="acct-a")
+            ).runtime_env()
+            env_b = QwenCodeProvider(
+                ModelConfig(provider="qwen", model_name="default", account_name="acct-b")
+            ).runtime_env()
+
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
+
+    def test_runtime_env_without_account_uses_real_home(self, tmp_path):
+        """Without an account name the CLI keeps its default home."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env = QwenCodeProvider(
+                ModelConfig(provider="qwen", model_name="default")
+            ).runtime_env()
+        assert env["HOME"] == str(tmp_path)
 
 
 def test_codex_start_session_ensures_cli_installed(monkeypatch, tmp_path):
@@ -2076,6 +2216,28 @@ class TestOpenAICodexProviderIntegration:
 class TestMistralVibeProvider:
     """Test cases for MistralVibeProvider."""
 
+    def test_get_env_isolates_account_home(self, tmp_path):
+        """Each Mistral account runs with its own VIBE_HOME."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env_a = MistralVibeProvider(
+                ModelConfig(provider="mistral", model_name="default", account_name="acct-a")
+            )._get_env()
+            env_b = MistralVibeProvider(
+                ModelConfig(provider="mistral", model_name="default", account_name="acct-b")
+            )._get_env()
+
+        assert env_a["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-a")
+        assert env_b["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-b")
+        assert env_a["VIBE_HOME"] != env_b["VIBE_HOME"]
+
+    def test_get_env_without_account_uses_global_vibe_dir(self, tmp_path):
+        """Without an account name the CLI keeps the default ~/.vibe."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env = MistralVibeProvider(
+                ModelConfig(provider="mistral", model_name="default")
+            )._get_env()
+        assert env["VIBE_HOME"] == str(tmp_path / ".vibe")
+
     @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/vibe"))
     def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="mistral", model_name="default")
@@ -2221,6 +2383,28 @@ class TestKimiCodeProvider:
 
 class TestGeminiCodeAssistProvider:
     """Tests for GeminiCodeAssistProvider."""
+
+    def test_get_env_isolates_account_home(self, tmp_path):
+        """Each Gemini account runs with its own GEMINI_CLI_HOME."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env_a = GeminiCodeAssistProvider(
+                ModelConfig(provider="gemini", model_name="default", account_name="acct-a")
+            )._get_env()
+            env_b = GeminiCodeAssistProvider(
+                ModelConfig(provider="gemini", model_name="default", account_name="acct-b")
+            )._get_env()
+
+        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
+        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
+        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+
+    def test_get_env_without_account_uses_real_home(self, tmp_path):
+        """Without an account name the CLI keeps its default home."""
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            env = GeminiCodeAssistProvider(
+                ModelConfig(provider="gemini", model_name="default")
+            )._get_env()
+        assert env["GEMINI_CLI_HOME"] == str(tmp_path)
 
     def test_send_message_includes_system_prompt(self):
         provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
@@ -3013,9 +3197,11 @@ class TestUsagePercentageCalculation:
             provider._usage_data_last_success -= provider._USAGE_CACHE_STALE_TTL + 1
             with patch("requests.get", side_effect=mock_failure):
                 pct = provider.get_weekly_usage_percentage()
-            # Cache should be expired → returns 0.0 (credentials exist but no data)
-            assert pct == pytest.approx(0.0), (
-                "Prolonged API failure should expire cache so await_reset can resume"
+            # Cache expired → unknown. Reporting 0% here would have claimed the
+            # account was idle; an await_reset wait handles the None itself
+            # (see _UNKNOWN_USAGE_POLLS_BEFORE_RESUME) rather than being lied to.
+            assert pct is None, (
+                "Prolonged API failure should expire the cache rather than invent a number"
             )
 
     def test_claude_provider_usage_reset_eta_format(self, tmp_path):
@@ -3075,6 +3261,56 @@ class TestUsagePercentageCalculation:
             result = _get_gemini_usage_percentage("")
             assert result is None
 
+    def test_gemini_usage_gated_on_isolated_account_home(self, tmp_path):
+        """A named account's usage is gated on ITS creds, not the global ~/.gemini."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            # Global creds must not make the account look logged in
+            assert _get_gemini_usage_percentage("acct") is None
+
+            acct_dir = tmp_path / ".chad" / "gemini-homes" / "acct" / ".gemini"
+            acct_dir.mkdir(parents=True)
+            (acct_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+            assert _get_gemini_usage_percentage("acct") == 0.0
+
+    def test_qwen_usage_gated_on_isolated_account_home(self, tmp_path):
+        """A named account's usage is gated on ITS creds, not the global ~/.qwen."""
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            assert _get_qwen_usage_percentage("acct") is None
+
+            acct_dir = tmp_path / ".chad" / "qwen-homes" / "acct" / ".qwen"
+            acct_dir.mkdir(parents=True)
+            (acct_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+            assert _get_qwen_usage_percentage("acct") == 0.0
+
+    def test_mistral_usage_gated_on_isolated_account_home(self, tmp_path, monkeypatch):
+        """A named account's usage is gated on ITS VIBE_HOME, not the global ~/.vibe."""
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY='global-key'\n")
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            assert _get_mistral_usage_percentage("acct") is None
+
+            acct_dir = tmp_path / ".chad" / "vibe-homes" / "acct"
+            acct_dir.mkdir(parents=True)
+            (acct_dir / ".env").write_text("MISTRAL_API_KEY='acct-key'\n")
+            assert _get_mistral_usage_percentage("acct") == 0.0
+
     def test_gemini_usage_logged_in_no_usage(self, tmp_path):
         """Gemini returns 0% when logged in but no usage JSONL exists."""
         from chad.util.providers import _get_gemini_usage_percentage
@@ -3113,8 +3349,8 @@ class TestUsagePercentageCalculation:
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
-            # 2 requests today out of 100 limit = 2.0%
-            assert result == pytest.approx(2.0, abs=0.1)
+            # 2 requests today out of the 2000/day free-tier limit = 0.1%
+            assert result == pytest.approx(0.1, abs=0.01)
 
     def test_append_gemini_usage_writes_jsonl(self, tmp_path):
         """_append_gemini_usage writes a JSONL record."""
@@ -3257,8 +3493,8 @@ class TestUsagePercentageCalculation:
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
-            # 1 valid request out of 100 limit = 1.0%
-            assert result == pytest.approx(1.0, abs=0.1)
+            # 1 valid request out of the 2000/day free-tier limit = 0.05%
+            assert result == pytest.approx(0.05, abs=0.01)
 
     def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
         """Qwen gracefully handles malformed jsonl lines."""

@@ -65,12 +65,15 @@ def _repo_ui_is_stale(project_root: Path) -> bool:
     many times chad restarted.
     """
     ui_src = project_root / "ui" / "src"
+    client_src = project_root / "client" / "src"
     ui_dist = project_root / "ui" / "dist" / "index.html"
     if not ui_src.is_dir() or not ui_dist.is_file():
         return False
     from chad.util.ui_build import _is_stale
 
-    return _is_stale(ui_src, ui_dist)
+    # The chad-client TS source is bundled into the UI, so a newer file in
+    # client/src also makes ui/dist stale.
+    return _is_stale([ui_src, client_src], ui_dist)
 
 
 def _package_ui_paths() -> tuple[Path | None, Path | None]:
@@ -127,6 +130,29 @@ def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
     return _package_ui_paths()
 
 
+def start_provider_cli_updates() -> None:
+    """Refresh stale provider CLIs in the background, once per server start.
+
+    Provider CLIs are installed once and then never touched, so they silently
+    fall months behind — an old Claude Code build spent three minutes retrying a
+    dead OAuth refresh where the current one reports "log in again" in a second.
+    Runs off the request path, at startup, before any task can be using them.
+    """
+    import threading
+
+    from chad.util.installer import AIToolInstaller
+
+    def run() -> None:
+        try:
+            updated = AIToolInstaller().update_stale_tools()
+        except Exception:
+            return  # A failed update must never stop the server from starting
+        if updated:
+            print(f"Updated provider CLI: {', '.join(sorted(updated))}")
+
+    threading.Thread(target=run, daemon=True, name="provider-cli-update").start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""
@@ -180,16 +206,20 @@ def create_app(
         # Default: allow all origins for development
         cors_origins = ["*"]
 
-    # Add auth middleware before CORS so it runs after CORS (middleware order is LIFO)
-    if auth_token:
-        from .auth import BearerAuthMiddleware
-        app.add_middleware(BearerAuthMiddleware, token=auth_token)
+    # Add auth middleware before CORS so it runs after CORS (middleware order
+    # is LIFO). Always installed: it no-ops while app.state.auth_token is None
+    # and starts enforcing the moment a tunnel mints one.
+    from .auth import BearerAuthMiddleware
+    app.add_middleware(BearerAuthMiddleware)
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        # Auth uses bearer headers, never cookies — and wildcard origins with
+        # credentials enabled would let any web page make credentialed
+        # requests against the local server.
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

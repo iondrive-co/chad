@@ -99,7 +99,7 @@ export type ProviderType =
   | "kimi"
   | "mock";
 
-export type RoleType = "CODING" | "VERIFICATION";
+export type RoleType = "CODING";
 
 export interface ProviderInfo {
   type: ProviderType;
@@ -157,6 +157,8 @@ export interface AccountUsage {
   session_reset_eta: string | null;
   weekly_reset_eta: string | null;
   usage_as_of: string | null;
+  /** No usable credentials — usage is unknown until the user logs in again. */
+  logged_out: boolean;
 }
 
 // ── Config types ──
@@ -194,6 +196,10 @@ export interface TunnelStatus {
   url: string | null;
   subdomain: string | null;
   error: string | null;
+  /** Auth token the tunnelled server now requires (returned by startTunnel). */
+  token?: string | null;
+  /** `subdomain:token`, for the connect field or QR code. */
+  pairing_code?: string | null;
 }
 
 export interface PreviewTunnelStatus {

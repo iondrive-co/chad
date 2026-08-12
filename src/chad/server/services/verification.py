@@ -94,41 +94,20 @@ def _run_automated_verification(
             return True, None
 
         if not verify_result.get("success", False):
+            # verify() returns {"success", "lint"/"test"/"tsc": {"passed", "output"}}
             issues: list[str] = []
-            failure_message = verify_result.get("message") or verify_result.get("error")
-            if failure_message:
-                issues.append(failure_message)
+            if error_msg:
+                issues.append(error_msg)
 
-            phases = verify_result.get("phases", {})
-
-            lint_phase = phases.get("lint", {})
-            if not lint_phase.get("success", True):
-                lint_issues = lint_phase.get("issues") or []
-                if lint_issues:
-                    joined = "\n".join(f"- {issue}" for issue in lint_issues[:5])
-                    issues.append(f"Flake8 errors:\n{joined}")
-                else:
-                    issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
-
-            pip_phase = phases.get("pip_check", {})
-            if not pip_phase.get("success", True):
-                pip_issues = pip_phase.get("issues") or []
-                if pip_issues:
-                    joined = "\n".join(f"- {issue}" for issue in pip_issues[:5])
-                    issues.append(f"Dependency issues:\n{joined}")
-                else:
-                    issues.append("Package dependency issues found")
-
-            test_phase = phases.get("tests", {})
-            if not test_phase.get("success", True):
-                failed_count = test_phase.get("failed", 0)
-                passed_count = test_phase.get("passed", 0)
-                output_lines = (test_phase.get("output") or "").strip().splitlines()
-                snippet = "\n".join(output_lines[-5:]) if output_lines else ""
-                summary = f"Tests failed ({failed_count} failed, {passed_count} passed)"
-                if snippet:
-                    summary += f":\n{snippet}"
-                issues.append(summary)
+            for phase_name, label in (("lint", "Flake8"), ("test", "Tests"), ("tsc", "TypeScript")):
+                phase = verify_result.get(phase_name) or {}
+                if phase and not phase.get("passed", True):
+                    output_lines = (phase.get("output") or "").strip().splitlines()
+                    snippet = "\n".join(output_lines[:10])
+                    summary = f"{label} failed"
+                    if snippet:
+                        summary += f":\n{snippet}"
+                    issues.append(summary)
 
             if not issues:
                 issues.append("Verification failed")
@@ -136,8 +115,18 @@ def _run_automated_verification(
             feedback = "Verification failed:\n" + "\n\n".join(issues)
             return False, feedback
     except Exception as e:
+        # Infrastructure failure (verify() itself crashed) — report it instead
+        # of silently passing, so a broken lint/test setup can't masquerade
+        # as a green verification.
         if on_activity:
             on_activity("system", f"Warning: Verification could not run: {str(e)}")
+        _emit_milestone(
+            emit,
+            "verification_automated",
+            f"Automated verification could not run: {e}",
+            {"attempt": attempt},
+        )
+        return False, f"Automated verification could not run: {e}"
 
     return True, None
 

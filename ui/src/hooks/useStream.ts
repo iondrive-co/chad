@@ -33,6 +33,11 @@ export function useStream(
   const completedRef = useRef(false);
   const sinceSeqRef = useRef(sinceSeq);
   sinceSeqRef.current = sinceSeq;
+  // Seqs already applied to state, so reconnects/replays that re-deliver a
+  // message can't duplicate it in the transcript. Terminal chunks and events
+  // are tracked separately in case their seq spaces ever overlap.
+  const seenTerminalSeqsRef = useRef<Set<number>>(new Set());
+  const seenEventSeqsRef = useRef<Set<number>>(new Set());
 
   const decodeTerminal = useCallback((data: string, isText: boolean): string => {
     const normalize = (text: string) => text.replace(/\r\n?/g, "\n");
@@ -57,6 +62,8 @@ export function useStream(
     setCompleted(false);
     setError(null);
     completedRef.current = false;
+    seenTerminalSeqsRef.current.clear();
+    seenEventSeqsRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -74,9 +81,17 @@ export function useStream(
         const raw = msg.data.data as string | undefined;
         const isText = Boolean(msg.data.text);
         if (!raw) return;
+        if (seq !== null) {
+          if (seenTerminalSeqsRef.current.has(seq)) return;
+          seenTerminalSeqsRef.current.add(seq);
+        }
         const decoded = decodeTerminal(raw, isText);
         setTerminalChunks((prev) => [...prev, { text: decoded, seq }]);
       } else if (msg.type === "event") {
+        if (seq !== null) {
+          if (seenEventSeqsRef.current.has(seq)) return;
+          seenEventSeqsRef.current.add(seq);
+        }
         const event: StreamEvent = { event_type: "event", data: msg.data, seq };
         setEvents((prev) => [...prev, event]);
       } else if (msg.type === "complete") {

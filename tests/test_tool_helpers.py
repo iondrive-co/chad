@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import json
 import time
 
@@ -294,7 +295,9 @@ class TestCaptureProviderCommand:
         assert isinstance(result, CapturedCommand)
         assert isinstance(result.cmd, list)
         assert len(result.cmd) > 0
-        assert result.cmd[0] == "python3"
+        # Mock agent runs under the current interpreter — `python3` broke
+        # Windows and venv isolation
+        assert result.cmd[0] == sys.executable
 
     def test_anthropic_provider_includes_stream_json(self, tmp_path):
         result = capture_provider_command(

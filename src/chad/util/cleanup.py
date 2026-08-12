@@ -42,6 +42,13 @@ def cleanup_old_worktrees(project_path: Path, days: int) -> list[str]:
             continue
         task_id = worktree_dir.name
         if _is_older_than_days(worktree_dir, days):
+            # Never delete unmerged work — a worktree the user explicitly
+            # kept ("Keep worktree for later") still holds their changes.
+            try:
+                if manager.has_changes(task_id):
+                    continue
+            except Exception:
+                continue
             if manager.delete_worktree(task_id):
                 cleaned.append(task_id)
 
@@ -157,11 +164,12 @@ def cleanup_temp_files() -> list[str]:
     return cleaned
 
 
-def cleanup_on_startup(project_path: Path, days: int) -> dict[str, list[str]]:
+def cleanup_on_startup(project_path: Path | list[Path], days: int) -> dict[str, list[str]]:
     """Run all cleanup tasks on startup.
 
     Args:
-        project_path: Path to the project root
+        project_path: Project root (or list of project roots) whose old
+            worktrees should be cleaned
         days: Number of days after which to clean up old files
 
     Returns:
@@ -169,7 +177,10 @@ def cleanup_on_startup(project_path: Path, days: int) -> dict[str, list[str]]:
     """
     results = {}
 
-    worktrees = cleanup_old_worktrees(project_path, days)
+    paths = project_path if isinstance(project_path, list) else [project_path]
+    worktrees: list[str] = []
+    for path in paths:
+        worktrees.extend(cleanup_old_worktrees(path, days))
     if worktrees:
         results["worktrees"] = worktrees
 

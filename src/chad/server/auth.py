@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import threading
 import time
 
 from fastapi import Request, WebSocket
@@ -17,21 +18,59 @@ def generate_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+class _TicketNonceStore:
+    """Records redeemed ticket nonces so a ticket can only be used once.
+
+    Tickets are signed and short-lived, but without this a leaked ticket
+    (it travels in a URL, so it lands in logs and history) could be replayed
+    for the rest of its TTL. Entries are dropped once the ticket they belong
+    to has expired, so the store stays bounded by the ticket TTL.
+    """
+
+    def __init__(self) -> None:
+        self._redeemed: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def redeem(self, nonce: str, expires_at: int) -> bool:
+        """Mark a nonce as used. Returns False if it was already redeemed."""
+        now = int(time.time())
+        with self._lock:
+            for used_nonce, used_exp in list(self._redeemed.items()):
+                if used_exp < now:
+                    del self._redeemed[used_nonce]
+            if nonce in self._redeemed:
+                return False
+            self._redeemed[nonce] = expires_at
+            return True
+
+    def clear(self) -> None:
+        with self._lock:
+            self._redeemed.clear()
+
+
+_ticket_nonces = _TicketNonceStore()
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Middleware that requires Bearer token on /api/ routes.
+
+    The token is read from ``app.state.auth_token`` on every request rather
+    than captured at construction, so enabling remote access at runtime (the
+    tunnel endpoints mint a token when none exists) immediately starts
+    enforcing auth. When that value is None the middleware is a no-op.
 
     Skips auth only for explicitly public routes:
     - GET /status (health check)
     - Static UI routes (/, /assets/)
     """
 
-    def __init__(self, app, token: str) -> None:
-        super().__init__(app)
-        self.token = token
-
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
+        token = getattr(request.app.state, "auth_token", None)
+        if not token:
+            return await call_next(request)
+
         path = request.url.path
 
         # Always pass through OPTIONS — CORS preflight requests never carry
@@ -43,9 +82,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if path == "/status" or path == "/" or path == "/assets" or path.startswith("/assets/"):
             return await call_next(request)
 
-        # Check Authorization header
+        # Check Authorization header (constant-time compare)
         auth_header = request.headers.get("authorization", "")
-        if auth_header == f"Bearer {self.token}":
+        if hmac.compare_digest(auth_header, f"Bearer {token}"):
             return await call_next(request)
 
         return JSONResponse(
@@ -86,14 +125,19 @@ def validate_browser_ticket(
     ticket: str,
     purpose: str,
     resource: str,
+    redeem: bool = True,
 ) -> bool:
-    """Validate a signed browser ticket."""
+    """Validate a signed browser ticket.
+
+    Args:
+        redeem: When True (the default) the ticket's nonce is consumed, so a
+            second use of the same ticket fails even inside its TTL.
+    """
     try:
         encoded_payload, encoded_sig = ticket.split(".", 1)
         payload = _urlsafe_b64decode(encoded_payload).decode("utf-8")
         supplied_sig = _urlsafe_b64decode(encoded_sig)
         ticket_purpose, ticket_resource, expires_at, nonce = payload.split(":", 3)
-        del nonce
     except Exception:
         return False
 
@@ -101,9 +145,10 @@ def validate_browser_ticket(
         return False
 
     try:
-        if int(expires_at) < int(time.time()):
-            return False
+        expiry = int(expires_at)
     except ValueError:
+        return False
+    if expiry < int(time.time()):
         return False
 
     expected_sig = hmac.new(
@@ -111,7 +156,14 @@ def validate_browser_ticket(
         payload.encode("utf-8"),
         hashlib.sha256,
     ).digest()
-    return hmac.compare_digest(expected_sig, supplied_sig)
+    if not hmac.compare_digest(expected_sig, supplied_sig):
+        return False
+
+    # Signature is good — burn the nonce last so an invalid ticket can't be
+    # used to evict a pending valid one.
+    if redeem:
+        return _ticket_nonces.redeem(nonce, expiry)
+    return True
 
 
 def check_websocket_ticket(websocket: WebSocket, token: str, session_id: str) -> bool:

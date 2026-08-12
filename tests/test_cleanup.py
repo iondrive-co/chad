@@ -76,6 +76,7 @@ class TestCleanupOldWorktrees:
         with patch("chad.util.git_worktree.GitWorktreeManager") as mock_manager_cls:
             mock_manager = MagicMock()
             mock_manager.delete_worktree.return_value = True
+            mock_manager.has_changes.return_value = False
             mock_manager_cls.return_value = mock_manager
 
             result = cleanup_old_worktrees(tmp_path, 3)
@@ -300,3 +301,30 @@ class TestConfigManagerCleanupDays:
             mgr.set_cleanup_days(0)
         with pytest.raises(ValueError):
             mgr.set_cleanup_days(-1)
+
+
+class TestCleanupKeepsUnmergedWork:
+    """Retention cleanup must never delete worktrees with unmerged changes."""
+
+    def test_old_worktree_with_changes_is_kept(self, tmp_path):
+        import os
+        import time as time_mod
+        from unittest.mock import MagicMock, patch
+
+        worktree_base = tmp_path / ".chad-worktrees"
+        worktree_base.mkdir()
+        kept = worktree_base / "keepme01"
+        kept.mkdir()
+        old_time = time_mod.time() - (10 * 24 * 60 * 60)
+        os.utime(kept, (old_time, old_time))
+
+        with patch("chad.util.git_worktree.GitWorktreeManager") as mock_manager_cls:
+            mock_manager = MagicMock()
+            mock_manager.has_changes.return_value = True
+            mock_manager_cls.return_value = mock_manager
+
+            result = cleanup_old_worktrees(tmp_path, 3)
+
+        assert result == []
+        mock_manager.delete_worktree.assert_not_called()
+        assert kept.exists()

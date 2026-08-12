@@ -24,6 +24,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   const [previewPortMode, setPreviewPortMode] = useState<"disabled" | "auto" | "manual">("disabled");
   const [previewPort, setPreviewPort] = useState("");
   const [previewCommand, setPreviewCommand] = useState("");
+  const [previewCommandError, setPreviewCommandError] = useState<string | null>(null);
   const [preferredCodingAgent, setPreferredCodingAgent] = useState<Account | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -43,6 +44,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
+    setTimeout(() => setStatus(null), 3000);
   }, []);
 
   // Load projects and pre-fill default path on connect
@@ -81,6 +83,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       setPreviewPortMode(s.preview_port_mode || "disabled");
       setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
       setPreviewCommand(s.preview_command || "");
+      setPreviewCommandError(null);
       // Load preferred coding agent
       if (s.preferred_coding_agent) {
         const account = accountsResult.accounts.find((a) => a.name === s.preferred_coding_agent);
@@ -117,7 +120,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   }, [api, selectedProject, connected]);
 
   const saveProjectSettings = useCallback(async (
-    overrides?: { preferredCodingAgent?: Account | null; codingAgent?: Account | null },
+    overrides?: {
+      preferredCodingAgent?: Account | null;
+      codingAgent?: Account | null;
+      previewPortMode?: "disabled" | "auto" | "manual";
+      instructionsPaths?: string[];
+    },
   ) => {
     if (!selectedProject) return null;
     const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
@@ -125,8 +133,8 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       project_path: selectedProject,
       lint_command: lintCommand || null,
       test_command: testCommand || null,
-      instructions_paths: instructionsPaths.filter(p => p.trim()),
-      preview_port_mode: previewPortMode,
+      instructions_paths: (overrides?.instructionsPaths ?? instructionsPaths).filter(p => p.trim()),
+      preview_port_mode: overrides?.previewPortMode ?? previewPortMode,
       preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       preview_command: previewCommand || null,
       preferred_coding_agent: (overrides?.preferredCodingAgent ?? preferredCodingAgent)?.name || null,
@@ -219,15 +227,40 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
     }
   }, [api, selectedProject, loadProjects, flash, onProjectsChange]);
 
-  const handleSave = useCallback(async () => {
+  const persistSettings = useCallback(async (
+    overrides?: Parameters<typeof saveProjectSettings>[0],
+  ) => {
+    if (!selectedProject) return;
+    setSaving(true);
+    try {
+      await saveProjectSettings(overrides);
+      flash("Saved");
+      onProjectsChange?.();
+    } catch (err) {
+      // Show the server's reason — a rejected preview command blocks the whole
+      // save, and "Error saving" would leave the user with no idea which field.
+      flash(err instanceof Error ? err.message : "Error saving");
+    } finally {
+      setSaving(false);
+    }
+  }, [selectedProject, saveProjectSettings, flash, onProjectsChange]);
+
+  const handleSave = useCallback(() => { void persistSettings(); }, [persistSettings]);
+
+  // The server rejects a preview command it could not spawn without a shell.
+  // Its explanation is multi-sentence and actionable, so it goes inline under
+  // the field and stays until the command is edited — the 3s flash used for
+  // "Saved" would be missed.
+  const handlePreviewCommandBlur = useCallback(async () => {
     if (!selectedProject) return;
     setSaving(true);
     try {
       await saveProjectSettings();
+      setPreviewCommandError(null);
       flash("Saved");
       onProjectsChange?.();
-    } catch {
-      flash("Error saving");
+    } catch (err) {
+      setPreviewCommandError(err instanceof Error ? err.message : "Error saving");
     } finally {
       setSaving(false);
     }
@@ -275,6 +308,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
             setPreviewPortMode(updated.preview_port_mode || "disabled");
             setPreviewPort(updated.preview_port != null ? String(updated.preview_port) : "");
             setPreviewCommand(updated.preview_command || "");
+            setPreviewCommandError(null);
             flash("Autoconfigured");
           } else {
             flash(result.error || "Autoconfigure failed");
@@ -315,8 +349,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
   }, []);
 
   const removeInstructionsPath = useCallback((index: number) => {
-    setInstructionsPaths(prev => prev.filter((_, i) => i !== index));
-  }, []);
+    // Pass the updated list explicitly so the save doesn't use the stale
+    // closure value of instructionsPaths.
+    const next = instructionsPaths.filter((_, i) => i !== index);
+    setInstructionsPaths(next);
+    void persistSettings({ instructionsPaths: next });
+  }, [instructionsPaths, persistSettings]);
 
   const updateInstructionsPath = useCallback((index: number, value: string) => {
     setInstructionsPaths(prev => prev.map((p, i) => i === index ? value : p));
@@ -429,6 +467,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                         selected={codingAgent}
                         onSelect={handleAutoconfigureAgentChange}
                         placeholder="Autoconfigure agent"
+                        autoSelect={false}
                       />
                       <button
                         className="autoconfigure-btn"
@@ -470,8 +509,11 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                     <select
                       value={previewPortMode}
                       onChange={(e) => {
-                        setPreviewPortMode(e.target.value as "disabled" | "auto" | "manual");
-                        setTimeout(handleSave, 0);
+                        const mode = e.target.value as "disabled" | "auto" | "manual";
+                        setPreviewPortMode(mode);
+                        // Save with the new mode directly — state updates are
+                        // async, so a plain handleSave would persist the old one.
+                        void persistSettings({ previewPortMode: mode });
                       }}
                     >
                       <option value="disabled">Disabled</option>
@@ -487,11 +529,18 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                       <input
                         type="text"
                         value={previewCommand}
-                        onChange={(e) => setPreviewCommand(e.target.value)}
-                        onBlur={handleSave}
+                        onChange={(e) => {
+                          setPreviewCommand(e.target.value);
+                          setPreviewCommandError(null);
+                        }}
+                        onBlur={handlePreviewCommandBlur}
                         placeholder="e.g., npm run dev"
+                        aria-invalid={previewCommandError ? true : undefined}
                       />
                     </label>
+                    {previewCommandError && (
+                      <div className="preview-command-error">{previewCommandError}</div>
+                    )}
                     {previewPortMode === "manual" && (
                       <label>
                         Preview Port
@@ -565,6 +614,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                       selected={codingAgent}
                       onSelect={handleAutoconfigureAgentChange}
                       placeholder="Autoconfigure agent"
+                      autoSelect={false}
                     />
                     <button
                       className="autoconfigure-btn"

@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import json
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -20,47 +19,6 @@ class WebSocketTicketResponse(BaseModel):
 
     ticket: str = Field(description="Signed ticket for the session WebSocket")
     expires_in: int = Field(description="Lifetime of the ticket in seconds")
-
-
-class ConnectionManager:
-    """Manages WebSocket connections for streaming updates."""
-
-    def __init__(self):
-        # Map session_id -> list of websockets
-        self.active_connections: dict[str, list[WebSocket]] = {}
-
-    async def connect(self, websocket: WebSocket, session_id: str):
-        """Accept a new WebSocket connection for a session."""
-        await websocket.accept()
-        if session_id not in self.active_connections:
-            self.active_connections[session_id] = []
-        self.active_connections[session_id].append(websocket)
-
-    def disconnect(self, websocket: WebSocket, session_id: str):
-        """Remove a WebSocket connection."""
-        if session_id in self.active_connections:
-            if websocket in self.active_connections[session_id]:
-                self.active_connections[session_id].remove(websocket)
-            if not self.active_connections[session_id]:
-                del self.active_connections[session_id]
-
-    async def send_to_session(self, session_id: str, message: dict[str, Any]):
-        """Send a message to all connections for a session."""
-        if session_id not in self.active_connections:
-            return
-        dead_connections = []
-        for websocket in self.active_connections[session_id]:
-            try:
-                await websocket.send_json(message)
-            except Exception:
-                dead_connections.append(websocket)
-        # Clean up dead connections
-        for websocket in dead_connections:
-            self.disconnect(websocket, session_id)
-
-
-# Global connection manager
-manager = ConnectionManager()
 
 
 @router.post("/ws-ticket/{session_id}", response_model=WebSocketTicketResponse)
@@ -130,8 +88,7 @@ async def websocket_endpoint(
         await websocket.close(code=4004, reason=f"Session {session_id} not found")
         return
 
-    await manager.connect(websocket, session_id)
-    print(f"WebSocket client connected to session {session_id}")
+    await websocket.accept()
 
     try:
         pty_service = get_pty_stream_service()
@@ -166,7 +123,10 @@ async def websocket_endpoint(
                         "session_id": session_id,
                         "data": {**event.data, "seq": event.seq},
                     }
-                    await manager.send_to_session(session_id, message)
+                    # Send only to THIS connection. Broadcasting to every
+                    # socket on the session made each of N open tabs receive
+                    # N copies of every event.
+                    await websocket.send_json(message)
 
                     if event.type in ("complete", "error"):
                         break
@@ -264,6 +224,3 @@ async def websocket_endpoint(
 
     except WebSocketDisconnect:
         pass
-    finally:
-        manager.disconnect(websocket, session_id)
-        print(f"WebSocket client disconnected from session {session_id}")

@@ -14,6 +14,12 @@ from chad.util.event_log import EventLog, MilestoneEvent, ProviderSwitchedEvent,
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.util.prompts import extract_coding_summary, CodingSummary
 
+# Consecutive 10s polls with no usage reading before an await_reset wait gives up
+# (~5 minutes). The provider only reports "unknown" after its own cache has gone
+# stale, so by this point the number has been unavailable for well over half an
+# hour and the session must not stay paused on it forever.
+_UNKNOWN_USAGE_POLLS_BEFORE_RESUME = 30
+
 
 class SessionEventLoop:
     """Per-session event loop that orchestrates coding → verification → revision.
@@ -99,11 +105,12 @@ class SessionEventLoop:
         # Slack threading: first Slack message ts is reused so all milestones stay in one thread
         self._slack_thread_ts: str | None = None
 
-        # Slack threading: first Slack message ts is reused so all milestones stay in one thread
-        self._slack_thread_ts: str | None = None
-
         # Accumulated output from all phases
         self.accumulated_output = ""
+
+        # Outcome of the verification loop: None = not run/aborted,
+        # True = passed, False = exhausted all attempts without passing.
+        self.verification_passed: bool | None = None
 
     # Map event types to (usage_fn_attr, display_label)
     _EVENT_USAGE_MAP = {
@@ -329,6 +336,10 @@ class SessionEventLoop:
         "analyzing ",
     )
     _NARRATION_SUBSTRINGS = ("let me ", "let's ", "lets ")
+    # A finding longer than this is truncated, never dropped. Dropping it meant
+    # the most detailed discoveries — the valuable ones — were the ones the chat
+    # panel silently lost, leaving whole sessions with no Discovery bubbles.
+    _MAX_EXPLORATION_SUMMARY = 400
 
     def _sanitize_exploration_text(self, text: str) -> str:
         """Strip ANSI/control characters before parsing exploration markers."""
@@ -341,17 +352,20 @@ class SessionEventLoop:
     def _normalize_exploration_summary(self, summary: str) -> str | None:
         """Normalize and validate an exploration summary line."""
         cleaned = " ".join(summary.split()).strip()
-        if len(cleaned) < 8 or len(cleaned) > 400:
+        if len(cleaned) < 8:
             return None
         lower = cleaned.lower()
         if lower.startswith(self._INVALID_EXPLORATION_PREFIXES):
             return None
         # Drop step narration ("Let me read X", "Now I'll check Y") — only
-        # actual findings become Discovery milestones.
+        # actual findings become Discovery milestones. Checked against the full
+        # text, before truncation, so a late narration marker still counts.
         if lower.startswith(self._NARRATION_PREFIXES):
             return None
         if any(marker in lower for marker in self._NARRATION_SUBSTRINGS):
             return None
+        if len(cleaned) > self._MAX_EXPLORATION_SUMMARY:
+            cleaned = cleaned[:self._MAX_EXPLORATION_SUMMARY - 1].rstrip() + "…"
         return cleaned
 
     def _scan_exploration_markers(self, new_text: str, finalize: bool = False) -> None:
@@ -749,12 +763,12 @@ class SessionEventLoop:
                 )
                 output += "\n" + action_output
             elif action == "await_reset":
-                action_output = self._handle_await_reset(
+                wait_exit, action_output = self._handle_await_reset(
                     pending, session, task_description, output,
                     screenshots, rows, cols, git_mgr,
                     coding_account, coding_provider, coding_model, coding_reasoning,
                 )
-                return 0, output + "\n" + action_output
+                return wait_exit, output + "\n" + action_output
 
         # Now safe to bail on signal-killed agents (negative exit code).
         # Pending actions were already handled above.
@@ -788,6 +802,9 @@ class SessionEventLoop:
                 )
                 self._analyze_output()
                 output += "\n" + cont_output
+                # The task's outcome is the LAST run's exit code — a failed
+                # continuation must not be masked by the initial run's 0.
+                exit_code = cont_exit
 
                 if getattr(self.task, "cancel_requested", False):
                     return -1, output
@@ -907,14 +924,18 @@ class SessionEventLoop:
         coding_provider: str,
         coding_model: str | None,
         coding_reasoning: str | None,
-    ) -> str:
+    ) -> tuple[int, str]:
         """Handle await_reset action: poll until usage drops, then resume.
 
         Loops to handle repeated usage hits — if the continuation phase hits
         the limit again, we pause and wait a second time rather than dropping
         the pending action.
+
+        Returns (exit_code, accumulated_output) where exit_code reflects the
+        final continuation run (0 when no continuation was possible).
         """
         accumulated = ""
+        last_exit = 0
 
         while True:
             event_type = action.get("event")
@@ -925,11 +946,11 @@ class SessionEventLoop:
             eta_fn = None
             mapping = self._EVENT_USAGE_MAP.get(event_type)
             if not mapping:
-                return accumulated
+                return last_exit, accumulated
             fn_attr = mapping[0]
             usage_fn = getattr(self, fn_attr, None)
             if usage_fn is None:
-                return accumulated
+                return last_exit, accumulated
 
             if event_type == "session_usage":
                 eta_fn = self._get_session_reset_eta_fn
@@ -961,6 +982,7 @@ class SessionEventLoop:
 
             # Poll until usage drops below threshold or resume is requested
             resume_reason = None
+            unknown_polls = 0
             while self._running and not getattr(self.task, "cancel_requested", False):
                 # Check if user requested resume
                 if session is not None and getattr(session, "resume_requested", False):
@@ -972,7 +994,19 @@ class SessionEventLoop:
                     current = usage_fn()
                 except Exception:
                     continue
-                if current is not None and current < threshold:
+                if current is None:
+                    # No reading available: the usage API has been failing long
+                    # enough for the provider's cache to expire, or the account
+                    # is logged out. Waiting on a number that may never arrive
+                    # would pause the session indefinitely, so give up waiting
+                    # and let the resumed run report what's actually wrong.
+                    unknown_polls += 1
+                    if unknown_polls >= _UNKNOWN_USAGE_POLLS_BEFORE_RESUME:
+                        resume_reason = "usage reading unavailable"
+                        break
+                    continue
+                unknown_polls = 0
+                if current < threshold:
                     resume_reason = f"{label.title()} reset detected"
                     break
 
@@ -982,7 +1016,9 @@ class SessionEventLoop:
                 session.paused = False
 
             if not self._running or getattr(self.task, "cancel_requested", False):
-                return accumulated
+                if getattr(self.task, "cancel_requested", False):
+                    return -1, accumulated
+                return last_exit, accumulated
 
             self._emit_milestone(
                 "usage_threshold",
@@ -1010,6 +1046,7 @@ class SessionEventLoop:
             self._analyze_output(finalize=True)
             accumulated += "\n" + cont_output if accumulated else cont_output
             previous_output = cont_output
+            last_exit = exit_code
 
             # Check if the continuation hit another usage threshold.
             # The tick thread may have set a new pending action during the run.
@@ -1018,7 +1055,7 @@ class SessionEventLoop:
                 self._pending_action = None
 
             if not new_pending:
-                return accumulated
+                return last_exit, accumulated
 
             new_action = new_pending.get("action")
             if new_action == "await_reset":
@@ -1026,14 +1063,21 @@ class SessionEventLoop:
                 action = new_pending
                 continue
             elif new_action == "switch_provider":
-                switch_output = self._handle_switch_provider(
+                (
+                    switch_exit,
+                    switch_output,
+                    coding_account,
+                    coding_provider,
+                    coding_model,
+                    coding_reasoning,
+                ) = self._handle_switch_provider(
                     new_pending, session, task_description, accumulated,
                     screenshots, rows, cols, git_mgr,
                     coding_account, coding_provider, coding_model, coding_reasoning,
                 )
-                return accumulated + "\n" + switch_output
+                return switch_exit, accumulated + "\n" + switch_output
 
-            return accumulated
+            return last_exit, accumulated
 
     def _run_verification_loop(
         self,
@@ -1057,7 +1101,14 @@ class SessionEventLoop:
         verification_reasoning = config.get("verification_reasoning")
         project_path = str(self.worktree_path)
 
+        self.verification_passed = False
         for attempt in range(self._max_verification_attempts):
+            # A user cancellation must stop the verification cycle too — it
+            # previously kept spawning verifier/revision agents after cancel.
+            if getattr(self.task, "cancel_requested", False):
+                self.verification_passed = None
+                return
+
             self._emit_milestone("verification_started", f"Attempt {attempt + 1}")
 
             passed, feedback = run_verification(
@@ -1080,17 +1131,19 @@ class SessionEventLoop:
 
             if passed is True:
                 self._emit_milestone("verification_passed", feedback)
+                self.verification_passed = True
                 return
             elif passed is None:
                 # Verification aborted, don't retry
                 self._emit_milestone("verification_failed", feedback or "Verification aborted")
+                self.verification_passed = None
                 return
 
             self._emit_milestone("verification_failed", feedback)
 
             if attempt < self._max_verification_attempts - 1:
                 self._emit_milestone("revision_started", "Sending feedback to coding agent")
-                self._run_revision_phase(
+                revision_exit = self._run_revision_phase(
                     session=session,
                     task_description=task_description,
                     coding_account=coding_account,
@@ -1103,6 +1156,10 @@ class SessionEventLoop:
                     coding_reasoning=coding_reasoning,
                     attempt=attempt + 1,
                 )
+                if revision_exit < 0:
+                    # Revision was cancelled or timed out — stop the cycle
+                    self.verification_passed = None
+                    return
 
     def _run_revision_phase(
         self,
@@ -1117,8 +1174,11 @@ class SessionEventLoop:
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
         attempt: int = 1,
-    ) -> None:
-        """Run a revision phase using verification feedback."""
+    ) -> int:
+        """Run a revision phase using verification feedback.
+
+        Returns the phase exit code so cancellations/timeouts propagate.
+        """
         from chad.util.prompts import get_revision_prompt
 
         revision_prompt = get_revision_prompt(feedback, attempt=attempt)
@@ -1145,3 +1205,4 @@ class SessionEventLoop:
         self._analyze_output(finalize=True)
 
         self.accumulated_output += "\n" + output
+        return exit_code

@@ -10,6 +10,8 @@ from typing import Any, AsyncIterator, Iterator
 
 import httpx
 
+from chad.ui.client.api_client import ChadAuthError, _auth_headers
+
 
 @dataclass
 class StreamEvent:
@@ -23,19 +25,23 @@ class StreamEvent:
 class StreamClient:
     """Client for streaming API endpoints (SSE and input)."""
 
-    def __init__(self, base_url: str = "http://localhost:3184"):
+    def __init__(self, base_url: str = "http://localhost:3184", token: str | None = None):
         """Initialize the stream client.
 
         Args:
             base_url: Base URL of the Chad server
+            token: Bearer token for servers started with auth (chad --tunnel)
         """
         self.base_url = base_url.rstrip("/")
+        self.token = token
         self._async_client: httpx.AsyncClient | None = None
 
     async def _get_async_client(self) -> httpx.AsyncClient:
         """Get or create async client."""
         if self._async_client is None:
-            self._async_client = httpx.AsyncClient(timeout=None)
+            self._async_client = httpx.AsyncClient(
+                timeout=None, headers=_auth_headers(self.token)
+            )
         return self._async_client
 
     async def close(self):
@@ -72,6 +78,8 @@ class StreamClient:
         }
 
         async with client.stream("GET", url, params=params) as response:
+            if response.status_code == 401:
+                raise ChadAuthError()
             response.raise_for_status()
 
             buffer = ""
@@ -159,14 +167,16 @@ class StreamClient:
 class SyncStreamClient:
     """Synchronous wrapper around StreamClient for non-async code."""
 
-    def __init__(self, base_url: str = "http://localhost:3184"):
+    def __init__(self, base_url: str = "http://localhost:3184", token: str | None = None):
         """Initialize the sync stream client.
 
         Args:
             base_url: Base URL of the Chad server
+            token: Bearer token for servers started with auth (chad --tunnel)
         """
         self.base_url = base_url.rstrip("/")
-        self._sync_client = httpx.Client(timeout=None)
+        self.token = token
+        self._sync_client = httpx.Client(timeout=None, headers=_auth_headers(token))
 
     def close(self):
         """Close the client."""
@@ -199,6 +209,8 @@ class SyncStreamClient:
         }
 
         with self._sync_client.stream("GET", url, params=params) as response:
+            if response.status_code == 401:
+                raise ChadAuthError()
             response.raise_for_status()
 
             buffer = ""

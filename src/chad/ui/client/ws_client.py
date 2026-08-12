@@ -4,9 +4,13 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import quote
 
+import httpx
 import websockets
 from websockets.sync.client import connect as sync_connect
+
+from chad.ui.client.api_client import _auth_headers, _check_response
 
 
 @dataclass
@@ -18,31 +22,67 @@ class StreamMessage:
     data: dict[str, Any]
 
 
+def _ws_base_url(base_url: str) -> str:
+    """Convert an http(s) base URL to ws(s)."""
+    if base_url.startswith("http://"):
+        return "ws://" + base_url[7:]
+    if base_url.startswith("https://"):
+        return "wss://" + base_url[8:]
+    return base_url
+
+
+def _http_base_url(ws_url: str) -> str:
+    """Convert a ws(s) base URL back to http(s) for REST calls."""
+    if ws_url.startswith("ws://"):
+        return "http://" + ws_url[5:]
+    if ws_url.startswith("wss://"):
+        return "https://" + ws_url[6:]
+    return ws_url
+
+
+def _mint_ws_ticket(http_base_url: str, token: str, session_id: str) -> str:
+    """Mint a fresh single-use WebSocket ticket.
+
+    Tickets are single-use server-side, so every connect/reconnect must mint
+    a new one — never cache or reuse a ticket.
+    """
+    resp = httpx.post(
+        f"{http_base_url}/api/v1/ws-ticket/{session_id}",
+        headers=_auth_headers(token),
+        timeout=10.0,
+    )
+    _check_response(resp)
+    return resp.json()["ticket"]
+
+
 class WSClient:
     """Synchronous WebSocket client for task streaming."""
 
-    def __init__(self, base_url: str = "ws://localhost:3184"):
+    def __init__(self, base_url: str = "ws://localhost:3184", token: str | None = None):
         """Initialize the WebSocket client.
 
         Args:
             base_url: Base WebSocket URL of the Chad server
+            token: Bearer token for servers started with auth (chad --tunnel)
         """
-        # Convert http:// to ws://
-        if base_url.startswith("http://"):
-            base_url = "ws://" + base_url[7:]
-        elif base_url.startswith("https://"):
-            base_url = "wss://" + base_url[8:]
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _ws_base_url(base_url).rstrip("/")
+        self.token = token
         self._ws = None
         self._session_id = None
 
-    def connect(self, session_id: str) -> None:
+    def connect(self, session_id: str, since_seq: int = 0) -> None:
         """Connect to the WebSocket for a session.
+
+        Mints a fresh single-use ticket on every call when a token is set.
 
         Args:
             session_id: The session ID to connect to
+            since_seq: Resume streaming from this sequence number
         """
-        url = f"{self.base_url}/api/v1/ws/{session_id}"
+        url = f"{self.base_url}/api/v1/ws/{session_id}?since_seq={since_seq}"
+        if self.token:
+            ticket = _mint_ws_ticket(_http_base_url(self.base_url), self.token, session_id)
+            url += f"&ticket={quote(ticket, safe='')}"
         self._ws = sync_connect(url)
         self._session_id = session_id
 
@@ -124,24 +164,32 @@ class WSClient:
 class AsyncWSClient:
     """Async WebSocket client for task streaming."""
 
-    def __init__(self, base_url: str = "ws://localhost:3184"):
+    def __init__(self, base_url: str = "ws://localhost:3184", token: str | None = None):
         """Initialize the WebSocket client.
 
         Args:
             base_url: Base WebSocket URL of the Chad server
+            token: Bearer token for servers started with auth (chad --tunnel)
         """
-        # Convert http:// to ws://
-        if base_url.startswith("http://"):
-            base_url = "ws://" + base_url[7:]
-        elif base_url.startswith("https://"):
-            base_url = "wss://" + base_url[8:]
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _ws_base_url(base_url).rstrip("/")
+        self.token = token
         self._ws = None
         self._session_id = None
 
-    async def connect(self, session_id: str) -> None:
-        """Connect to the WebSocket for a session."""
-        url = f"{self.base_url}/api/v1/ws/{session_id}"
+    async def connect(self, session_id: str, since_seq: int = 0) -> None:
+        """Connect to the WebSocket for a session.
+
+        Mints a fresh single-use ticket on every call when a token is set.
+        """
+        url = f"{self.base_url}/api/v1/ws/{session_id}?since_seq={since_seq}"
+        if self.token:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{_http_base_url(self.base_url)}/api/v1/ws-ticket/{session_id}",
+                    headers=_auth_headers(self.token),
+                )
+            _check_response(resp)
+            url += f"&ticket={quote(resp.json()['ticket'], safe='')}"
         self._ws = await websockets.connect(url)
         self._session_id = session_id
 
@@ -216,6 +264,7 @@ class StreamingTaskClient:
         on_message_complete: Callable[[str, str], None] | None = None,
         on_complete: Callable[[bool, str], None] | None = None,
         on_error: Callable[[str], None] | None = None,
+        token: str | None = None,
     ):
         """Initialize the streaming task client.
 
@@ -228,8 +277,10 @@ class StreamingTaskClient:
             on_message_complete: Callback for message complete (speaker, content)
             on_complete: Callback for task completion (success, message)
             on_error: Callback for errors
+            token: Bearer token; defaults to the api_client's token
         """
         self.api_client = api_client
+        self.token = token or getattr(api_client, "token", None)
         self.on_stream = on_stream
         self.on_activity = on_activity
         self.on_status = on_status
@@ -272,7 +323,7 @@ class StreamingTaskClient:
 
         # Connect to WebSocket for streaming
         base_url = self.api_client.base_url
-        ws_client = WSClient(base_url)
+        ws_client = WSClient(base_url, token=self.token)
 
         try:
             ws_client.connect(session_id)

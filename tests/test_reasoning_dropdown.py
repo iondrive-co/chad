@@ -100,3 +100,71 @@ def test_composer_hides_reasoning_dropdown_for_non_reasoning_provider():
         pytest.skip(f"UI runner unavailable: {exc}")
 
     assert options is None, f"reasoning dropdown should be hidden for non-reasoning providers; got {options}"
+
+
+# Chromium reserves space for the native <select> arrow inside the box, on
+# top of the author's own padding/border. That space isn't reported by
+# getComputedStyle, so it has to be accounted for by hand when checking
+# whether an option's text actually fits in the closed control.
+_SELECT_ARROW_ALLOWANCE_PX = 20
+
+
+def test_reasoning_dropdown_options_are_not_clipped():
+    """Every option's label must fit inside the select's closed-box width.
+
+    Regression test: the select's CSS width was too narrow for its longest
+    option ("Reasoning: default"), so the browser silently truncated the
+    last few characters (e.g. "Reasoning: defau") instead of showing the
+    full label.
+    """
+    env = create_temp_env(screenshot_mode=False)
+    cfg = ConfigManager(env.config_path)
+    cfg.store_account("reasoning-agent", "openai", "", env.password, "o3")
+    cfg.assign_role("reasoning-agent", "CODING")
+
+    instance = start_chad(env)
+    try:
+        with open_playwright_page(instance.port, headless=True) as page:
+            page.wait_for_selector(".new-session-btn", timeout=15000)
+            page.click(".new-session-btn")
+            page.wait_for_selector(".chat-composer", timeout=10000)
+            page.wait_for_timeout(1500)
+
+            select = page.query_selector(REASONING_SELECT)
+            if select is None:
+                pytest.skip("reasoning dropdown not rendered for this provider")
+
+            metrics = page.eval_on_selector(
+                REASONING_SELECT,
+                """el => {
+                    const cs = getComputedStyle(el);
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+                    const widths = Array.from(el.options).map(
+                        o => ctx.measureText(o.textContent).width
+                    );
+                    return {
+                        clientWidth: el.clientWidth,
+                        paddingLeft: parseFloat(cs.paddingLeft),
+                        paddingRight: parseFloat(cs.paddingRight),
+                        maxTextWidth: Math.max(...widths),
+                    };
+                }""",
+            )
+    except (PlaywrightUnavailable, ChadLaunchError) as exc:
+        pytest.skip(f"UI runner unavailable: {exc}")
+    finally:
+        stop_chad(instance)
+        env.cleanup()
+
+    available = (
+        metrics["clientWidth"]
+        - metrics["paddingLeft"]
+        - metrics["paddingRight"]
+        - _SELECT_ARROW_ALLOWANCE_PX
+    )
+    assert available >= metrics["maxTextWidth"], (
+        f"reasoning-select is too narrow to show its longest option without "
+        f"clipping: available={available:.1f}px, needed={metrics['maxTextWidth']:.1f}px"
+    )

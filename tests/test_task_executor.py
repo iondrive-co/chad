@@ -1,3 +1,4 @@
+import inspect
 import json
 import re
 import subprocess
@@ -481,6 +482,54 @@ class TestBuildAgentCommand:
         assert "EXPLORATION_RESULT:" in cmd[prompt_idx + 1]
         assert initial_input is None
 
+    def test_gemini_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Gemini account gets its own GEMINI_CLI_HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("gemini", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("gemini", "acct-b", tmp_path)
+
+        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
+        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
+        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+
+    def test_qwen_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Qwen account gets its own HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("qwen", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("qwen", "acct-b", tmp_path)
+
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
+
+    def test_local_sets_isolated_home_and_openai_env(self, tmp_path, monkeypatch):
+        """Local accounts get qwen-home isolation while build_local_env still applies."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "chad.conf"))
+
+        _, env, _ = build_agent_command("local", "my-local", tmp_path, model="pinned")
+
+        assert env["HOME"] == str(tmp_path / ".chad" / "qwen-homes" / "my-local")
+        assert env["OPENAI_API_KEY"] == "local"
+        assert env["OPENAI_MODEL"] == "pinned"
+
+    def test_mistral_sets_isolated_vibe_home_per_account(self, tmp_path, monkeypatch):
+        """Each Mistral account gets its own VIBE_HOME (credential isolation)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        _, env_a, _ = build_agent_command("mistral", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("mistral", "acct-b", tmp_path)
+
+        assert env_a["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-a")
+        assert env_b["VIBE_HOME"] == str(tmp_path / ".chad" / "vibe-homes" / "acct-b")
+        assert env_a["VIBE_HOME"] != env_b["VIBE_HOME"]
+
     def test_mock_provider_produces_output(self, tmp_path):
         """Mock provider command produces ANSI-formatted output."""
         cmd, env, initial_input = build_agent_command(
@@ -772,7 +821,6 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
         ConfigManager(),
         session_manager,
         inactivity_timeout=10.0,
-        terminal_flush_interval=0.1,
     )
 
     import chad.server.services.task_executor as te
@@ -811,6 +859,9 @@ def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeyp
 
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"accounts": {"claude-test": {"provider": "anthropic"}}}), encoding="utf-8")
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
     monkeypatch.setenv("CHAD_CONFIG", str(config_path))
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
@@ -820,7 +871,6 @@ def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeyp
         ConfigManager(),
         session_manager,
         inactivity_timeout=10.0,
-        terminal_flush_interval=0.05,
     )
 
     import chad.server.services.task_executor as te
@@ -887,6 +937,22 @@ class TestChatUILayoutSource:
         # The picker should not have conditional logic based on verificationSettings.enabled
         assert "verificationSettings?.enabled === false" not in chat_view, (
             "Verification picker should not be disabled based on verificationSettings"
+        )
+
+    def test_verification_pick_is_sent_regardless_of_global_flag(self):
+        """The picked account must be sent, not filtered by verificationSettings.
+
+        The picker was fully interactive while the send path dropped its value
+        whenever verification was globally disabled, so the UI showed a
+        verification agent that silently never ran.
+        """
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert re.search(
+            r"verification_agent:\s*verificationAccount\s*\?\s*verificationAccount\.name\s*:\s*undefined",
+            chat_view,
+        ), "verification_agent must be sent whenever the picker holds an account"
+        assert "verificationSettings?.enabled && verificationAccount" not in chat_view, (
+            "the global enable flag must not gate the per-session pick"
         )
 
     def test_verification_agent_picker_css_exists(self):
@@ -1061,6 +1127,9 @@ def test_continuation_loop_uses_full_resume_prompt(tmp_path, monkeypatch):
         json.dumps({"accounts": {"test": {"provider": "openai"}}}),
         encoding="utf-8",
     )
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
     monkeypatch.setenv("CHAD_CONFIG", str(config_path))
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
@@ -1387,3 +1456,198 @@ class TestCaptureProviderCommand:
         assert "--model" in result.cmd
         idx = result.cmd.index("--model")
         assert result.cmd[idx + 1] == "claude-opus-4-6"
+
+
+def test_raw_provider_terminal_events_are_deltas(tmp_path, monkeypatch):
+    """Raw-path providers must log each output chunk once, never snapshots.
+
+    The EventLog terminal_output stream is replayed append-only by the UI and
+    the WS catchup path, so a cumulative screen snapshot duplicates every
+    earlier line each time it is logged.
+    """
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"rawmock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="delta-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=10.0)
+
+    import chad.server.services.task_executor as te
+
+    script = (
+        "import sys, time, json\n"
+        "for i in range(5):\n"
+        "    sys.stdout.write(f'delta line {i}\\n')\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.2)\n"
+        "print('```json')\n"
+        "print(json.dumps({'change_summary': 'Done', 'files_changed': [],"
+        " 'completion_status': 'success'}))\n"
+        "print('```', flush=True)\n"
+    )
+
+    def raw_command(provider, account_name, project_path, task_description=None,
+                    screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", raw_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="delta semantics",
+        coding_account="rawmock",
+    )
+    task._thread.join(timeout=15)
+
+    terminal_events = [
+        e for e in task.event_log.get_events() if e.get("type") == "terminal_output"
+    ]
+    combined = "".join(e.get("data") or "" for e in terminal_events)
+    for i in range(5):
+        marker = f"delta line {i}"
+        count = combined.count(marker)
+        assert count == 1, (
+            f"{marker!r} logged {count} times across terminal_output events; "
+            "the log must contain deltas, not cumulative snapshots"
+        )
+
+
+def test_failed_task_result_includes_terminal_tail(tmp_path, monkeypatch):
+    """A nonzero agent exit must surface the last terminal output in the result.
+
+    A user whose agent dies (e.g. expired OAuth token printing 'API Error:
+    401 ... Please run /login') should see that reason on the task, not just
+    'Agent exited with code 1'.
+    """
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"claude-fail": {"provider": "anthropic"}}}), encoding="utf-8")
+    # The agent command is stubbed below, so this account is a stand-in with no
+    # credentials on disk; skip the logged-out preflight this test isn't about.
+    monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="fail-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=10.0)
+
+    import chad.server.services.task_executor as te
+
+    script = (
+        "import sys\n"
+        "sys.stdout.write('API Error: 401 OAuth token expired - Please run /login\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.exit(1)\n"
+    )
+
+    def failing_command(provider, account_name, project_path, task_description=None,
+                        screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", failing_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="fail loudly",
+        coding_account="claude-fail",
+    )
+    task._thread.join(timeout=15)
+
+    assert task.state == TaskState.FAILED
+    assert "exited with code 1" in (task.result or "")
+    assert "401" in (task.result or ""), (
+        f"failure result should carry the agent's last output, got: {task.result!r}"
+    )
+
+
+class TestVerificationSelectionOverridesGlobalFlag:
+    """A verification agent picked for one task must win over the global flag.
+
+    Session 3d8c2c1b logged verification_account=null and never verified,
+    because verification_enabled was false globally and the executor discarded
+    the requested account outright instead of treating the flag as a default.
+    """
+
+    def _capture_verification_config(self, tmp_path, monkeypatch, config, **start_kwargs):
+        repo_path = tmp_path / "repo"
+        _init_git_repo(repo_path)
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        session_manager = SessionManager()
+        session = session_manager.create_session(project_path=str(repo_path), name="ver-gate")
+        executor = TaskExecutor(ConfigManager(), session_manager)
+
+        captured = {}
+        # Name the positional args from the real signature so this test keeps
+        # working if _run_task's parameter list grows or is reordered.
+        param_names = list(inspect.signature(TaskExecutor._run_task).parameters)
+
+        def fake_run_task(*args):
+            captured.update(dict(zip(param_names, args)))
+
+        monkeypatch.setattr(TaskExecutor, "_run_task", fake_run_task)
+
+        task = executor.start_task(
+            session_id=session.id,
+            project_path=str(repo_path),
+            task_description="fix it",
+            coding_account="coder",
+            **start_kwargs,
+        )
+        task._thread.join(timeout=10)
+        return captured["verification_config"]
+
+    def test_explicit_account_verifies_while_globally_disabled(self, tmp_path, monkeypatch):
+        """The picker's choice runs even when verification_enabled is false."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}, "checker": {"provider": "mock"}},
+                "verification_enabled": False,
+            },
+            verification_account="checker",
+        )
+        assert result is not None, "explicit verification pick was discarded"
+        assert result["verification_account"] == "checker"
+
+    def test_global_default_used_when_nothing_picked(self, tmp_path, monkeypatch):
+        """With no pick, the configured agent still runs when globally enabled."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}, "checker": {"provider": "mock"}},
+                "verification_enabled": True,
+                "verification_agent": "checker",
+            },
+        )
+        assert result is not None
+        assert result["verification_account"] == "checker"
+
+    def test_no_verification_when_disabled_and_nothing_picked(self, tmp_path, monkeypatch):
+        """The global flag still governs the no-pick case."""
+        result = self._capture_verification_config(
+            tmp_path,
+            monkeypatch,
+            {
+                "accounts": {"coder": {"provider": "mock"}},
+                "verification_enabled": False,
+                "verification_agent": "checker",
+            },
+        )
+        assert result is None

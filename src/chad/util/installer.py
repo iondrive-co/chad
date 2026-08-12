@@ -2,12 +2,42 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import sys
+import time
 
 from .utils import ensure_directory, is_tool_installed, run_command
 
 
 DEFAULT_TOOLS_DIR = Path.home() / ".chad" / "tools"
+
+
+def _is_unsafe_member_name(name: str) -> bool:
+    """True when an archive member would extract outside the target dir."""
+    pure = Path(name)
+    return pure.is_absolute() or ".." in pure.parts or name.startswith(("/", "\\"))
+
+
+def _assert_safe_zip_members(zf) -> None:
+    """Reject zip members that escape the extraction directory."""
+    for name in zf.namelist():
+        if _is_unsafe_member_name(name):
+            raise ValueError(f"Refusing to extract unsafe archive member: {name}")
+
+
+def _assert_safe_tar_members(tf) -> None:
+    """Reject tar members that escape the directory or aren't file/dir/symlink."""
+    for member in tf.getmembers():
+        if _is_unsafe_member_name(member.name):
+            raise ValueError(f"Refusing to extract unsafe archive member: {member.name}")
+        if member.islnk() or member.issym():
+            target = member.linkname
+            if _is_unsafe_member_name(target):
+                raise ValueError(
+                    f"Refusing to extract link escaping the archive: {member.name}"
+                )
+        elif not (member.isfile() or member.isdir()):
+            raise ValueError(f"Refusing to extract special archive member: {member.name}")
 
 
 @dataclass(frozen=True)
@@ -90,10 +120,16 @@ class AIToolInstaller:
         import os
 
         if os.name == "nt":
+            # pip --prefix installs console scripts into Scripts/, not bin/,
+            # so a successful install used to resolve to "not found"
+            scripts_dir = self.tools_dir / "Scripts"
             candidates = [
                 self.bin_dir / f"{binary}.exe",
                 self.bin_dir / f"{binary}.cmd",
                 self.bin_dir / binary,
+                scripts_dir / f"{binary}.exe",
+                scripts_dir / f"{binary}.cmd",
+                scripts_dir / binary,
             ]
         else:
             candidates = [
@@ -126,7 +162,12 @@ class AIToolInstaller:
         return None
 
     def ensure_tool(self, tool_key: str) -> tuple[bool, str]:
-        """Ensure the requested tool is installed. Returns (success, path|error)."""
+        """Ensure the requested tool is installed. Returns (success, path|error).
+
+        Deliberately does no version check: this runs on the way to spawning an
+        agent, and must not put an npm round-trip in front of the user's task.
+        Keeping installs current is ``update_stale_tools``'s job.
+        """
         spec = self.tool_specs.get(tool_key)
         if not spec:
             return False, f"Unknown tool '{tool_key}'"
@@ -137,6 +178,9 @@ class AIToolInstaller:
                 self._repair_vibe_install(Path(existing))
             return True, str(existing)
 
+        return self._install(spec)
+
+    def _install(self, spec: CLIToolSpec) -> tuple[bool, str]:
         if spec.installer == "npm":
             return self._install_with_npm(spec)
         if spec.installer == "pip":
@@ -144,6 +188,73 @@ class AIToolInstaller:
         if spec.installer == "binary":
             return self._install_binary(spec)
         return False, f"No installer configured for {spec.name}"
+
+    @property
+    def _update_stamp_file(self) -> Path:
+        return self.tools_dir / "last-update.json"
+
+    def _read_update_stamps(self) -> dict[str, float]:
+        try:
+            data = json.loads(self._update_stamp_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(v, (int, float))}
+
+    def _write_update_stamp(self, tool_key: str, when: float) -> None:
+        stamps = self._read_update_stamps()
+        stamps[tool_key] = when
+        try:
+            ensure_directory(self.tools_dir)
+            self._update_stamp_file.write_text(json.dumps(stamps, indent=2), encoding="utf-8")
+        except OSError:
+            pass  # A missing stamp only means we check again next time
+
+    def _is_managed_install(self, resolved: Path | None) -> bool:
+        """True when this path is a CLI Chad installed into its own tools dir."""
+        if resolved is None:
+            return False
+        tools_dir = str(self.tools_dir)
+        return str(resolved).startswith(tools_dir) or str(resolved.resolve()).startswith(tools_dir)
+
+    def update_stale_tools(self, max_age_days: int = 7) -> list[str]:
+        """Reinstall installed provider CLIs that haven't been refreshed lately.
+
+        ``ensure_tool`` returns as soon as a binary exists, so without this a CLI
+        installed once was frozen at that version indefinitely — Chad was still
+        running a Claude Code build seven months old, which turned an expired
+        login into a three-minute retry stall rather than an instant error.
+
+        Only CLIs Chad installed itself are touched — a binary the user put on
+        PATH is theirs to manage — and a failed update leaves both the working
+        install and the old stamp alone so it retries later. Returns the tool
+        keys that were updated.
+        """
+        import logging
+
+        log = logging.getLogger("chad.installer")
+        now = time.time()
+        max_age_seconds = max_age_days * 86400
+        stamps = self._read_update_stamps()
+        updated: list[str] = []
+
+        for tool_key, spec in self.tool_specs.items():
+            if spec.installer not in ("npm", "pip"):
+                continue
+            if not self._is_managed_install(self.resolve_tool_path(spec.binary)):
+                continue  # Not ours: absent, or the user's own install on PATH
+            last = stamps.get(tool_key)
+            if last is not None and now - last < max_age_seconds:
+                continue
+
+            ok, detail = self._install(spec)
+            if ok:
+                self._write_update_stamp(tool_key, now)
+                updated.append(tool_key)
+                log.info("Updated %s to the latest release", spec.name)
+            else:
+                log.warning("Could not update %s: %s", spec.name, detail)
+
+        return updated
 
     def _binary_asset(self, spec: CLIToolSpec) -> tuple[str, str]:
         """Return the download URL and output filename for a binary tool."""
@@ -261,6 +372,12 @@ class AIToolInstaller:
             "pip",
             "install",
             "--upgrade",
+            # --prefix does not stop pip from resolving against the running
+            # interpreter's site-packages: without this, upgrading a tool
+            # *uninstalls* shared dependencies from Chad's own environment and
+            # re-installs them under the prefix, leaving Chad broken. Isolate
+            # the install completely.
+            "--ignore-installed",
             "--prefix",
             str(self.tools_dir),
             package_ref,
@@ -336,15 +453,19 @@ class AIToolInstaller:
         try:
             ensure_directory(node_dir)
 
+            # Downloaded archives are untrusted input: refuse members that
+            # would escape tools_dir (path traversal / absolute paths) and
+            # anything that isn't a regular file or directory.
             if archive.endswith(".zip"):
                 with zipfile.ZipFile(download_path) as zf:
+                    _assert_safe_zip_members(zf)
                     zf.extractall(self.tools_dir)
-            elif archive.endswith(".tar.xz"):
-                with tarfile.open(download_path, "r:xz") as tf:
-                    tf.extractall(self.tools_dir)
-            elif archive.endswith(".tar.gz"):
-                with tarfile.open(download_path, "r:gz") as tf:
-                    tf.extractall(self.tools_dir)
+            elif archive.endswith((".tar.xz", ".tar.gz")):
+                mode = "r:xz" if archive.endswith(".tar.xz") else "r:gz"
+                with tarfile.open(download_path, mode) as tf:
+                    _assert_safe_tar_members(tf)
+                    # data filter also strips setuid bits / odd member types
+                    tf.extractall(self.tools_dir, filter="data")
 
             # The archive extracts to a versioned directory — rename to "node"
             extracted_name = archive.replace(".tar.xz", "").replace(".tar.gz", "").replace(".zip", "")

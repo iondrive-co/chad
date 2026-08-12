@@ -230,6 +230,9 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
         "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
         "CHAD_PARENT_PID": str(os.getpid()),
+        # Keep the test server from clobbering the developer's real
+        # ~/.chad/server.port autodiscovery file
+        "CHAD_DIR": os.fspath(env.temp_dir / "chad-home"),
     }
     if env.env_vars:
         chad_env.update(env.env_vars)
@@ -271,10 +274,25 @@ def stop_chad(instance: ChadInstance) -> None:
 
 
 def _select_tab(page, tab: str) -> None:
-    """Click a tab button in the React UI header nav."""
+    """Open a view in the React UI header.
+
+    Projects/Providers/Settings live in the dropdown behind the "Chad"
+    button; anything else is matched against the session tabs in the nav.
+    """
+    if tab.lower() in ("projects", "providers", "settings"):
+        page.locator(".chad-btn").click()
+        page.wait_for_timeout(200)
+        items = page.locator(".chad-menu button")
+        for i in range(items.count()):
+            item = items.nth(i)
+            if item.inner_text().strip().lower() == tab.lower():
+                item.click()
+                page.wait_for_timeout(500)
+                return
+        raise ChadLaunchError(f"Could not find menu entry matching '{tab}'")
+
     buttons = page.locator("nav.tabs button")
-    count = buttons.count()
-    for i in range(count):
+    for i in range(buttons.count()):
         btn = buttons.nth(i)
         if btn.inner_text().strip().lower() == tab.lower():
             btn.click()
@@ -306,7 +324,7 @@ def open_playwright_page(
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
             # Wait for the React app to render
-            page.wait_for_selector(".app-header h1", timeout=15000)
+            page.wait_for_selector(".app-header", timeout=15000)
             if tab:
                 _select_tab(page, tab)
             if render_delay > 0:

@@ -233,15 +233,15 @@ def build_handoff_summary(
     # providers with no milestones), include terminal output as a work log so
     # the new provider sees what the agent was doing. Skip when discoveries
     # exist since they are higher-quality deduplicated summaries of the same
-    # content. Terminal output events are cumulative screen snapshots, so we
-    # use only the last event to avoid duplication.
+    # content. Terminal output events are streamed deltas, so join them all
+    # and keep the tail.
     if not has_assistant_turns and not discoveries:
         terminal_events = event_log.get_events(
             since_seq=since_seq,
             event_types=["terminal_output"],
         )
         if terminal_events:
-            terminal_text = terminal_events[-1].get("data", "")
+            terminal_text = "".join(e.get("data", "") for e in terminal_events)
             MAX_TERMINAL_CONTEXT = 8000
             if len(terminal_text) > MAX_TERMINAL_CONTEXT:
                 terminal_text = "(truncated)\n" + terminal_text[-MAX_TERMINAL_CONTEXT:]

@@ -192,6 +192,9 @@ def verify(
     """
     if project_root is None:
         project_root = Path.cwd()
+    # Callers pass strings (e.g. the verification service) — a str crashed
+    # find_python_executable and made automated verification silently no-op.
+    project_root = Path(project_root)
 
     if visual_only:
         return {

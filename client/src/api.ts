@@ -25,6 +25,7 @@ import type {
   SessionResume,
   TaskCreate,
   TaskStatus,
+  TunnelStatus,
   UserPreferences,
   VerificationSettings,
   WebSocketTicket,
@@ -36,8 +37,21 @@ export class ChadAPIError extends Error {
     public status: number,
     public body: unknown,
   ) {
-    super(`HTTP ${status}`);
+    super(ChadAPIError.describe(status, body));
     this.name = "ChadAPIError";
+  }
+
+  /** Prefer the server's own explanation — "HTTP 400" tells the user nothing. */
+  private static describe(status: number, body: unknown): string {
+    if (typeof body === "string" && body.trim()) {
+      try {
+        const detail = (JSON.parse(body) as { detail?: unknown }).detail;
+        if (typeof detail === "string" && detail.trim()) return detail;
+      } catch {
+        return body.length <= 300 ? body : `HTTP ${status}`;
+      }
+    }
+    return `HTTP ${status}`;
   }
 }
 
@@ -251,7 +265,8 @@ export class ChadAPI {
     );
   }
 
-  setAccountRole(name: string, role: string): Promise<Account> {
+  /** Assign the CODING role to an account, or pass null to clear its role. */
+  setAccountRole(name: string, role: "CODING" | null): Promise<Account> {
     return this.put(`/api/v1/accounts/${encodeURIComponent(name)}/role`, {
       role,
     });
@@ -321,9 +336,11 @@ export class ChadAPI {
   resolveConflicts(
     sessionId: string,
     useIncoming: boolean,
+    commitMessage?: string | null,
   ): Promise<MergeResult> {
     return this.post(`/api/v1/sessions/${sessionId}/worktree/resolve-conflicts`, {
       use_incoming: useIncoming,
+      commit_message: commitMessage ?? null,
     });
   }
 
@@ -433,30 +450,20 @@ export class ChadAPI {
 
   // ── Tunnel ──
 
-  getTunnelStatus(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  getTunnelStatus(): Promise<TunnelStatus> {
     return this.get("/api/v1/tunnel");
   }
 
-  startTunnel(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  /**
+   * Start the tunnel. Publishing the server to the internet requires auth, so
+   * the server mints a token if it has none and returns it here along with the
+   * pairing code — the caller must adopt the token to keep making requests.
+   */
+  startTunnel(): Promise<TunnelStatus> {
     return this.post("/api/v1/tunnel/start");
   }
 
-  stopTunnel(): Promise<{
-    running: boolean;
-    url: string | null;
-    subdomain: string | null;
-    error: string | null;
-  }> {
+  stopTunnel(): Promise<TunnelStatus> {
     return this.post("/api/v1/tunnel/stop");
   }
 
@@ -567,14 +574,20 @@ export class ChadAPI {
 
   // ── Config Export / Import ──
 
-  exportConfig(): Promise<Record<string, unknown>> {
-    return this.get("/api/v1/config/export");
+  /**
+   * Export the config. Provider credentials are only included when a
+   * passphrase is given, encrypted with it; `credentials_included` on the
+   * result says which kind of export this is.
+   */
+  exportConfig(passphrase?: string | null): Promise<Record<string, unknown>> {
+    return this.post("/api/v1/config/export", { passphrase: passphrase ?? null });
   }
 
   importConfig(
     config: Record<string, unknown>,
+    passphrase?: string | null,
   ): Promise<{ ok: boolean; message: string; install_errors?: Record<string, string> }> {
-    return this.post("/api/v1/config/import", { config });
+    return this.post("/api/v1/config/import", { config, passphrase: passphrase ?? null });
   }
 
   // ── Session Log ──

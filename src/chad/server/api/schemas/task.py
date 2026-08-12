@@ -11,9 +11,9 @@ TaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 class TaskCreate(BaseModel):
     """Request model for starting a new task."""
 
-    project_path: str = Field(description="Absolute path to the project directory")
-    task_description: str = Field(description="Description of the task to perform")
-    coding_agent: str = Field(description="Name of the coding agent account to use")
+    project_path: str = Field(min_length=1, description="Absolute path to the project directory")
+    task_description: str = Field(min_length=1, description="Description of the task to perform")
+    coding_agent: str = Field(min_length=1, description="Name of the coding agent account to use")
     coding_model: str | None = Field(default=None, description="Optional model override for coding agent")
     coding_reasoning: str | None = Field(default=None, description="Optional reasoning level override")
     verification_agent: str | None = Field(default=None, description="Name of the verification agent account")

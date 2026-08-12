@@ -72,7 +72,13 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
           api.getWorktreeStatus(sessionId),
         ]);
         setWorktreeHasChanges(worktreeStatus.has_changes);
-        const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
+        const preferredTarget =
+          branchData.branches[0] || branchData.default || branchData.current || "";
+        if (!preferredTarget) {
+          setError("No branches available to merge into — the repository may have no commits yet.");
+          setPhase("error");
+          return;
+        }
         setTargetBranch(preferredTarget);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load changes");
@@ -158,7 +164,6 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
       );
       if (result.success) {
         setPhase("success");
-        onMerged();
       } else if (result.conflicts && result.conflicts.length > 0) {
         setConflicts(result.conflicts);
         setPhase("conflict");
@@ -177,7 +182,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
       }
       setPhase("error");
     }
-  }, [api, sessionId, targetBranch, commitMessage, onMerged]);
+  }, [api, sessionId, targetBranch, commitMessage]);
 
   const handleDiscard = useCallback(async () => {
     setLoading(true);
@@ -195,10 +200,9 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.resolveConflicts(sessionId, useIncoming);
+      const result = await api.resolveConflicts(sessionId, useIncoming, commitMessage || null);
       if (result.success) {
         setPhase("success");
-        onMerged();
       } else {
         setError(result.message || "Failed to resolve conflicts");
         setPhase("error");
@@ -209,7 +213,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [api, sessionId, onMerged]);
+  }, [api, sessionId, commitMessage]);
 
   const handleAbortMerge = useCallback(async () => {
     setLoading(true);
@@ -218,12 +222,20 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
       // Return to changes phase
       setConflicts([]);
       setPhase("changes");
+      // Re-fetch the diff summary so files/insertions/deletions reflect the
+      // state after the aborted merge instead of the pre-merge counts.
+      const summaryData = await api.getDiffSummary(sessionId, targetBranch || null);
+      setFilesChanged(summaryData.files_changed);
+      setInsertions(summaryData.insertions);
+      setDeletions(summaryData.deletions);
+      setDiff(null);
+      setShowDiff(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to abort merge");
     } finally {
       setLoading(false);
     }
-  }, [api, sessionId]);
+  }, [api, sessionId, targetBranch]);
 
   if (phase === "loading") {
     return (
@@ -237,7 +249,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     return (
       <div className="merge-panel">
         <div className="merge-header success">Changes merged successfully!</div>
-        <button className="merge-btn" onClick={onDismiss}>Close</button>
+        <button className="merge-btn" onClick={onMerged}>Done</button>
       </div>
     );
   }
@@ -345,7 +357,9 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
             value={targetBranch}
             onChange={(e) => setTargetBranch(e.target.value)}
           >
-            {branches.map((b) => {
+            {/* If the branch list is empty (target fell back to the default or
+                current branch), still show the selected target as an option. */}
+            {(branches.length > 0 ? branches : [targetBranch]).map((b) => {
               const labels: string[] = [];
               if (b === currentBranch) labels.push("current");
               if (b === defaultBranch) labels.push("default");

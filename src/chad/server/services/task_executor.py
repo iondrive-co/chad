@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import uuid
@@ -30,10 +31,11 @@ from chad.util.prompts import (
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
+from chad.util.utils import safe_home
 from chad.util.providers import CLAUDE_THINKING_BUDGETS
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
-from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
+from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
 
 
 _CLI_INSTALLER = AIToolInstaller()
@@ -444,6 +446,10 @@ def _read_project_docs(project_path: Path) -> str | None:
     return build_doc_reference_text(project_path)
 
 
+class TaskAlreadyRunningError(ValueError):
+    """Raised when a session already has a running task (maps to HTTP 409)."""
+
+
 class TaskState(str, Enum):
     """Task execution states."""
 
@@ -486,7 +492,6 @@ class Task:
     _thread: threading.Thread | None = field(default=None, repr=False)
     _event_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _provider: Any = field(default=None, repr=False)
-    _last_terminal_snapshot: str = field(default="", repr=False)
     _mock_duration_applied: bool = field(default=False, repr=False)
     _session_event_loop: Any = field(default=None, repr=False)
 
@@ -568,16 +573,14 @@ def build_agent_command(
             full_prompt = build_prompt(
                 task_description, project_docs, project_path, screenshots
             )
-        elif phase == "continuation":
-            # Agent exited early without completion - send continuation prompt
-            full_prompt = get_continuation_prompt(task_description, exploration_output or "")
-        elif phase == "revision":
-            # Revision after verification failure - override_prompt already set above
+        elif phase in ("continuation", "revision"):
+            # Agent exited early without completion - send continuation prompt.
+            # (Revisions always arrive with an override_prompt and are handled above.)
             full_prompt = get_continuation_prompt(task_description, exploration_output or "")
 
     if provider == "anthropic":
         # Claude Code CLI
-        config_dir = Path.home() / ".chad" / "claude-configs" / account_name
+        config_dir = safe_home() / ".chad" / "claude-configs" / account_name
         cmd = [
             resolve_tool("claude"),
             "-p",  # non-interactive print mode
@@ -604,7 +607,7 @@ def build_agent_command(
     elif provider == "openai":
         # Codex CLI with isolated home - use exec mode for non-interactive execution
         # This prevents the agent from stopping after outputting text and waiting for input
-        codex_home = Path.home() / ".chad" / "codex-homes" / account_name
+        codex_home = safe_home() / ".chad" / "codex-homes" / account_name
         cmd = [
             resolve_tool("codex"),
             "exec",  # Non-interactive mode - runs to completion
@@ -612,12 +615,13 @@ def build_agent_command(
             "--skip-git-repo-check",  # Avoid git validation issues in worktrees
             "-C",
             str(project_path),
-            "-",  # Read prompt from stdin
         ]
         if model and model != "default":
             cmd.extend(["-m", model])
         if reasoning_effort and reasoning_effort != "default":
             cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        # The stdin marker must come after all options
+        cmd.append("-")
         env["HOME"] = str(codex_home)
         if full_prompt:
             initial_input = full_prompt + "\n"
@@ -625,30 +629,47 @@ def build_agent_command(
     elif provider == "gemini":
         # Gemini CLI in YOLO mode with stream-json output.
         # Use -p for headless execution; positional prompts keep the CLI interactive.
+        # GEMINI_CLI_HOME is the CLI's home override: it resolves its .gemini
+        # config/credentials dir under it, isolating accounts from each other.
+        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
+        gemini_home = safe_home() / ".chad" / "gemini-homes" / account_name
+        gemini_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("gemini"), "-y", "--output-format", "stream-json"]
         if model and model != "default":
             cmd.extend(["-m", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
+        env["GEMINI_CLI_HOME"] = str(gemini_home)
 
     elif provider == "qwen":
         # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
         # Using stdin doesn't work reliably because qwen checks stdin at startup
         # before we can send data via PTY. With subprocess.Popen(shell=False),
         # there's no shell escaping issues, just OS argv limits (~128KB on Linux).
+        # The CLI resolves .qwen from os.homedir(), so redirect HOME per account.
+        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
+        qwen_home = safe_home() / ".chad" / "qwen-homes" / account_name
+        qwen_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("qwen"), "-y", "--output-format", "stream-json"]
         if model and model != "default":
             cmd.extend(["-m", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
+        env["HOME"] = str(qwen_home)
+        if os.name == "nt":
+            # Node's os.homedir() reads USERPROFILE on Windows.
+            env["USERPROFILE"] = str(qwen_home)
 
     elif provider == "local":
         # Local OpenAI-compatible server (llama.cpp, vLLM, ...) driven through the
         # Qwen Code CLI's OpenAI-compatible auth. Endpoint comes from config.
+        # Same per-account HOME isolation as the qwen provider (same CLI).
         from chad.util.config_manager import ConfigManager
         from chad.util.providers import build_local_env
 
         endpoint = ConfigManager().get_local_endpoint()
+        local_home = safe_home() / ".chad" / "qwen-homes" / account_name
+        local_home.mkdir(parents=True, exist_ok=True)
         cmd = [
             resolve_tool("qwen"),
             "--auth-type",
@@ -657,22 +678,30 @@ def build_agent_command(
             "--output-format",
             "stream-json",
         ]
+        env["HOME"] = str(local_home)
+        if os.name == "nt":
+            env["USERPROFILE"] = str(local_home)
         env.update(build_local_env(endpoint, model))
         if full_prompt:
             cmd.extend(["-p", full_prompt])
 
     elif provider == "mistral":
         # Vibe CLI (Mistral) - pass prompt via -p flag like MistralVibeProvider expects
+        # VIBE_HOME is the CLI's config dir itself (config.toml/.env live in it),
+        # isolating each account's credentials.
+        vibe_home = safe_home() / ".chad" / "vibe-homes" / account_name
+        vibe_home.mkdir(parents=True, exist_ok=True)
         cmd = [resolve_tool("vibe"), "--output", "text"]
         if model and model != "default":
             cmd.extend(["--model", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
             initial_input = None
+        env["VIBE_HOME"] = str(vibe_home)
 
     elif provider == "kimi":
         # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
-        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        kimi_home = safe_home() / ".chad" / "kimi-homes" / account_name
         cmd = [resolve_tool("kimi"), "--output-format", "stream-json", "--print"]
         # Only pass -m for explicit model selection. The CLI uses config default_model
         # otherwise. Model keys must include the platform prefix (e.g. "kimi-code/kimi-k2.5").
@@ -691,6 +720,7 @@ def build_agent_command(
             account_name=account_name,
             phase=phase,
             run_duration_seconds=mock_run_duration_seconds,
+            prompt=full_prompt,
         )
 
     else:
@@ -702,17 +732,39 @@ def build_agent_command(
     return cmd, env, initial_input
 
 
+def _mock_python_executable() -> str:
+    """Interpreter for the mock agent script.
+
+    sys.executable is correct for normal installs (and the only reliable
+    choice on Windows, which has no `python3`). In a frozen build
+    sys.executable is the chad binary itself, so fall back to a python on
+    PATH.
+    """
+    if getattr(sys, "frozen", False):
+        import shutil
+        return shutil.which("python3") or shutil.which("python") or "python3"
+    return sys.executable
+
+
 def _build_mock_agent_command(
     project_path: Path,
     task_description: str | None,
     account_name: str = "",
     phase: str = "exploration",
     run_duration_seconds: int = 0,
+    prompt: str | None = None,
 ) -> list[str]:
     """Build mock agent command that simulates a real agent CLI."""
     duration = max(0, int(run_duration_seconds or 0))
-    # Escape the account name for embedding in the script string
-    safe_account = (account_name or "").replace("'", "\\'").replace('"', '\\"')
+    # A verification pass is recognizable by its conclusion prompt; the mock
+    # then emits a verdict JSON instead of a coding summary so the real
+    # verification code path can complete.
+    is_verification = bool(prompt) and "final verdict" in prompt.lower()
+    # Embed all dynamic values as JSON literals — raw f-string interpolation
+    # broke on Windows paths (\\U escapes) and quotes in paths.
+    account_json = json.dumps(account_name or "")
+    project_json = json.dumps(str(project_path))
+    phase_json = json.dumps(phase.capitalize())
     # Python script that outputs ANSI-formatted text like a real agent
     # Uses minimal delays to keep tests fast while still demonstrating ANSI output
     script = f'''
@@ -723,7 +775,8 @@ import time
 import random
 
 # Check mock quota before doing any work
-_account = "{safe_account}"
+_account = {account_json}
+_project = {project_json}
 if _account:
     _conf_path = os.path.join(os.path.expanduser("~"), ".chad.conf")
     _env_conf = os.environ.get("CHAD_CONFIG")
@@ -753,8 +806,8 @@ def writeln(text=""):
 
 # Header
 writeln(f"{{BLUE}}{{BOLD}}Mock Agent v1.0{{RESET}}")
-writeln(f"{{GRAY}}Working in: {project_path}{{RESET}}")
-writeln(f"{{CYAN}}Prompt: {phase.capitalize()}{{RESET}}")
+writeln(f"{{GRAY}}Working in: {{_project}}{{RESET}}")
+writeln(f"{{CYAN}}Prompt: {{{phase_json}}}{{RESET}}")
 writeln()
 
 # Thinking
@@ -767,26 +820,29 @@ writeln(f"{{GREEN}}✓{{RESET}} Read 15 lines")
 writeln(f"{{CYAN}}Tool: Glob{{RESET}} {{GRAY}}src/**/*.py{{RESET}}")
 writeln(f"{{GREEN}}✓{{RESET}} Found 8 files")
 
-# Make actual change
-writeln()
-writeln(f"{{YELLOW}}> Making changes...{{RESET}}")
+is_verification = {is_verification}
 
-import datetime
-bugs_path = "{project_path}/BUGS.md"
-try:
-    with open(bugs_path, "a") as f:
-        f.write(f"\\n## Mock Task - {{datetime.datetime.now().isoformat()}}\\n")
-        f.write("- Fixed simulated bug\\n")
-        f.write("- Added mock improvements\\n")
-    writeln(f"{{CYAN}}Tool: Edit{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
-    writeln(f"{{GREEN}}✓{{RESET}} Modified BUGS.md")
-except Exception as e:
-    writeln(f"{{YELLOW}}Note:{{RESET}} Could not modify BUGS.md: {{e}}")
+if not is_verification:
+    # Make actual change
+    writeln()
+    writeln(f"{{YELLOW}}> Making changes...{{RESET}}")
 
-# Verification
-writeln()
-writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
-writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
+    import datetime
+    bugs_path = os.path.join(_project, "BUGS.md")
+    try:
+        with open(bugs_path, "a") as f:
+            f.write(f"\\n## Mock Task - {{datetime.datetime.now().isoformat()}}\\n")
+            f.write("- Fixed simulated bug\\n")
+            f.write("- Added mock improvements\\n")
+        writeln(f"{{CYAN}}Tool: Edit{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
+        writeln(f"{{GREEN}}✓{{RESET}} Modified BUGS.md")
+    except Exception as e:
+        writeln(f"{{YELLOW}}Note:{{RESET}} Could not modify BUGS.md: {{e}}")
+
+    # Verification
+    writeln()
+    writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
+    writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
 
 # Optional long-running stream simulation for handover tests
 run_duration_seconds = {duration}
@@ -808,9 +864,26 @@ if run_duration_seconds > 0:
 # Summary
 writeln()
 writeln(f"{{BLUE}}{{BOLD}}Task Complete{{RESET}}")
-writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
+if is_verification:
+    # Verdict JSON so parse_verification_response succeeds
+    verdict = {{"passed": True, "summary": "Mock verification passed", "issues": []}}
+    writeln("```json")
+    writeln(json.dumps(verdict))
+    writeln("```")
+else:
+    writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
+    # Completion JSON so the executor sees the task as complete instead of
+    # burning three continuation runs looking for a summary
+    summary = {{
+        "change_summary": "Mock change: appended a simulated fix entry to BUGS.md",
+        "completion_status": "complete",
+        "files_changed": ["BUGS.md"],
+    }}
+    writeln("```json")
+    writeln(json.dumps(summary))
+    writeln("```")
 '''
-    return ["python3", "-c", script]
+    return [_mock_python_executable(), "-c", script]
 
 
 class TaskExecutor:
@@ -825,12 +898,10 @@ class TaskExecutor:
         config_manager,
         session_manager,
         inactivity_timeout: float | None = 900.0,
-        terminal_flush_interval: float = 0.5,
     ):
         self.config_manager = config_manager
         self.session_manager = session_manager
         self.inactivity_timeout = inactivity_timeout
-        self.terminal_flush_interval = terminal_flush_interval
         self._tasks: dict[str, Task] = {}
         # Track activity across all channels (PTY output AND tool calls) so timeouts
         # don't ignore heavy Read/Grep usage with no terminal writes.
@@ -922,6 +993,20 @@ class TaskExecutor:
         if coding_account not in accounts:
             raise ValueError(f"Account '{coding_account}' not found")
 
+        # Refuse a logged-out account here rather than letting the provider CLI
+        # discover it: the CLI retries a doomed token refresh for minutes before
+        # printing a raw 401, which reads as a hung agent. A local model server
+        # has no login to be logged out of, so it is not checked.
+        from chad.util import provider_login
+
+        coding_provider_type = accounts[coding_account]
+        if coding_provider_type != "local" and not provider_login.is_logged_in(
+            coding_provider_type, coding_account
+        ):
+            raise ValueError(
+                f"Account '{coding_account}' is logged out — open Providers and log in again."
+            )
+
         # Check git repo
         git_mgr = GitWorktreeManager(path_obj)
         if not git_mgr.is_git_repo():
@@ -941,7 +1026,7 @@ class TaskExecutor:
                 if existing_task.session_id != session_id:
                     continue
                 if existing_task.state == TaskState.RUNNING:
-                    raise ValueError(
+                    raise TaskAlreadyRunningError(
                         f"Task {existing_task.id} is already running in session {session_id}"
                     )
             self._tasks[task.id] = task
@@ -950,32 +1035,25 @@ class TaskExecutor:
         # Get provider info
         coding_provider = accounts[coding_account]
 
-        # Build verification config gated by runtime verification settings
+        # Build verification config. An account picked for this task wins over
+        # the global verification_enabled flag, which only supplies the default:
+        # the per-session picker used to be silently ignored while verification
+        # was globally off, so a task the user asked to verify never was.
         verification_config = None
-        ver_enabled = self.config_manager.get_runtime_verification_settings()
-
-        if ver_enabled:
-            if verification_account:
+        if verification_account:
+            verification_config = {
+                "verification_account": verification_account,
+                "verification_model": verification_model,
+                "verification_reasoning": verification_reasoning,
+            }
+        elif self.config_manager.get_runtime_verification_settings():
+            auto_account = self.config_manager.get_verification_agent()
+            if auto_account and auto_account != self.config_manager.VERIFICATION_NONE:
                 verification_config = {
-                    "verification_account": verification_account,
+                    "verification_account": auto_account,
                     "verification_model": verification_model,
                     "verification_reasoning": verification_reasoning,
                 }
-            else:
-                # Run verification using configured verification agent when enabled
-                try:
-                    auto_account = self.config_manager.get_verification_agent()
-                except Exception:
-                    auto_account = None
-                if auto_account and auto_account != self.config_manager.VERIFICATION_NONE:
-                    verification_config = {
-                        "verification_account": auto_account,
-                        "verification_model": verification_model,
-                        "verification_reasoning": verification_reasoning,
-                    }
-        else:
-            # Runtime verification disabled – ignore any requested verification
-            verification_config = None
 
         # Start execution thread
         thread = threading.Thread(
@@ -1056,43 +1134,27 @@ class TaskExecutor:
 
         last_output_time = time.time()
         last_warning_time = 0.0
-        last_log_flush = time.time()
         # Reset the activity timestamp for this task so a stale timestamp from a
         # prior phase (e.g., the coding phase before an await_reset pause) does
         # not cause the inactivity check to fire immediately when a new phase starts.
         with self._lock:
             self._activity_times[task.id] = last_output_time
-        terminal_buffer = bytearray()
-        terminal_lock = threading.Lock()
         captured_output: list[str] = []
-
-        # Terminal emulator for extracting meaningful text from PTY output
-        log_emulator = TerminalEmulator(cols=cols, rows=rows)
-        # Persist dedupe baseline across phases to avoid duplicate terminal_output
-        # rows when a new phase starts with an unchanged screen.
-        last_logged_text = task._last_terminal_snapshot
         pty_service = get_pty_stream_service()
 
-        def flush_terminal_buffer():
-            nonlocal last_logged_text, last_log_flush
-            with terminal_lock:
-                if not terminal_buffer:
-                    last_log_flush = time.time()
-                    return
-                data_bytes = bytes(terminal_buffer)
-                terminal_buffer.clear()
+        def log_terminal_delta(text: str) -> int | None:
+            """Log one chunk of new terminal text and return its log seq.
 
-            # Feed data to terminal emulator and extract visible text
-            log_emulator.feed(data_bytes)
-            current_text = log_emulator.get_text()
-
-            # Only log if there's meaningful new content
-            if current_text != last_logged_text and current_text.strip():
-                if task.event_log:
-                    task.event_log.log(TerminalOutputEvent(data=current_text))
-                last_logged_text = current_text
-                task._last_terminal_snapshot = current_text
-            last_log_flush = time.time()
+            Terminal events are deltas in the EventLog's seq space: replay
+            consumers (WS catchup, the UI's history view) append them in order,
+            and live PTY chunks carry the same seq so client-side seq dedup
+            collapses replays instead of dropping or duplicating output.
+            """
+            if not task.event_log:
+                return None
+            ev = TerminalOutputEvent(data=text)
+            task.event_log.log(ev)
+            return ev.seq
 
         # Build agent command for this phase
         mock_run_duration_seconds = 0
@@ -1163,11 +1225,10 @@ class TaskExecutor:
                         event.data = readable_text
                         event.has_ansi = False
                         event.text = True
+                        event.seq = log_terminal_delta(readable_text)
 
                         encoded = base64.b64encode(readable_text.encode()).decode()
                         emit("stream", chunk=encoded)
-                        with terminal_lock:
-                            terminal_buffer.extend(readable_text.encode())
                         _feed_captured(readable_text)
                     else:
                         # Suppress raw stream-json chunks from reaching subscribers
@@ -1194,9 +1255,8 @@ class TaskExecutor:
                         event.data = readable_text
                         event.has_ansi = False
                         event.text = True
+                        event.seq = log_terminal_delta(readable_text)
                         emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                        with terminal_lock:
-                            terminal_buffer.extend(readable_text.encode())
                         _feed_captured(readable_text)
                     else:
                         # Suppress banner / prompt echo / command output from subscribers.
@@ -1209,11 +1269,9 @@ class TaskExecutor:
                     decoded = chunk_bytes.decode(errors="replace")
                     cleaned = _strip_binary_garbage(decoded)
                     if cleaned.strip():
-                        cleaned_bytes = cleaned.encode()
-                        encoded = base64.b64encode(cleaned_bytes).decode()
+                        event.seq = log_terminal_delta(cleaned)
+                        encoded = base64.b64encode(cleaned.encode()).decode()
                         emit("stream", chunk=encoded)
-                        with terminal_lock:
-                            terminal_buffer.extend(cleaned_bytes)
                         _feed_captured(cleaned)
 
         # Start PTY session
@@ -1270,29 +1328,32 @@ class TaskExecutor:
                     last_warning_time = now
 
                 if idle_secs > self.inactivity_timeout:
-                    flush_terminal_buffer()
                     pty_service.terminate(stream_id)
                     pty_service.cleanup_session(stream_id)
                     return -2, ""  # -2 indicates timeout
 
-            # Periodically flush decoded terminal snapshots to EventLog so
-            # long-running sessions are observable before process exit.
-            if time.time() - last_log_flush >= self.terminal_flush_interval:
-                flush_terminal_buffer()
-
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
+
+        # The PTY session vanished under us (e.g. the session was deleted and
+        # its streams cleaned up externally). Treat as cancellation — the old
+        # default of 0 made a killed agent read as a successful run.
+        if pty_session is None:
+            return -1, ""
 
         # Get final exit code.  The reader thread sets exit_code after
         # _proc.wait(), but terminate() sets active=False first.  Wait briefly
         # for the reader thread to populate exit_code to avoid a race.
-        exit_code = 0
-        if pty_session:
-            for _ in range(20):  # up to 2 seconds
-                if pty_session.exit_code is not None:
-                    break
-                time.sleep(0.1)
-            exit_code = pty_session.exit_code if pty_session.exit_code is not None else 0
+        for _ in range(50):  # up to 5 seconds
+            if pty_session.exit_code is not None:
+                break
+            time.sleep(0.1)
+        if pty_session.exit_code is None:
+            # Unknown outcome — report failure rather than assuming success
+            emit("status", status="⚠️ Agent exit code unavailable; treating as failure")
+            exit_code = 1
+        else:
+            exit_code = pty_session.exit_code
 
         # Flush any trailing Codex output (last line may lack a newline)
         if codex_parser:
@@ -1308,28 +1369,20 @@ class TaskExecutor:
                     prose_parts.append(payload)
             readable_text = _strip_binary_garbage("".join(prose_parts))
             if readable_text.strip():
+                log_terminal_delta(readable_text)
                 emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                with terminal_lock:
-                    terminal_buffer.extend(readable_text.encode())
                 _feed_captured(readable_text)
-                captured_output.append(readable_text)
 
         # Flush any remaining data in the JSON parser (last event may lack trailing newline)
         if json_parser:
             remaining = json_parser.flush()
             if remaining:
                 readable_text = _render_stream_json_text_chunks(remaining)
-                if not readable_text:
-                    readable_text = ""
-                # Emit final parsed output to stream and logs
                 if readable_text:
+                    log_terminal_delta(readable_text)
                     emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                    with terminal_lock:
-                        terminal_buffer.extend(readable_text.encode())
                     _feed_captured(readable_text)
-                    captured_output.append(readable_text)
 
-        flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
 
         if task.cancel_requested:
@@ -1503,6 +1556,7 @@ class TaskExecutor:
                 run_phase_fn=self._run_phase,
                 emit_fn=emit,
                 worktree_path=worktree_path,
+                max_verification_attempts=self.config_manager.get_max_verification_attempts(),
                 is_quota_exhausted_fn=quota_checker,
                 get_session_usage_fn=_check_provider.get_session_usage_percentage if _check_provider else None,
                 get_weekly_usage_fn=_check_provider.get_weekly_usage_percentage if _check_provider else None,
@@ -1540,6 +1594,7 @@ class TaskExecutor:
             if task.cancel_requested or final_exit_code == -1:
                 emit("status", status="Task cancelled")
                 task.state = TaskState.CANCELLED
+                task.result = "Task cancelled"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
@@ -1549,10 +1604,11 @@ class TaskExecutor:
 
             # Handle timeout
             if final_exit_code == -2:
-                emit("complete", success=False, message="Agent timed out", exit_code=-1)
+                emit("complete", success=False, message="Agent timed out", exit_code=-2)
                 emit("message_complete", speaker="CODING AI", content="Task timed out")
                 task.state = TaskState.FAILED
                 task.error = "Agent timed out"
+                task.result = "Agent timed out"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
@@ -1569,7 +1625,10 @@ class TaskExecutor:
 
             if final_exit_code == 0:
                 task.state = TaskState.COMPLETED
-                task.result = "Task completed successfully"
+                if event_loop.verification_passed is False:
+                    task.result = "Task completed, but verification did not pass"
+                else:
+                    task.result = "Task completed successfully"
                 session.has_worktree_changes = git_mgr.has_changes(
                     task.session_id,
                     session.worktree_base_commit,
@@ -1578,18 +1637,25 @@ class TaskExecutor:
                 emit(
                     "complete",
                     success=True,
-                    message="Task completed successfully",
+                    message=task.result,
                     has_changes=session.has_worktree_changes,
                     exit_code=final_exit_code,
                 )
             else:
                 task.state = TaskState.FAILED
-                task.error = f"Agent exited with code {final_exit_code}"
+                # Surface the agent's last words (e.g. an auth error asking the
+                # user to re-login) — a bare exit code tells the user nothing.
+                error = f"Agent exited with code {final_exit_code}"
+                tail = accumulated_output.strip()[-500:]
+                if tail:
+                    error = f"{error}: {tail}"
+                task.error = error
+                task.result = error
                 session.status = "completed"
                 emit(
                     "complete",
                     success=False,
-                    message=f"Agent exited with code {final_exit_code}",
+                    message=error,
                     exit_code=final_exit_code,
                 )
                 emit("message_complete", speaker="CODING AI", content=f"Task failed (exit {final_exit_code})")
@@ -1608,6 +1674,7 @@ class TaskExecutor:
             emit("error", error=str(e))
             task.state = TaskState.FAILED
             task.error = str(e)
+            task.result = str(e)
             task.completed_at = datetime.now(timezone.utc)
             session.status = "interrupted"
 

@@ -33,8 +33,8 @@ def _run() -> tuple[str, str, str | None]:
     instance = start_chad(env)
     try:
         with open_playwright_page(instance.port, headless=True) as page:
-            # Wait until connected (header gets .connected once /status responds).
-            page.wait_for_selector(".app-header h1.connected", timeout=15000)
+            # Wait until connected (the Chad button gets .connected once /status responds).
+            page.wait_for_selector(".chad-btn.connected", timeout=15000)
 
             # Create a new (WIP) session — it appears as a tab in the header.
             page.click(".new-session-btn")
@@ -46,7 +46,7 @@ def _run() -> tuple[str, str, str | None]:
 
             # Reload the browser — this is what previously dropped the WIP tab.
             page.reload(wait_until="domcontentloaded")
-            page.wait_for_selector(".app-header h1.connected", timeout=15000)
+            page.wait_for_selector(".chad-btn.connected", timeout=15000)
 
             # The tab must still be present after the reload.
             page.wait_for_selector(".session-tab", timeout=10000)

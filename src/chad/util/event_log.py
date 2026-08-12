@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -244,14 +245,15 @@ class ContextCondensedEvent(EventBase):
 
 @dataclass
 class TerminalOutputEvent(EventBase):
-    """Logged for terminal screen content.
+    """Logged for each chunk of new terminal output.
 
-    Contains human-readable text extracted from the terminal screen,
-    with ANSI sequences processed by the terminal emulator. Only logged
-    when screen content meaningfully changes.
+    Contains only the NEW human-readable text of one output chunk (a delta,
+    never a cumulative screen snapshot): consumers replay these events
+    append-only, and live streams reuse each event's seq so clients can
+    dedupe replayed chunks.
     """
 
-    data: str = ""  # Human-readable screen text (processed by terminal emulator)
+    data: str = ""  # Human-readable text of this chunk only
 
 
 @dataclass
@@ -295,6 +297,10 @@ class EventLog:
         self.session_id = session_id
         self._seq = 0
         self._current_turn_id: str | None = None
+        # log() is called from multiple threads (task worker, HTTP handlers
+        # enqueuing user messages, PTY reader) — serialize seq + append so
+        # sequence numbers stay unique and lines don't interleave.
+        self._write_lock = threading.Lock()
 
         # Determine base directory
         env_dir = os.environ.get("CHAD_LOG_DIR")
@@ -340,18 +346,19 @@ class EventLog:
         return self._current_turn_id
 
     def log(self, event: EventBase) -> None:
-        """Log an event to the session log."""
-        # Set sequence and session info
-        event.seq = self._next_seq()
-        event.session_id = self.session_id
-        if event.turn_id is None:
-            event.turn_id = self._current_turn_id
+        """Log an event to the session log. Thread-safe."""
+        with self._write_lock:
+            # Set sequence and session info
+            event.seq = self._next_seq()
+            event.session_id = self.session_id
+            if event.turn_id is None:
+                event.turn_id = self._current_turn_id
 
-        # Serialize and append
-        event_dict = event.to_dict()
+            # Serialize and append
+            event_dict = event.to_dict()
 
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event_dict) + "\n")
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event_dict) + "\n")
 
     def store_artifact(
         self,

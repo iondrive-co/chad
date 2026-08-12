@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { ChadAPI, Account, ProviderInfo, AccountUsage } from "chad-client";
 
 interface Props {
@@ -20,6 +20,12 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [refreshingUsage, setRefreshingUsage] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const isApiKeyProvider = (provider: string) => provider === "mistral";
 
@@ -77,12 +83,21 @@ export function ProvidersPanel({ api, connected }: Props) {
     api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
   }, [api]);
 
+  // Keep the Add-provider type in sync with the loaded provider list so the
+  // submitted type always matches what the select shows.
+  useEffect(() => {
+    if (providers.length === 0) return;
+    setNewType((prev) => (providers.some((p) => p.type === prev) ? prev : providers[0].type));
+  }, [providers]);
+
   const pollReady = useCallback(async (name: string) => {
     // Install + browser OAuth complete out-of-band; poll until ready.
     for (let i = 0; i < 180; i++) {
       await new Promise((r) => setTimeout(r, 2000));
+      if (!mountedRef.current) return;
       try {
         const acc = await api.getAccount(name);
+        if (!mountedRef.current) return;
         if (acc.ready) {
           flash(`${name} logged in`);
           await refresh();
@@ -90,6 +105,7 @@ export function ProvidersPanel({ api, connected }: Props) {
         }
       } catch { /* keep polling */ }
     }
+    if (!mountedRef.current) return;
     flash("Login not completed — try again");
     await refresh();
   }, [api, refresh, flash]);
@@ -153,12 +169,14 @@ export function ProvidersPanel({ api, connected }: Props) {
     }
   }, [api, refresh, flash]);
 
-  const handleSetRole = useCallback(async (name: string, role: string) => {
+  const handleSetRole = useCallback(async (name: string, role: "CODING" | null) => {
     try {
       await api.setAccountRole(name, role);
       flash("Role updated");
       await refresh();
-    } catch { /* */ }
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "Failed to update role");
+    }
   }, [api, refresh, flash]);
 
   const handleSetReasoning = useCallback(async (name: string, reasoning: string) => {
@@ -239,14 +257,16 @@ export function ProvidersPanel({ api, connected }: Props) {
                 <span className="account-name">{a.name}</span>
                 <span className="account-provider">{a.provider}</span>
                 <span className={`account-status ${a.ready ? "ready" : ""}`}>
-                  {a.ready ? "Ready" : "Not ready"}
+                  {a.ready ? "Ready" : "Logged out"}
                 </span>
                 <button className="delete-rule-btn" onClick={() => handleDelete(a.name)} disabled={dis}>x</button>
               </div>
 
               {!a.ready && (
                 <div className="account-login">
-                  <span className="login-hint">Log in to authorize this account.</span>
+                  <span className="login-hint">
+                    Log in to authorize this account. Tasks can't run until you do.
+                  </span>
                   {isApiKeyProvider(a.provider) && (
                     <input
                       type="password"
@@ -291,12 +311,11 @@ export function ProvidersPanel({ api, connected }: Props) {
                   <span className="field-label">Role:</span>
                   <select
                     value={a.role ?? ""}
-                    onChange={(e) => handleSetRole(a.name, e.target.value)}
+                    onChange={(e) => handleSetRole(a.name, e.target.value === "CODING" ? "CODING" : null)}
                     disabled={dis}
                   >
                     <option value="">None</option>
                     <option value="CODING">Coding</option>
-                    <option value="VERIFICATION">Verification</option>
                   </select>
                 </div>
 
@@ -318,8 +337,19 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </div>
                 )}
 
+                {/* A logged-out account has no usage to report — say so, rather
+                    than leaving the row blank or showing a fabricated 0%. */}
+                {usage?.logged_out && (
+                  <div className="account-usage">
+                    <div className="usage-row">
+                      <span className="field-label">Usage:</span>
+                      <span className="usage-bar">Logged out — log in to see usage</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Usage display */}
-                {usage && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
+                {usage && !usage.logged_out && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
                   <div className="account-usage">
                     {usage.session_usage_pct !== null && (
                       <div className="usage-row">

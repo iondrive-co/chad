@@ -437,7 +437,8 @@ class TestMockProviderThroughAPI:
             task_description="Fix the bug",
         )
 
-        assert cmd[0] == "python3"
+        # Uses the running interpreter — `python3` broke on Windows and under venvs
+        assert cmd[0] == sys.executable
         assert cmd[1] == "-c"
         # Script should be in cmd[2]
         assert "Mock Agent" in cmd[2]
@@ -3134,3 +3135,170 @@ class TestTerminalDimensionsThroughAPI:
         # Verify LINES and COLUMNS are in the environment
         assert "LINES=45" in output, f"Expected 'LINES=45' in output, got: {output!r}"
         assert "COLUMNS=150" in output, f"Expected 'COLUMNS=150' in output, got: {output!r}"
+
+
+class TestTerminalEventSemantics:
+    """Terminal output must stream and log as deltas with one seq space.
+
+    History (EventLog replay) must equal the live stream: every terminal_output
+    event carries only NEW text (never a cumulative screen snapshot), and every
+    distinct chunk gets its own seq so client-side seq dedup can never drop
+    real output or duplicate replayed output.
+    """
+
+    MARKERS = [f"MARKER_{i} unique prose" for i in range(6)]
+
+    def _start_stream_json_task(self, client, git_repo, monkeypatch):
+        """Start a task whose fake stream-json agent emits 6 marker lines."""
+        import chad.server.services.task_executor as te
+
+        lines = [
+            "import json, time",
+            "events = [",
+        ]
+        for m in self.MARKERS:
+            lines.append(
+                '    {"type": "assistant", "message": {"content": '
+                '[{"type": "text", "text": "%s"}]}},' % m
+            )
+        lines += [
+            "]",
+            "completion = json.dumps({\"change_summary\": \"Done\", \"files_changed\": [],"
+            " \"completion_status\": \"success\"})",
+            "events.append({\"type\": \"assistant\", \"message\": {\"content\": "
+            "[{\"type\": \"text\", \"text\": \"```json\\n\" + completion + \"\\n```\"}]}})",
+            "for event in events:",
+            "    print(json.dumps(event), flush=True)",
+            "    time.sleep(0.05)",
+            "time.sleep(0.3)",
+        ]
+        script = "\n".join(lines)
+
+        def fake_command(provider, account_name, project_path, task_description=None,
+                         screenshots=None, phase="combined", exploration_output=None,
+                         **kwargs):
+            return [sys.executable, "-c", script], {}, None
+
+        monkeypatch.setattr(te, "build_agent_command", fake_command)
+        # The agent command is faked above, so this account has no credentials on
+        # disk; skip the logged-out preflight, which isn't what this test covers.
+        monkeypatch.setattr("chad.util.provider_login.is_logged_in", lambda *a: True)
+
+        client.post("/api/v1/accounts", json={"name": "seq-claude", "provider": "anthropic"})
+        create_resp = client.post("/api/v1/sessions", json={"name": "Seq-Test"})
+        session_id = create_resp.json()["id"]
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "terminal delta semantics",
+                "coding_agent": "seq-claude",
+            },
+        )
+        assert task_resp.status_code == 201
+        return session_id
+
+    @staticmethod
+    def _terminal_text(msg) -> str:
+        raw = msg["data"].get("data") or ""
+        if not raw:
+            return ""
+        if msg["data"].get("text"):
+            return raw
+        try:
+            return base64.b64decode(raw).decode("utf-8", errors="replace")
+        except Exception:
+            return raw
+
+    def _collect_ws(self, client, session_id, timeout=30):
+        received = []
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    msg = websocket.receive_json()
+                except Exception:
+                    break
+                received.append(msg)
+                if msg["type"] in ("complete", "error"):
+                    break
+        return received
+
+    def test_live_terminal_chunks_never_share_a_seq(self, client, git_repo, monkeypatch):
+        """Two different terminal chunks must never be delivered under one seq.
+
+        Clients dedupe terminal messages by seq (for replay/reconnect), so a
+        shared seq silently drops real output from the live transcript.
+        """
+        session_id = self._start_stream_json_task(client, git_repo, monkeypatch)
+        received = self._collect_ws(client, session_id)
+
+        by_seq = {}
+        for msg in received:
+            if msg["type"] != "terminal":
+                continue
+            text = self._terminal_text(msg).strip()
+            if not text:
+                continue
+            seq = msg["data"].get("seq")
+            assert seq is not None, f"terminal message without seq: {msg}"
+            by_seq.setdefault(seq, set()).add(text)
+
+        colliding = {s: t for s, t in by_seq.items() if len(t) > 1}
+        assert not colliding, (
+            "distinct terminal chunks shared a seq (client dedup would drop "
+            f"output): {colliding}"
+        )
+
+    def test_terminal_history_replay_has_no_duplicate_prose(self, client, git_repo, monkeypatch):
+        """A client connecting mid-task must see each prose line exactly once.
+
+        The WS catchup path replays EventLog terminal events, then the live PTY
+        buffer replays the same chunks. Both must be deltas in one seq space so
+        seq-dedup collapses them; cumulative screen snapshots duplicate prose.
+        """
+        session_id = self._start_stream_json_task(client, git_repo, monkeypatch)
+        # Let some output accumulate so the WS connect goes through catchup.
+        time.sleep(0.8)
+        received = self._collect_ws(client, session_id)
+
+        seen_seqs = set()
+        parts = []
+        for msg in received:
+            if msg["type"] != "terminal":
+                continue
+            seq = msg["data"].get("seq")
+            if seq in seen_seqs:
+                continue
+            seen_seqs.add(seq)
+            parts.append(self._terminal_text(msg))
+        transcript = "".join(parts)
+
+        for marker in self.MARKERS:
+            count = transcript.count(marker)
+            assert count == 1, (
+                f"marker {marker!r} appeared {count} times in the deduped "
+                f"transcript; terminal events must be deltas, not snapshots"
+            )
+
+    def test_event_log_terminal_events_are_deltas(self, client, git_repo, monkeypatch):
+        """The stored event log must contain each prose line exactly once."""
+        session_id = self._start_stream_json_task(client, git_repo, monkeypatch)
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
+            events = events_resp.json()["events"]
+            if any(e["type"] == "session_ended" for e in events):
+                break
+            time.sleep(0.3)
+
+        terminal_text = "".join(
+            e.get("data") or "" for e in events if e["type"] == "terminal_output"
+        )
+        for marker in self.MARKERS:
+            count = terminal_text.count(marker)
+            assert count == 1, (
+                f"marker {marker!r} appears {count} times in logged "
+                f"terminal_output events; log must store deltas, not snapshots"
+            )

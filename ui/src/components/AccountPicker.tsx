@@ -65,7 +65,7 @@ export function AccountPicker({
         <option key={a.name} value={a.name} disabled={!a.ready}>
           {a.name} ({a.provider}
           {a.model ? ` / ${a.model}` : ""}
-          {!a.ready ? " - not ready" : ""})
+          {!a.ready ? " - logged out" : ""})
         </option>
       ))}
     </select>

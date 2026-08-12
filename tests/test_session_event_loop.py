@@ -517,6 +517,65 @@ class TestExplorationMilestoneDetection:
         ]
         assert len(exploration_emits) == 1
 
+    def test_truncates_long_summary_instead_of_dropping_it(self):
+        """A detailed finding must still reach the chat panel, truncated.
+
+        Session 3d8c2c1b emitted a single 841-char EXPLORATION_RESULT and it was
+        discarded for exceeding the length cap, so the chat panel held nothing
+        but the user's prompt for a 20-minute run.
+        """
+        loop, event_log, emitted = self._make_loop()
+
+        finding = (
+            "The reasoning dropdown clipping was not a max-width bug: "
+            + "the composer row is tight so flexbox freezes the item at min-width. "
+            * 12
+        )
+        assert len(finding) > 400, "fixture must exceed the cap to be a regression test"
+        loop.feed_output(f"EXPLORATION_RESULT: {finding}\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        summary = exploration_emits[0][1]["summary"]
+        assert len(summary) == 400
+        assert summary.startswith("The reasoning dropdown clipping was not a max-width bug")
+        assert summary.endswith("…")
+
+    def test_keeps_summary_at_the_length_cap_verbatim(self):
+        """A summary exactly at the cap is passed through untouched."""
+        loop, event_log, emitted = self._make_loop()
+
+        finding = "A" + "b" * 398 + "C"
+        assert len(finding) == 400
+        loop.feed_output(f"EXPLORATION_RESULT: {finding}\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert exploration_emits[0][1]["summary"] == finding
+
+    def test_still_drops_long_narration(self):
+        """Truncation must not smuggle narration past the narration filter."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output(
+            "EXPLORATION_RESULT: " + "I'll go read the composer styles next. " * 15 + "\n"
+        )
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 0
+
     def test_ignores_invalid_terminal_metadata_summaries(self):
         """Discovery markers with terminal metadata should be ignored."""
         loop, event_log, emitted = self._make_loop()
@@ -1185,7 +1244,7 @@ class TestFinalThresholdCheckAfterPhase:
                 "usage_threshold",
                 "Paused, waiting for weekly reset (ETA: 30m)",
             )
-            return ""
+            return 0, ""
 
         loop._handle_await_reset = fake_handle_await_reset
 
@@ -1435,7 +1494,6 @@ class TestQuotaCheckerAfterSwitch:
         task = type("Task", (), {
             "cancel_requested": False,
             "stream_id": None,
-            "_last_terminal_snapshot": "",
             "_mock_duration_applied": False,
         })()
 
@@ -1753,6 +1811,64 @@ class TestAwaitResetPollingLoop:
         # Verify we actually polled (slept at least twice at 10s each)
         assert len(sleeps) >= 2
 
+    def test_await_reset_resumes_when_usage_readings_stop_arriving(self, monkeypatch):
+        """An unreadable usage number must not pause the session forever.
+
+        Usage reads None once the provider's cache goes stale (API down for over
+        half an hour) or the account is logged out. Waiting for a value that may
+        never come left the session paused indefinitely; instead the wait ends
+        and the resumed run surfaces whatever is actually wrong.
+        """
+        from chad.server.services.session_event_loop import (
+            _UNKNOWN_USAGE_POLLS_BEFORE_RESUME,
+        )
+
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+        polls = [0]
+
+        def usage_fn():
+            polls[0] += 1
+            return None
+
+        monkeypatch.setattr(
+            "chad.server.services.session_event_loop.time.sleep", lambda s: None
+        )
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False})(),
+            run_phase_fn=lambda **kw: (phases_run.append(kw.get("phase")), (0, "done"))[1],
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+        )
+        loop._running = True
+
+        loop._handle_await_reset(
+            action={"event": "session_usage", "threshold": 100, "action": "await_reset", "label": "session"},
+            session=None,
+            task_description="test task",
+            previous_output="",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_account="mock-1",
+            coding_provider="mock",
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert polls[0] == _UNKNOWN_USAGE_POLLS_BEFORE_RESUME
+        summaries = [e[1]["summary"] for e in emitted if e[0] == "milestone"]
+        assert any("unavailable" in s for s in summaries), summaries
+        assert phases_run == ["continuation"]
+
     def test_await_reset_with_eta(self, monkeypatch):
         """ETA from provider is included in the paused milestone."""
         event_log = FakeEventLog()
@@ -1934,7 +2050,6 @@ class TestNegativeExitCodeWithPendingAction:
         task = type("Task", (), {
             "cancel_requested": False,
             "stream_id": None,
-            "_last_terminal_snapshot": "",
             "_mock_duration_applied": False,
         })()
 
@@ -2064,7 +2179,7 @@ class TestNegativeExitCodeWithPendingAction:
             "action": "await_reset",
             "label": "session",
         }
-        result = loop._handle_await_reset(
+        wait_exit, result = loop._handle_await_reset(
             action=action,
             session=None,
             task_description="cleanup ui",
