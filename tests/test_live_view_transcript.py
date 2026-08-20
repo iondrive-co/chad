@@ -110,9 +110,9 @@ def _run() -> tuple[str, dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         with open_playwright_page(instance.port, headless=True) as page:
-            # Create + open a fresh session via the New button.
-            page.wait_for_selector(".new-session-btn", timeout=15000)
-            page.click(".new-session-btn")
+            # Create + open a fresh session via the new-session project picker.
+            page.wait_for_selector(".new-session-select", timeout=15000)
+            page.select_option(".new-session-select", index=1)
             page.wait_for_selector(".session-tab-name", timeout=10000)
             session_id = page.inner_text(".session-tab-name").strip()
             assert session_id, "expected an opened session tab"
@@ -122,7 +122,7 @@ def _run() -> tuple[str, dict]:
             # switches; key is the session id). So create a second session, then
             # switch back — that remounts ChatView for our session with the log present.
             _write_synthetic_log(session_id, log_dir)
-            page.click(".new-session-btn")
+            page.select_option(".new-session-select", index=1)
             page.wait_for_timeout(500)
             page.locator(".session-tab", has_text=session_id).click()
             page.wait_for_selector(".terminal-output", timeout=10000)

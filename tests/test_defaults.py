@@ -79,7 +79,7 @@ def test_ui_tabs_start_with_projects_and_new_button():
     assert 'tab === "settings"' in text
     assert "Settings" in text
 
-    # New session button should show "New" not "+"
-    assert "New" in text
-    assert 'title="New session"' in text
+    # New session control should be a project picker showing "New", not a bare "+"
+    assert "new-session-select" in text
+    assert '<option value="" disabled>+ New</option>' in text
     assert ">+</button>" not in text

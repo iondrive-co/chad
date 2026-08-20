@@ -48,8 +48,8 @@ def _open_composer(coding_provider: str, coding_model: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         with open_playwright_page(instance.port, headless=True) as page:
-            page.wait_for_selector(".new-session-btn", timeout=15000)
-            page.click(".new-session-btn")
+            page.wait_for_selector(".new-session-select", timeout=15000)
+            page.select_option(".new-session-select", index=1)
             page.wait_for_selector(".chat-composer", timeout=10000)
             # Give the coding-account / model-catalog fetches time to resolve.
             page.wait_for_timeout(1500)

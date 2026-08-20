@@ -483,6 +483,29 @@ label {
   color: var(--accent);
 }
 
+.new-session-select {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  padding: 10px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+
+.new-session-select:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.new-session-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .badge {
   font-size: 14px;
   padding: 3px 7px;
@@ -2587,87 +2610,14 @@ label {
   flex-wrap: wrap;
 }
 
-.project-selector-bar label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 1rem;
-  color: var(--text-muted);
-  flex: 1;
-}
-
 .project-selector-label {
   font-size: 1rem;
   color: var(--text-muted);
 }
 
-.project-selector-bar select,
-.project-selector-new input {
-  flex: 1;
-  padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 1rem;
-}
-
-.project-selector-bar select:focus,
-.project-selector-new input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.project-selector-new {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.project-selector-new input {
-  min-width: 180px;
-}
-
-.project-selector-new button {
-  padding: 6px 14px;
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  white-space: nowrap;
-}
-
-.project-selector-new button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.project-selector-error {
-  font-size: 1rem;
-  color: var(--error);
-}
-
 @media (max-width: 640px) {
   .project-selector-bar {
     align-items: stretch;
-  }
-
-  .project-selector-bar label,
-  .project-selector-new {
-    flex-basis: 100%;
-  }
-
-  .project-selector-new {
-    flex-wrap: wrap;
-  }
-
-  .project-selector-error {
-    flex-basis: 100%;
   }
 
   .projects-layout {

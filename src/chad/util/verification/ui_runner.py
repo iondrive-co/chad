@@ -155,6 +155,9 @@ def create_temp_env(screenshot_mode: bool = True) -> TempChadEnv:
         "accounts": {},
     }
     security_mgr.save_config(config)
+    # Register the temp project directory so it shows up in the UI's new-session
+    # project picker — a session can no longer be created without one.
+    security_mgr.set_project_config(project_dir, {})
 
     if screenshot_mode:
         # Create fixture accounts for release screenshots

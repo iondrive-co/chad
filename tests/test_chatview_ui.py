@@ -427,51 +427,78 @@ class TestVerificationAgentPicker:
         )
 
 
-class TestProjectSelectorNewProject:
-    """Verify the chat project selector can create and select a new project path."""
+class TestProjectFixedAtSessionCreation:
+    """A session's project is chosen once, at creation, and can't change after.
 
-    def test_chatview_has_new_project_entry_form(self):
-        """Selecting New project should reveal an editable project path form."""
+    Regression coverage for: switching projects from within ChatView never
+    actually changed which project a task ran against (the session's own
+    project_path always won), so every session silently stayed grouped under
+    whichever project was configured first. The fix removes the in-chat
+    project dropdown entirely and requires the project to be picked when the
+    session is created (see TestNewSessionRequiresProjectChoice below).
+    """
+
+    def test_chatview_has_no_project_dropdown_or_add_form(self):
+        """ChatView must not offer any way to change or add a project."""
         content = CHATVIEW_FILE.read_text()
 
-        assert "NEW_PROJECT_VALUE" in content, (
-            "ChatView should have a sentinel option for starting a new project"
+        assert "NEW_PROJECT_VALUE" not in content, (
+            "ChatView should not have a sentinel option for starting a new project"
         )
-        assert "New project" in content, (
-            "Project selector should include a New project option"
+        assert "newProjectPath" not in content, (
+            "ChatView should not track a path being entered for a new project"
         )
-        assert "newProjectPath" in content, (
-            "ChatView should track the path being entered for a new project"
+        assert "creatingProject" not in content, (
+            "ChatView should not have new-project-form state"
         )
-        assert 'className="project-selector-new"' in content, (
-            "ChatView should render an inline form for entering the new project path"
+        assert 'className="project-selector-new"' not in content, (
+            "ChatView should not render an inline form for adding a project"
         )
-
-    def test_chatview_persists_new_project_and_refreshes_parent(self):
-        """The inline path form should save project settings and refresh project options."""
-        chat_content = CHATVIEW_FILE.read_text()
-        app_content = APP_FILE.read_text()
-
-        assert "onProjectsChange" in chat_content, (
-            "ChatView should accept a callback for refreshing parent project state"
+        assert "handleProjectSelect" not in content, (
+            "ChatView should not have a handler for changing the session's project"
         )
-        assert "api.setProjectSettings({ project_path: path })" in chat_content, (
-            "ChatView should persist the typed path as a configured project"
-        )
-        assert "await onProjectsChange?.()" in chat_content, (
-            "ChatView should refresh configured projects after adding one"
-        )
-        assert "onProjectsChange={loadProjects}" in app_content, (
-            "App should wire ChatView project additions back to the project list loader"
+        assert "projectSelectorValue" not in content, (
+            "ChatView should not track a project-selector <select> value"
         )
 
-    def test_project_selector_new_project_css_exists(self):
-        """The new-project form should have stable layout styling."""
+    def test_project_selector_new_project_css_removed(self):
+        """CSS for the removed inline new-project form should be gone too."""
         content = CSS_FILE.read_text()
 
-        assert ".project-selector-new" in content, (
-            "CSS should style the inline new-project form"
+        assert ".project-selector-new" not in content, (
+            "CSS for the removed inline new-project form should be deleted"
         )
-        assert ".project-selector-error" in content, (
-            "CSS should style validation errors without layout overlap"
+        assert ".project-selector-error" not in content, (
+            "CSS for the removed new-project validation error should be deleted"
+        )
+
+
+class TestNewSessionRequiresProjectChoice:
+    """The project a new session runs against must be chosen explicitly.
+
+    Regression coverage for: the header's "New" button silently defaulted to
+    whichever project was configured first, so every new session (and its
+    tab grouping) ended up stuck on that one project.
+    """
+
+    def test_new_session_handler_has_no_default_project_fallback(self):
+        """handleNewSession must require an explicit project, not default to one."""
+        content = APP_FILE.read_text()
+
+        assert "Default to first configured project" not in content, (
+            "App should no longer silently default a new session to the first project"
+        )
+        assert "projects.length > 0 ? projects[0].project_path" not in content, (
+            "App should no longer fall back to the first configured project"
+        )
+
+    def test_new_session_control_is_a_project_picker(self):
+        """The header's new-session control must be a project-picking dropdown."""
+        content = APP_FILE.read_text()
+
+        assert "new-session-select" in content, (
+            "App should render a project-picking control for new sessions"
+        )
+        assert "new-session-btn" not in content, (
+            "the old unconditional New button should be removed"
         )

@@ -36,8 +36,10 @@ def _run() -> tuple[str, str, str | None]:
             # Wait until connected (the Chad button gets .connected once /status responds).
             page.wait_for_selector(".chad-btn.connected", timeout=15000)
 
-            # Create a new (WIP) session — it appears as a tab in the header.
-            page.click(".new-session-btn")
+            # Create a new (WIP) session for the only configured project — it
+            # appears as a tab in the header. Project selection happens via
+            # this dropdown (index 0 is the disabled "+ New" placeholder).
+            page.select_option(".new-session-select", index=1)
             page.wait_for_selector(".session-tab", timeout=10000)
             name_before = page.inner_text(".session-tab .session-tab-name").strip()
             storage = page.evaluate(

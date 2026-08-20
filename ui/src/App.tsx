@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, Fragment, useLayoutE
 import type { Session } from "chad-client";
 import { ChadAPI } from "chad-client";
 import type { ProjectSettings } from "chad-client";
-import { ChatView } from "./components/ChatView.tsx";
+import { ChatView, clearComposerDraft } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
 import { ProjectsPanel } from "./components/ProjectsPanel.tsx";
@@ -274,22 +274,24 @@ export function App() {
     }
   }, []);
 
-  const handleNewSession = useCallback(async (projectPath?: string) => {
-    // Default to first configured project when none specified
-    const effectivePath = projectPath || (projects.length > 0 ? projects[0].project_path : undefined);
+  // The project a session runs against can't be changed after creation (see
+  // ChatView), so it must be picked explicitly here rather than silently
+  // defaulting — a silent default previously left every new session (and its
+  // tab grouping) stuck on whichever project was configured first.
+  const handleNewSession = useCallback(async (projectPath: string) => {
     try {
-      const session = await createSession(effectivePath);
+      const session = await createSession(projectPath);
       if (session) {
         setSelectedSession(session.id);
         setOpenedSessionIds(prev => new Set(prev).add(session.id));
-        if (effectivePath) setSessionProjectPath(effectivePath);
+        setSessionProjectPath(projectPath);
         setTab("chat");
         refreshSessions();
       }
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Failed to create session");
     }
-  }, [createSession, refreshSessions, projects]);
+  }, [createSession, refreshSessions]);
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -299,6 +301,7 @@ export function App() {
       window.alert(err instanceof Error ? err.message : "Failed to delete session");
       return;
     }
+    clearComposerDraft(id);
     setOpenedSessionIds(prev => {
       const next = new Set(prev);
       next.delete(id);
@@ -415,14 +418,23 @@ export function App() {
             </>
           )}
           {connected && (
-            <button
-              className="new-session-btn"
-              onClick={() => handleNewSession()}
-              disabled={sessionsLoading}
-              title="New session"
+            <select
+              className="new-session-select"
+              value=""
+              onChange={(e) => {
+                const path = e.target.value;
+                if (path) handleNewSession(path);
+              }}
+              disabled={sessionsLoading || projects.length === 0}
+              title={projects.length === 0 ? "Add a project first (Chad menu → Projects)" : "Start a new session"}
             >
-              New
-            </button>
+              <option value="" disabled>+ New</option>
+              {projects.map((p) => (
+                <option key={p.project_path} value={p.project_path}>
+                  {getProjectDisplayName(p.project_path)}
+                </option>
+              ))}
+            </select>
           )}
         </nav>
         {connected && apiBaseUrl && (
@@ -442,7 +454,6 @@ export function App() {
                 api={api}
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
-                onProjectsChange={loadProjects}
                 defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}
