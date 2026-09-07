@@ -7,6 +7,7 @@ import type {
   AccountUsage,
   AutoconfigureResult,
   AutoconfigureStart,
+  AutostartSettings,
   BranchesResponse,
   CleanupSettings,
   DiffFull,
@@ -252,6 +253,20 @@ export class ChadAPI {
     return this.del(`/api/v1/accounts/${encodeURIComponent(name)}`);
   }
 
+  /** Rename an account, keeping its settings and its login. */
+  renameAccount(name: string, newName: string): Promise<Account> {
+    return this.put(`/api/v1/accounts/${encodeURIComponent(name)}/name`, {
+      name: newName,
+    });
+  }
+
+  /** Set the short code this account shows under in the tray. */
+  setAccountCode(name: string, code: string): Promise<Account> {
+    return this.put(`/api/v1/accounts/${encodeURIComponent(name)}/code`, {
+      code,
+    });
+  }
+
   setAccountModel(name: string, model: string): Promise<Account> {
     return this.put(`/api/v1/accounts/${encodeURIComponent(name)}/model`, {
       model,
@@ -487,6 +502,16 @@ export class ChadAPI {
 
   stopPreviewTunnel(): Promise<PreviewTunnelStatus> {
     return this.post("/api/v1/preview-tunnel/stop");
+  }
+
+  // ── Config: Start at login ──
+
+  getAutostart(): Promise<AutostartSettings> {
+    return this.get("/api/v1/config/autostart");
+  }
+
+  setAutostart(enabled: boolean): Promise<AutostartSettings> {
+    return this.put("/api/v1/config/autostart", { enabled });
   }
 
   // ── Config: Slack ──

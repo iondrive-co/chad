@@ -1205,6 +1205,34 @@ def _codex_window_used_percent(window: dict | None) -> float | None:
         return None
 
 
+# A Codex rate-limit window longer than this is a weekly-style pool, not the
+# rolling session one. The slots it arrives in say nothing about which is which.
+_CODEX_SESSION_MAX_MINUTES = 24 * 60
+
+
+def _codex_windows(rate_limits: dict | None) -> tuple[dict | None, dict | None]:
+    """Sort a Codex snapshot's rate-limit slots into (session, weekly).
+
+    The slot names are not roles. A team-plan account reports its 7-day window
+    in ``primary`` with ``secondary`` empty, so reading ``primary`` as the
+    session window put the weekly figure — and the weekly reset, 166h away —
+    in the session row. ``window_minutes`` is what actually says which is
+    which; a window without a usable one cannot be placed and is left out.
+    """
+    windows = []
+    for slot in ("primary", "secondary"):
+        window = (rate_limits or {}).get(slot)
+        if window and window.get("window_minutes"):
+            windows.append(window)
+
+    short = [w for w in windows if w["window_minutes"] <= _CODEX_SESSION_MAX_MINUTES]
+    long = [w for w in windows if w["window_minutes"] > _CODEX_SESSION_MAX_MINUTES]
+    return (
+        min(short, key=lambda w: w["window_minutes"]) if short else None,
+        max(long, key=lambda w: w["window_minutes"]) if long else None,
+    )
+
+
 def _parse_unix_reset_eta(resets_at: object) -> str | None:
     """Human-readable ETA (e.g. ``"2h 15m"``) from a unix-seconds reset time."""
     if resets_at is None:
@@ -1220,13 +1248,14 @@ def _parse_unix_reset_eta(resets_at: object) -> str | None:
     return f"{minutes}m"
 
 
-def _get_codex_reset_eta(account_name: str, window_key: str) -> str | None:
-    """Reset ETA for a Codex window (``"primary"`` 5h or ``"secondary"`` weekly)."""
+def _get_codex_reset_eta(account_name: str, role: str) -> str | None:
+    """Reset ETA for a Codex window, by role: ``"session"`` or ``"weekly"``."""
     rate_limits, _ = _read_codex_rate_limits(account_name)
     if not rate_limits:
         return None
-    window = rate_limits.get(window_key) or {}
-    return _parse_unix_reset_eta(window.get("resets_at"))
+    session, weekly = _codex_windows(rate_limits)
+    window = session if role == "session" else weekly
+    return _parse_unix_reset_eta((window or {}).get("resets_at"))
 
 
 def _get_codex_usage_as_of(account_name: str) -> str | None:
@@ -1243,31 +1272,30 @@ def _get_codex_usage_as_of(account_name: str) -> str | None:
 
 
 def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
-    """Get Codex weekly (secondary window) usage percentage from session files.
+    """Codex weekly-window usage percentage from its session snapshots.
 
-    Returns the percentage (0-100), or None if the account home is missing.
+    None when there is nothing to read: no home, no snapshot, or a snapshot
+    that reports no weekly window. Reporting 0% for those said the week was
+    untouched when the truth was that Chad could not ask.
     """
     if account_name and not _codex_home_dir(account_name).exists():
         return None
     rate_limits, _ = _read_codex_rate_limits(account_name)
-    if not rate_limits:
-        return 0.0
-    pct = _codex_window_used_percent(rate_limits.get("secondary"))
-    return pct if pct is not None else 0.0
+    _session, weekly = _codex_windows(rate_limits)
+    return _codex_window_used_percent(weekly)
 
 
 def _get_codex_usage_percentage(account_name: str) -> float | None:
-    """Get Codex 5-hour (primary window) usage percentage from session files.
+    """Codex session-window usage percentage from its session snapshots.
 
-    Returns the percentage (0-100), or None if the account home is missing.
+    None when the snapshot reports no session window — which is the normal
+    state for a plan that only publishes a weekly pool.
     """
     if account_name and not _codex_home_dir(account_name).exists():
         return None
     rate_limits, _ = _read_codex_rate_limits(account_name)
-    if not rate_limits:
-        return 0.0
-    pct = _codex_window_used_percent(rate_limits.get("primary"))
-    return pct if pct is not None else 0.0
+    session, _weekly = _codex_windows(rate_limits)
+    return _codex_window_used_percent(session)
 
 
 def _gemini_home_dir(account_name: str | None) -> Path:
@@ -1728,6 +1756,10 @@ class AIProvider(ABC):
 
     def get_weekly_reset_eta(self) -> str | None:
         """Estimated time until weekly usage resets, human-readable. None if unavailable."""
+        return None
+
+    def get_usage_as_of(self) -> str | None:
+        """ISO-8601 time the usage reading describes. None when it is live or unknown."""
         return None
 
     def is_quota_exhausted(self, output_tail: str) -> str | None:
@@ -2666,11 +2698,11 @@ class OpenAICodexProvider(AIProvider):
 
     def get_session_reset_eta(self) -> str | None:
         """Time until the Codex 5-hour window resets, from the latest snapshot."""
-        return _get_codex_reset_eta(self.config.account_name, "primary")
+        return _get_codex_reset_eta(self.config.account_name, "session")
 
     def get_weekly_reset_eta(self) -> str | None:
         """Time until the Codex weekly window resets, from the latest snapshot."""
-        return _get_codex_reset_eta(self.config.account_name, "secondary")
+        return _get_codex_reset_eta(self.config.account_name, "weekly")
 
     def get_usage_as_of(self) -> str | None:
         """ISO-8601 time of the snapshot the usage reading is derived from."""

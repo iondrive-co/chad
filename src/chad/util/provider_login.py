@@ -79,6 +79,43 @@ def vibe_home(account_name: str) -> Path:
     return safe_home() / ".chad" / "vibe-homes" / account_name
 
 
+# Provider type -> the per-account directory that holds its credentials.
+# A local account is driven through the Qwen CLI, so it shares that home.
+_ACCOUNT_HOMES = {
+    "anthropic": claude_config_dir,
+    "openai": codex_home,
+    "gemini": gemini_home,
+    "qwen": qwen_home,
+    "local": qwen_home,
+    "mistral": vibe_home,
+    "kimi": kimi_home,
+}
+
+
+def account_home(provider: str, account_name: str) -> Path | None:
+    """The directory holding this account's credentials, or None if it has none."""
+    builder = _ACCOUNT_HOMES.get(provider)
+    return builder(account_name) if builder else None
+
+
+def rename_account_home(provider: str, old_name: str, new_name: str) -> None:
+    """Move an account's credential directory so its login survives a rename.
+
+    An account that has never logged in has nothing to move.
+    """
+    old_home = account_home(provider, old_name)
+    if old_home is None or not old_home.exists():
+        return
+    new_home = account_home(provider, new_name)
+    if new_home.exists():
+        # A deleted account leaves its directory behind, so this happens with
+        # no account of that name in sight. Taking the directory over would
+        # hand the renamed account someone else's login.
+        raise ValueError(f"'{new_name}' still has credentials on disk from an earlier account")
+    new_home.parent.mkdir(parents=True, exist_ok=True)
+    old_home.rename(new_home)
+
+
 def _home_redirect_env(home: Path) -> dict:
     """Env vars that redirect a CLI's home directory lookup to ``home``."""
     env = {"HOME": str(home)}
@@ -252,7 +289,11 @@ def _tty_login_command(provider: str, account_name: str, cli_path: str) -> tuple
     if provider == "anthropic":
         config_dir = claude_config_dir(account_name)
         config_dir.mkdir(parents=True, exist_ok=True)
-        return [cli_path], {"CLAUDE_CONFIG_DIR": str(config_dir)}
+        # `claude auth login` always starts a fresh OAuth flow. Bare `claude`
+        # starts a coding session instead: a dead token left in the config dir
+        # still makes the CLI report itself logged in as whoever wrote it, so
+        # the user landed in another account's session with no way to sign in.
+        return [cli_path, "auth", "login"], {"CLAUDE_CONFIG_DIR": str(config_dir)}
     if provider == "kimi":
         home = kimi_home(account_name)
         home.mkdir(parents=True, exist_ok=True)

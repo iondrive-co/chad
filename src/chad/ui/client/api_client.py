@@ -58,6 +58,7 @@ class Account:
     reasoning: str | None
     role: str | None
     ready: bool
+    code: str = ""
 
 
 @dataclass
@@ -277,6 +278,24 @@ class APIClient:
         resp = self._client.delete(self._url(f"/accounts/{name}"))
         _check_response(resp)
 
+    def set_account_code(self, name: str, code: str) -> Account:
+        """Set the short code this account shows under in the tray."""
+        resp = self._client.put(
+            self._url(f"/accounts/{name}/code"),
+            json={"code": code},
+        )
+        _check_response(resp)
+        return self._parse_account(resp.json())
+
+    def rename_account(self, name: str, new_name: str) -> Account:
+        """Rename an account, keeping its settings and its login."""
+        resp = self._client.put(
+            self._url(f"/accounts/{name}/name"),
+            json={"name": new_name},
+        )
+        _check_response(resp)
+        return self._parse_account(resp.json())
+
     def set_account_model(self, name: str, model: str) -> Account:
         """Set the model for an account."""
         resp = self._client.put(
@@ -319,6 +338,7 @@ class APIClient:
             reasoning=data.get("reasoning"),
             role=data.get("role"),
             ready=data.get("ready", False),
+            code=data.get("code", ""),
         )
 
     # Messages
@@ -818,6 +838,29 @@ class APIClient:
         )
         _check_response(resp)
         return resp.json()["endpoint"]
+
+    def get_autostart(self) -> dict:
+        """Get start-at-login settings.
+
+        Returns:
+            Dict with enabled, supported, location
+        """
+        resp = self._client.get(self._url("/config/autostart"))
+        _check_response(resp)
+        return resp.json()
+
+    def set_autostart(self, enabled: bool) -> dict:
+        """Turn start-at-login on or off.
+
+        Args:
+            enabled: True to start Chad at login with a tray icon
+
+        Returns:
+            Dict with enabled, supported, location
+        """
+        resp = self._client.put(self._url("/config/autostart"), json={"enabled": enabled})
+        _check_response(resp)
+        return resp.json()
 
     def get_slack_settings(self) -> dict:
         """Get Slack integration settings.

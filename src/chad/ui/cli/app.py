@@ -201,6 +201,7 @@ def run_settings_menu(client: APIClient) -> None:
             slack_settings = client.get_slack_settings()
         except Exception:
             slack_settings = {"enabled": False, "channel": None, "has_token": False}
+        autostart = client.get_autostart()
         # Find coding agent from roles
         coding_agent = None
         for acc in accounts:
@@ -222,6 +223,8 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Local Endpoint:     {local_endpoint}")
         print("  Action Rules:")
         print(_format_action_settings(action_settings))
+        autostart_status = "yes" if autostart.get("enabled") else "no"
+        print(f"  Start at Login:     {autostart_status}")
         slack_status = "enabled" if slack_settings.get("enabled") else "disabled"
         slack_ch = slack_settings.get("channel") or "(not set)"
         print(f"  Slack:              {slack_status}, channel={slack_ch}")
@@ -238,6 +241,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [8] Remote access (tunnel)")
         print("  [9] Export/import config")
         print("  [10] Set local model endpoint")
+        print("  [11] Start Chad at login")
         print("  [b] Back to main menu")
         print()
 
@@ -607,6 +611,28 @@ def run_settings_menu(client: APIClient) -> None:
                 print(f"Error: {e}")
             _pause()
 
+        elif choice == "11":
+            # Start at login, waiting in the system tray
+            print()
+            print("Start at Login")
+            print("-" * 30)
+            print(f"  Enabled:  {autostart.get('enabled', False)}")
+            print(f"  Entry:    {autostart.get('location') or '(none)'}")
+            if not autostart.get("supported"):
+                print("  This machine has no system tray to start into.")
+            print()
+            print("  [e] Toggle start at login")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "e":
+                    updated = client.set_autostart(not autostart.get("enabled", False))
+                    state = "enabled" if updated.get("enabled") else "disabled"
+                    print(f"Start at login {state}")
+            except Exception as e:
+                print(f"Error: {e}")
+            _pause()
+
 
 def run_accounts_menu(client: APIClient) -> None:
     """Run the accounts management submenu.
@@ -643,6 +669,7 @@ def run_accounts_menu(client: APIClient) -> None:
         print("  [2] Delete account")
         print("  [3] Set as coding agent")
         print("  [4] Log in to an account")
+        print("  [5] Rename account")
         print("  [b] Back to settings")
         print()
 
@@ -752,6 +779,26 @@ def run_accounts_menu(client: APIClient) -> None:
                     print()
                     success, message = _run_provider_oauth(provider, selected)
                     print(f"{'✓' if success else '✗'} {message}")
+            _pause()
+
+        elif choice == "5":
+            print()
+            if not accounts:
+                print("No accounts configured.")
+            else:
+                options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
+                selected = select_from_list("Select account to rename:", options)
+                if selected:
+                    try:
+                        new_name = input(f"New name for '{selected}': ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        new_name = ""
+                    if new_name and new_name != selected:
+                        try:
+                            client.rename_account(selected, new_name)
+                            print(f"Account renamed to '{new_name}'")
+                        except Exception as e:
+                            print(f"Rename failed: {e}")
             _pause()
 
 

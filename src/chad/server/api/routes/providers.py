@@ -10,6 +10,8 @@ from chad.server.api.schemas import (
     ProviderListResponse,
     ProviderInfo,
     AccountCreate,
+    AccountRename,
+    AccountCodeUpdate,
     AccountResponse,
     AccountListResponse,
     AccountUsage,
@@ -22,8 +24,10 @@ from chad.server.api.schemas import (
     AccountLoginResponse,
     RoleType,
 )
+from chad.server.services import get_session_manager
 from chad.server.state import get_config_manager, get_model_catalog
 from chad.util import provider_login
+from chad.util.account_usage import read_account_usage
 from chad.util.providers import get_reasoning_levels
 
 router = APIRouter()
@@ -52,11 +56,29 @@ def _account_to_response(
     return AccountResponse(
         name=name,
         provider=provider,
+        code=config_mgr.account_codes().get(name, ""),
         model=model if model != "default" else None,
         reasoning=reasoning if reasoning != "default" else None,
         role=role,
         ready=ready,
     )
+
+
+def _accounts_in_use(config_mgr) -> set[str]:
+    """Accounts whose credential directory a live session may still be reading.
+
+    A session runs its coding CLI under the coding account's directory, and its
+    verification pass under the verification agent's, so both are off limits
+    while any session is live.
+    """
+    live = [s for s in get_session_manager().list_sessions() if s.active or s.paused]
+    if not live:
+        return set()
+    in_use = {s.coding_account for s in live if s.coding_account}
+    verifier = config_mgr.get_verification_agent()
+    if verifier:
+        in_use.add(verifier)
+    return in_use
 
 
 async def _is_logged_in(provider: str, name: str) -> bool:
@@ -230,6 +252,62 @@ async def delete_account(name: str) -> AccountDeleteResponse:
     )
 
 
+@router.put("/accounts/{name}/name", response_model=AccountResponse)
+async def rename_account(name: str, request: AccountRename) -> AccountResponse:
+    """Rename an account, keeping its settings and its login.
+
+    The credential directory is named after the account, so the rename moves
+    it — which a CLI running under that directory would not survive. Accounts a
+    live session is still using are therefore refused.
+    """
+    config_mgr = get_config_manager()
+
+    if not config_mgr.has_account(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+
+    if name in _accounts_in_use(config_mgr):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Account '{name}' is in use by a running session — rename it once that finishes",
+        )
+
+    provider = config_mgr.list_accounts().get(name)
+    try:
+        # The credentials move first: it is the step that can fail on something
+        # outside the config file, and failing before the config is rewritten
+        # leaves the account exactly as it was.
+        provider_login.rename_account_home(provider, name, request.name)
+        config_mgr.rename_account(name, request.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    new_name = request.name
+
+    return _account_to_response(
+        new_name, provider, config_mgr, await _is_logged_in(provider, new_name)
+    )
+
+
+@router.put("/accounts/{name}/code", response_model=AccountResponse)
+async def set_account_code(name: str, request: AccountCodeUpdate) -> AccountResponse:
+    """Set the short code this account shows under in the tray."""
+    config_mgr = get_config_manager()
+
+    if not config_mgr.has_account(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+
+    try:
+        config_mgr.set_account_code(name, request.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    provider = config_mgr.list_accounts().get(name)
+
+    return _account_to_response(
+        name, provider, config_mgr, await _is_logged_in(provider, name)
+    )
+
+
 @router.put("/accounts/{name}/model", response_model=AccountResponse)
 async def set_account_model(name: str, request: AccountModelUpdate) -> AccountResponse:
     """Set the model for an account."""
@@ -301,34 +379,22 @@ async def get_account_usage(name: str) -> AccountUsage:
     if not config_mgr.has_account(name):
         raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
 
-    accounts_dict = config_mgr.list_accounts()
-    provider_type = accounts_dict.get(name)
-
-    # Create a provider instance to query usage
-    from chad.util.providers import create_provider, ModelConfig
-
+    provider_type = config_mgr.list_accounts().get(name)
     model = config_mgr.get_account_model(name) or "default"
-    provider = create_provider(ModelConfig(
-        provider=provider_type,
-        model_name=model,
-        account_name=name,
-    ))
 
-    session_pct = provider.get_session_usage_percentage()
-    weekly_pct = provider.get_weekly_usage_percentage()
-    session_eta = provider.get_session_reset_eta() if hasattr(provider, "get_session_reset_eta") else None
-    weekly_eta = provider.get_weekly_reset_eta() if hasattr(provider, "get_weekly_reset_eta") else None
-    usage_as_of = provider.get_usage_as_of() if hasattr(provider, "get_usage_as_of") else None
+    # Off the event loop: an Anthropic reading is an HTTPS round trip, and a
+    # Codex one a scan of session snapshots.
+    reading = await asyncio.to_thread(read_account_usage, name, provider_type, model)
 
     return AccountUsage(
-        account_name=name,
-        provider=provider_type,
-        session_usage_pct=session_pct,
-        weekly_usage_pct=weekly_pct,
-        session_reset_eta=session_eta,
-        weekly_reset_eta=weekly_eta,
-        usage_as_of=usage_as_of,
-        logged_out=not await _is_logged_in(provider_type, name),
+        account_name=reading.account_name,
+        provider=reading.provider,
+        session_usage_pct=reading.session_pct,
+        weekly_usage_pct=reading.weekly_pct,
+        session_reset_eta=reading.session_reset_eta,
+        weekly_reset_eta=reading.weekly_reset_eta,
+        usage_as_of=reading.usage_as_of,
+        logged_out=reading.logged_out,
     )
 
 

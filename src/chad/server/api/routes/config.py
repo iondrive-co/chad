@@ -14,6 +14,8 @@ from chad.server.api.schemas import (
     UserPreferences,
     SlackSettingsResponse,
     SlackSettingsUpdate,
+    AutostartSettings,
+    AutostartUpdate,
 )
 from chad.server.state import get_config_manager
 
@@ -389,6 +391,38 @@ async def set_local_endpoint(request: LocalEndpointUpdate) -> LocalEndpointRespo
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return LocalEndpointResponse(endpoint=config_mgr.get_local_endpoint())
+
+
+def _autostart_settings() -> AutostartSettings:
+    """The login entry as it actually stands on this machine."""
+    from chad.ui.tray import available as tray_available
+    from chad.util import autostart
+
+    return AutostartSettings(
+        enabled=autostart.is_enabled(),
+        supported=tray_available(),
+        location=autostart.describe(),
+    )
+
+
+@router.get("/autostart", response_model=AutostartSettings)
+async def get_autostart() -> AutostartSettings:
+    """Report whether Chad starts at login on the server's machine."""
+    return _autostart_settings()
+
+
+@router.put("/autostart", response_model=AutostartSettings)
+async def set_autostart(request: AutostartUpdate) -> AutostartSettings:
+    """Turn start-at-login on or off, and remember the answer."""
+    from chad.util import autostart
+
+    config_mgr = get_config_manager()
+    config_mgr.set_autostart(request.enabled)
+    try:
+        autostart.apply(request.enabled)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _autostart_settings()
 
 
 @router.get("/slack", response_model=SlackSettingsResponse)

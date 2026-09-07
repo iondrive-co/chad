@@ -5,6 +5,9 @@ from pydantic import BaseModel, Field
 
 
 ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"]
+# Account names become directory names (CLAUDE_CONFIG_DIR, codex/kimi homes) —
+# restrict to a safe charset so '../'-style names can't escape ~/.chad/.
+ACCOUNT_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 # Only CODING exists as an assignable role — the verification agent is
 # configured via /config/verification-agent, not a role assignment.
 RoleType = Literal["CODING"]
@@ -39,12 +42,31 @@ class AccountCreate(BaseModel):
         description="Account name/identifier",
         min_length=1,
         max_length=64,
-        # Account names become directory names (CLAUDE_CONFIG_DIR, codex/kimi
-        # homes) — restrict to a safe charset so '../'-style names can't
-        # escape ~/.chad/.
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        pattern=ACCOUNT_NAME_PATTERN,
     )
     provider: ProviderType = Field(description="Provider type")
+
+
+class AccountCodeUpdate(BaseModel):
+    """Request model for setting an account's tray code."""
+
+    code: str = Field(
+        description="1-3 letters or digits, shown in the tray",
+        min_length=1,
+        max_length=3,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
+
+
+class AccountRename(BaseModel):
+    """Request model for renaming an account."""
+
+    name: str = Field(
+        description="New account name",
+        min_length=1,
+        max_length=64,
+        pattern=ACCOUNT_NAME_PATTERN,
+    )
 
 
 class AccountResponse(BaseModel):
@@ -52,6 +74,7 @@ class AccountResponse(BaseModel):
 
     name: str = Field(description="Account name/identifier")
     provider: ProviderType = Field(description="Provider type")
+    code: str = Field(default="", description="Short code shown in the tray")
     model: str | None = Field(default=None, description="Currently selected model")
     reasoning: str | None = Field(default=None, description="Currently selected reasoning level")
     role: RoleType | None = Field(default=None, description="Assigned role if any")

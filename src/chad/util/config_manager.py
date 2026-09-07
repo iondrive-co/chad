@@ -39,8 +39,42 @@ CONFIG_BASE_KEYS: set[str] = {
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
     "local_endpoint",      # Base URL of the local OpenAI-compatible model server
+    "autostart",           # Whether Chad starts at login with a tray icon
 
 }
+
+
+# How many characters of an account code the tray has room for.
+ACCOUNT_CODE_LENGTH = 3
+
+
+def derive_account_code(name: str, taken: Iterable[str] = ()) -> str:
+    """A short code for an account, from its name and unique against ``taken``.
+
+    Separated names give an initial per part, so `claude-work` and
+    `claude-iondrive` do not both come out as CLA.
+    """
+    import re
+
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", name) if part]
+    if not parts:
+        base = "ACC"
+    elif len(parts) >= ACCOUNT_CODE_LENGTH:
+        base = "".join(part[0] for part in parts[:ACCOUNT_CODE_LENGTH])
+    elif len(parts) == 2:
+        base = parts[0][0] + parts[1][:ACCOUNT_CODE_LENGTH - 1]
+    else:
+        base = parts[0][:ACCOUNT_CODE_LENGTH]
+    base = base.upper()
+
+    taken = set(taken)
+    if base not in taken:
+        return base
+    for digit in "23456789":
+        candidate = base[:ACCOUNT_CODE_LENGTH - 1] + digit
+        if candidate not in taken:
+            return candidate
+    return base
 
 
 class ConfigManager:
@@ -571,6 +605,53 @@ class ConfigManager:
             config["accounts"][account_name]["reasoning"] = reasoning
             self.save_config(config)
 
+    def account_codes(self) -> dict[str, str]:
+        """Every account's tray code, filling in and keeping any that are missing.
+
+        Codes are written down on first read rather than derived on every one,
+        so adding an account can never renumber the codes already on screen.
+        """
+        config = self.load_config()
+        accounts = config.get("accounts", {})
+        codes = {name: data.get("code", "") for name, data in accounts.items()}
+
+        missing = [name for name, code in codes.items() if not code]
+        for name in missing:
+            code = derive_account_code(name, taken=set(codes.values()))
+            codes[name] = code
+            accounts[name]["code"] = code
+        if missing:
+            self.save_config(config)
+        return codes
+
+    def set_account_code(self, account_name: str, code: str) -> None:
+        """Set an account's tray code.
+
+        Args:
+            account_name: Account to update
+            code: 1-3 letters or digits; stored upper case
+
+        Raises:
+            ValueError: If the account is unknown, the code is malformed, or
+                another account already uses it
+        """
+        code = code.strip().upper()
+        if not code or len(code) > ACCOUNT_CODE_LENGTH or not code.isalnum():
+            raise ValueError(
+                f"A code is 1 to {ACCOUNT_CODE_LENGTH} letters or digits, not '{code}'"
+            )
+
+        config = self.load_config()
+        accounts = config.get("accounts", {})
+        if account_name not in accounts:
+            raise ValueError(f"Account '{account_name}' does not exist")
+        for other, data in accounts.items():
+            if other != account_name and data.get("code", "").upper() == code:
+                raise ValueError(f"'{code}' is already {other}'s code")
+
+        accounts[account_name]["code"] = code
+        self.save_config(config)
+
     def get_account_model(self, account_name: str) -> str:
         """Get the model configured for an account.
 
@@ -751,6 +832,64 @@ class ConfigManager:
                 if s.get("target_account") != account_name
             ]
 
+        # Unpin the account from any project that named it as its agent
+        for project in config.get("projects", {}).values():
+            for field in ("preferred_coding_agent", "autoconfigure_agent"):
+                if project.get(field) == account_name:
+                    project[field] = None
+
+        self.save_config(config)
+
+    def rename_account(self, old_name: str, new_name: str) -> None:
+        """Rename an account in the config, carrying every setting that names it.
+
+        The account's credential directory is named after it too and has to
+        move with it — `provider_login.rename_account_home` does that, and the
+        caller does it first. This method touches nothing outside its own
+        config file, which is what lets a test point it at a temporary one.
+
+        Args:
+            old_name: Existing account name
+            new_name: Name to give it
+
+        Raises:
+            ValueError: If old_name doesn't exist, or new_name is already taken
+        """
+        config = self.load_config()
+        accounts = config.get("accounts", {})
+
+        if old_name not in accounts:
+            raise ValueError(f"Account '{old_name}' does not exist")
+        if new_name in accounts:
+            raise ValueError(f"Account '{new_name}' already exists")
+
+        # Rebuilt rather than reinserted so the account keeps its place in the
+        # list the UI renders.
+        config["accounts"] = {
+            (new_name if name == old_name else name): data
+            for name, data in accounts.items()
+        }
+
+        for role, account in list(config.get("role_assignments", {}).items()):
+            if account == old_name:
+                config["role_assignments"][role] = new_name
+
+        for key in ("mock_remaining_usage", "mock_run_duration_seconds", "mock_session_reset_time"):
+            if old_name in config.get(key, {}):
+                config[key][new_name] = config[key].pop(old_name)
+
+        if config.get("verification_agent") == old_name:
+            config["verification_agent"] = new_name
+
+        for setting in config.get("action_settings", []):
+            if setting.get("target_account") == old_name:
+                setting["target_account"] = new_name
+
+        for project in config.get("projects", {}).values():
+            for field in ("preferred_coding_agent", "autoconfigure_agent"):
+                if project.get(field) == old_name:
+                    project[field] = new_name
+
         self.save_config(config)
 
     def save_preferences(self, project_path: str) -> None:
@@ -911,6 +1050,29 @@ class ConfigManager:
             endpoint = f"http://{endpoint}"
         config = self.load_config()
         config["local_endpoint"] = endpoint
+        self.save_config(config)
+
+    def get_autostart(self) -> bool | None:
+        """Whether Chad starts at login with a tray icon.
+
+        Returns:
+            True or False once the user has been asked, None when the choice
+            has never been recorded — which is what makes first launch offer it.
+        """
+        config = self.load_config()
+        value = config.get("autostart")
+        return None if value is None else bool(value)
+
+    def set_autostart(self, enabled: bool) -> None:
+        """Record whether Chad starts at login.
+
+        Recording only — chad.util.autostart owns the login entry itself.
+
+        Args:
+            enabled: True to start Chad at login
+        """
+        config = self.load_config()
+        config["autostart"] = bool(enabled)
         self.save_config(config)
 
     def get_ui_mode(self) -> str:

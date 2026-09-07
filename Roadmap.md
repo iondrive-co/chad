@@ -5,9 +5,10 @@ Chad 1.0: Slip Slop Slap
 - Improved live view
 - Tab groups named after projects
 - Structural diff view
+- System tray
 - Bug and security fixes and stability
 
 Chad 1.1
 
 - Meta input panel for voice control
-- Run with daemon and in system tray to switch between project groups
+- Switch between project groups from tray

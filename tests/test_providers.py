@@ -128,6 +128,24 @@ class TestProviderLoginUtil:
         assert extra_env["HOME"] == str(expected)
         assert expected.is_dir()
 
+    def test_tty_login_claude_runs_the_login_command(self, tmp_path, monkeypatch):
+        """Claude login runs the CLI's login command, not the bare agent TUI.
+
+        Launching bare ``claude`` opens a normal coding session. With a dead
+        token still on disk the CLI reports itself logged in as whoever wrote
+        it, so the user was dropped into another account's session with no way
+        to sign in and no usage to read.
+        """
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        cmd, extra_env = provider_login._tty_login_command("anthropic", "acct", "/fake/claude")
+        assert cmd == ["/fake/claude", "auth", "login"]
+        expected = tmp_path / ".chad" / "claude-configs" / "acct"
+        assert extra_env["CLAUDE_CONFIG_DIR"] == str(expected)
+        assert expected.is_dir()
+
     def test_run_login_mistral_writes_isolated_env(self, tmp_path, monkeypatch):
         """The Mistral API key is written to the account's VIBE_HOME, not ~/.vibe."""
         from chad.util import provider_login
@@ -148,6 +166,67 @@ class TestProviderLoginUtil:
         # Only this account is now logged in.
         assert provider_login.is_logged_in("mistral", "acct") is True
         assert provider_login.is_logged_in("mistral", "other") is False
+
+    def test_account_home_covers_every_credentialed_provider(self, tmp_path, monkeypatch):
+        """Every provider that isolates credentials must report its account dir.
+
+        The rename path moves this directory; a provider missing from the map
+        would keep its login under the old name and come back logged out.
+        """
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        chad = tmp_path / ".chad"
+        assert provider_login.account_home("anthropic", "a") == chad / "claude-configs" / "a"
+        assert provider_login.account_home("openai", "a") == chad / "codex-homes" / "a"
+        assert provider_login.account_home("gemini", "a") == chad / "gemini-homes" / "a"
+        assert provider_login.account_home("qwen", "a") == chad / "qwen-homes" / "a"
+        assert provider_login.account_home("kimi", "a") == chad / "kimi-homes" / "a"
+        assert provider_login.account_home("mistral", "a") == chad / "vibe-homes" / "a"
+        # A local account is driven through the Qwen CLI, so it shares that home.
+        assert provider_login.account_home("local", "a") == chad / "qwen-homes" / "a"
+        # The mock provider keeps no credentials.
+        assert provider_login.account_home("mock", "a") is None
+
+    def test_rename_account_home_moves_the_login(self, tmp_path, monkeypatch):
+        """A renamed account keeps its credentials — the directory moves with it."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        old_home = tmp_path / ".chad" / "claude-configs" / "old"
+        old_home.mkdir(parents=True)
+        (old_home / ".credentials.json").write_text("{}", encoding="utf-8")
+
+        provider_login.rename_account_home("anthropic", "old", "new")
+
+        assert not old_home.exists()
+        new_home = tmp_path / ".chad" / "claude-configs" / "new"
+        assert (new_home / ".credentials.json").read_text(encoding="utf-8") == "{}"
+
+    def test_rename_account_home_without_credentials_is_a_no_op(self, tmp_path, monkeypatch):
+        """A never-logged-in account has no directory to move."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        provider_login.rename_account_home("anthropic", "old", "new")
+        provider_login.rename_account_home("mock", "old", "new")
+        assert not (tmp_path / ".chad" / "claude-configs" / "new").exists()
+
+    def test_rename_account_home_refuses_to_overwrite(self, tmp_path, monkeypatch):
+        """Moving onto an existing home would destroy that account's login."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        (tmp_path / ".chad" / "claude-configs" / "old").mkdir(parents=True)
+        (tmp_path / ".chad" / "claude-configs" / "new").mkdir(parents=True)
+
+        with pytest.raises(ValueError, match="new"):
+            provider_login.rename_account_home("anthropic", "old", "new")
+        assert (tmp_path / ".chad" / "claude-configs" / "old").exists()
 
     def test_ensure_cli_delegates_to_installer(self, monkeypatch):
         from chad.util import provider_login
@@ -180,7 +259,7 @@ class TestProviderLoginUtil:
         assert ok is True
         assert "terminal" in msg.lower()
         cmd, extra_env = spawned[0]
-        assert cmd[0] == "/fake/claude"
+        assert cmd == ["/fake/claude", "auth", "login"]
         assert "CLAUDE_CONFIG_DIR" in extra_env
 
     def test_run_login_claude_new_terminal_unavailable(self, tmp_path, monkeypatch):
@@ -218,7 +297,7 @@ class TestProviderLoginUtil:
         monkeypatch.setattr("chad.util.provider_login.subprocess.run", fake_run)
         # Not authenticated and no terminal spawned -> runs the CLI directly.
         provider_login.run_login("anthropic", "acct", new_terminal=False)
-        assert calls and calls[0][0] == "/fake/claude"
+        assert calls and calls[0] == ["/fake/claude", "auth", "login"]
 
 
 class TestCreateProvider:
@@ -3661,6 +3740,13 @@ class TestCodexUsageFreshness:
         sessions_dir = self._home_dir(tmp_path, account) / ".codex" / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         path = sessions_dir / name
+        # Every snapshot the Codex CLI writes carries window_minutes, and it is
+        # what tells the session window from the weekly one.
+        default_minutes = {"primary": 300, "secondary": 10080}
+        for slot, minutes in default_minutes.items():
+            window = (rate_limits or {}).get(slot)
+            if window and "window_minutes" not in window:
+                window["window_minutes"] = minutes
         event = {
             "type": "event_msg",
             "payload": {"type": "token_count", "rate_limits": rate_limits},
@@ -3801,6 +3887,94 @@ class TestCodexUsageFreshness:
 
         with patch("chad.util.providers.safe_home", return_value=tmp_path):
             assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(30.0)
+
+    def test_a_weekly_window_in_the_primary_slot_is_read_as_weekly(self, tmp_path):
+        """The slots are not roles: window_minutes says which window is which.
+
+        A team-plan account reports its 7-day pool in `primary` with
+        `secondary` empty. Trusting the slot names showed that pool's figure,
+        and its 166-hour reset, as the 5-hour session window.
+        """
+        from chad.util.providers import (
+            _get_codex_reset_eta,
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {
+                    "used_percent": 1.0,
+                    "window_minutes": 10080,
+                    "resets_at": now + 166 * 3600 + 60,
+                },
+                "secondary": None,
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(1.0)
+            assert _get_codex_usage_percentage("acct") is None
+            assert "166h" in _get_codex_reset_eta("acct", "weekly")
+            assert _get_codex_reset_eta("acct", "session") is None
+
+    def test_each_window_keeps_its_own_reset(self, tmp_path):
+        """The 5-hour reset and the weekly one must not be swapped."""
+        from chad.util.providers import _get_codex_reset_eta
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {
+                    "used_percent": 20.0, "window_minutes": 300,
+                    "resets_at": now + 2 * 3600 + 60,
+                },
+                "secondary": {
+                    "used_percent": 40.0, "window_minutes": 10080,
+                    "resets_at": now + 100 * 3600 + 60,
+                },
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_reset_eta("acct", "session").startswith("2h")
+            assert _get_codex_reset_eta("acct", "weekly").startswith("100h")
+
+    def test_a_window_with_no_length_is_not_guessed_at(self, tmp_path):
+        """window_minutes of 0 appears in real snapshots and places nothing."""
+        from chad.util.providers import (
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {"used_percent": 55.0, "window_minutes": 0, "resets_at": now + 60},
+                "secondary": None,
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_usage_percentage("acct") is None
+            assert _get_codex_weekly_usage_percentage("acct") is None
+
+    def test_an_account_with_no_snapshot_reports_nothing_not_zero(self, tmp_path):
+        """0% reads as "plenty left"; unknown has to look unknown."""
+        from chad.util.providers import (
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        (tmp_path / ".chad" / "codex-homes" / "acct" / ".codex").mkdir(parents=True)
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_usage_percentage("acct") is None
+            assert _get_codex_weekly_usage_percentage("acct") is None
 
     def test_null_window_snapshot_is_skipped(self, tmp_path):
         """A newer snapshot whose windows are null (a different limit bucket that

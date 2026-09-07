@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { ChadAPI, VerificationSettings, Account } from "chad-client";
+import type { ChadAPI, VerificationSettings, Account, AutostartSettings } from "chad-client";
 import { ActionRules } from "./ActionRules.tsx";
 import { QRScanner } from "./QRScanner.tsx";
 import { parseConnectionInput } from "../App.tsx";
@@ -29,6 +29,7 @@ export function SettingsPanel({
   const [retentionDays, setRetentionDays] = useState<number>(7);
   const [retentionInput, setRetentionInput] = useState<string>("7");
   const [localEndpoint, setLocalEndpoint] = useState("");
+  const [autostart, setAutostart] = useState<AutostartSettings | null>(null);
   const [slackEnabled, setSlackEnabled] = useState(false);
   const [slackChannel, setSlackChannel] = useState("");
   const [slackHasToken, setSlackHasToken] = useState(false);
@@ -68,6 +69,7 @@ export function SettingsPanel({
       setRetentionInput(String(r.cleanup_days));
     }).catch(() => {});
     api.getLocalEndpoint().then((r) => setLocalEndpoint(r.endpoint)).catch(() => {});
+    api.getAutostart().then(setAutostart).catch(() => {});
     api.getSlackSettings().then((r) => {
       setSlackEnabled(r.enabled);
       setSlackChannel(r.channel ?? "");
@@ -125,6 +127,21 @@ export function SettingsPanel({
       flash("Saved");
     } catch { /* */ }
   }, [api, flash]);
+
+  // ── Start at login ──
+
+  const toggleAutostart = useCallback(async () => {
+    if (!autostart) return;
+    setSaving(true);
+    try {
+      setAutostart(await api.setAutostart(!autostart.enabled));
+      flash("Saved");
+    } catch {
+      flash("Failed to change start at login");
+    } finally {
+      setSaving(false);
+    }
+  }, [api, autostart, flash]);
 
   // ── Cleanup ──
 
@@ -319,6 +336,24 @@ export function SettingsPanel({
 
       {/* ── Action Rules ── */}
       <ActionRules api={api} connected={connected} />
+
+      {/* ── Startup ── */}
+      <section>
+        <h3>Startup</h3>
+        <label className="toggle-label">
+          <input type="checkbox" checked={autostart?.enabled ?? false}
+            onChange={() => toggleAutostart()}
+            disabled={dis || !autostart?.supported} />
+          Start Chad at login, in the system tray
+        </label>
+        <p className="instructions-hint">
+          {autostart?.supported
+            ? autostart.enabled
+              ? `Chad starts with your desktop and waits in the tray — ${autostart.location}`
+              : "Chad starts with your desktop and waits in the tray; click it to open this window."
+            : "The machine running this server has no system tray."}
+        </p>
+      </section>
 
       {/* ── Cleanup ── */}
       <section>

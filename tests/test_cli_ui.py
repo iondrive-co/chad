@@ -454,6 +454,37 @@ class TestVerificationAgentMenu:
         assert _VERIFICATION_NONE not in out
 
 
+class TestAccountsMenuRename:
+    """The CLI offers the same account rename as the web UI."""
+
+    def test_rename_sends_the_new_name(self, monkeypatch):
+        from chad.ui.cli.app import run_accounts_menu
+
+        client = _make_settings_client([MockAccount(name="old-name", provider="mock")])
+
+        # menu 5 -> pick account 1 -> type the new name -> pause -> back
+        inputs = iter(["5", "1", "new-name", "", "b"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        run_accounts_menu(client)
+
+        client.rename_account.assert_called_once_with("old-name", "new-name")
+
+    def test_blank_or_unchanged_name_is_left_alone(self, monkeypatch):
+        from chad.ui.cli.app import run_accounts_menu
+
+        client = _make_settings_client([MockAccount(name="old-name", provider="mock")])
+
+        inputs = iter(["5", "1", "  ", "", "5", "1", "old-name", "", "b"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
+
+        run_accounts_menu(client)
+
+        client.rename_account.assert_not_called()
+
+
 class TestAPIClientWorktreeParams:
     """Tests that APIClient forwards optional worktree parameters."""
 

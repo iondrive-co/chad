@@ -20,6 +20,8 @@ from .provider import (
     ProviderType,
     RoleType,
     AccountCreate,
+    AccountRename,
+    AccountCodeUpdate,
     AccountResponse,
     AccountListResponse,
     AccountUsage,
@@ -53,6 +55,8 @@ from .config import (
     UserPreferences,
     SlackSettingsResponse,
     SlackSettingsUpdate,
+    AutostartSettings,
+    AutostartUpdate,
 )
 from .streaming import (
     StreamMessage,
@@ -90,6 +94,8 @@ __all__ = [
     "ProviderType",
     "RoleType",
     "AccountCreate",
+    "AccountRename",
+    "AccountCodeUpdate",
     "AccountResponse",
     "AccountListResponse",
     "AccountUsage",
@@ -121,6 +127,8 @@ __all__ = [
     "UserPreferences",
     "SlackSettingsResponse",
     "SlackSettingsUpdate",
+    "AutostartSettings",
+    "AutostartUpdate",
     # Streaming
     "StreamMessage",
     "StreamMessageType",

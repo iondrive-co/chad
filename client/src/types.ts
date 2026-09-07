@@ -116,6 +116,8 @@ export interface ProviderList {
 export interface Account {
   name: string;
   provider: ProviderType;
+  /** Short code this account shows under in the tray. */
+  code: string;
   model: string | null;
   reasoning: string | null;
   role: RoleType | null;
@@ -175,6 +177,15 @@ export interface CleanupSettings {
 export interface UserPreferences {
   last_project_path: string | null;
   ui_mode: string;
+}
+
+export interface AutostartSettings {
+  /** Chad starts at login with a tray icon */
+  enabled: boolean;
+  /** The server's machine has a tray to start into */
+  supported: boolean;
+  /** Where the login entry is recorded */
+  location: string;
 }
 
 export interface SlackSettings {

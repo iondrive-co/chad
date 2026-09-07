@@ -162,6 +162,66 @@ def read_server_port() -> int | None:
         return None
 
 
+def running_server_url() -> str | None:
+    """The URL of a Chad server already up on this machine, or None.
+
+    A Chad started at login owns the port and the port file; a second one
+    would start its own server on a random port and leave the user looking at
+    a different set of sessions than the tray opens.
+    """
+    port = read_server_port()
+    if port is None:
+        return None
+
+    url = f"http://127.0.0.1:{port}"
+    try:
+        import httpx
+
+        # A stale port file can point at whatever took the port next, so the
+        # reply has to look like Chad's own status before we trust it.
+        reply = httpx.get(f"{url}/status", timeout=1.0)
+        reply.raise_for_status()
+        if "version" not in reply.json():
+            return None
+    except Exception:
+        return None
+    return url
+
+
+def offer_autostart(config_mgr: ConfigManager) -> None:
+    """Ask, once, whether Chad should start at login with a tray icon.
+
+    Asked on the launch where the config has no answer recorded yet — a first
+    run, or the first run after this became available. Nothing is recorded
+    when there is nobody at the terminal to answer or no tray to start into,
+    so the offer comes back next time instead of being silently declined.
+    """
+    from chad.ui.tray import available as tray_available
+    from chad.util import autostart
+
+    if config_mgr.get_autostart() is not None:
+        return
+    if not sys.stdin.isatty() or not tray_available():
+        return
+
+    print()
+    print("Chad can start when you log in and wait in the system tray,")
+    print("where clicking it opens this same window.")
+    try:
+        answer = input("Start Chad at login? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    enabled = answer in ("", "y", "yes")
+    config_mgr.set_autostart(enabled)
+    if enabled:
+        entry = autostart.enable()
+        print(f"Chad will start at login ({entry})")
+    else:
+        print("Chad will not start at login (change this in Settings)")
+
+
 def _start_tunnel(port: int, token: str | None = None) -> None:
     """Start a Cloudflare tunnel and print the URL with pairing code."""
     from chad.server.services.tunnel_service import get_tunnel_service
@@ -246,6 +306,54 @@ def run_server(
         uvicorn.run(app, host=host, port=port)
 
 
+def run_tray(web_url: str) -> bool:
+    """Sit in the system tray until told to quit, opening the UI on click.
+
+    Returns False when this desktop turned out to have no tray, leaving the
+    caller to keep serving rather than taking a working Chad down with it.
+    """
+    import webbrowser
+
+    from chad.ui.tray import MenuItem, Tray, Unavailable
+    from chad.ui.tray.usage import UsageSummary
+
+    def open_window() -> None:
+        webbrowser.open(web_url)
+
+    # The usage table is its own section at the top, read-only: those rows are
+    # there to be read, and a MenuItem with no action cannot be clicked.
+    def build_menu() -> list[MenuItem]:
+        table = [MenuItem(row) for row in usage.rows()]
+        return [
+            *table,
+            *([MenuItem.rule()] if table else []),
+            MenuItem("Open Chad", open_window),
+            MenuItem("Quit Chad", lambda: tray.stop()),
+        ]
+
+    usage = UsageSummary(on_change=lambda: tray.notify_changed())
+    # The tray exists before the reading starts, both because on_change reaches
+    # for it and because the first reading must not hold up the icon. It lands
+    # a moment later and pushes itself into the menu.
+    tray = Tray("Chad", [
+        MenuItem("Open Chad", open_window),
+        MenuItem("Quit Chad", lambda: tray.stop()),
+    ], on_open=build_menu, tooltip=usage.tooltip)
+    usage.start()
+
+    try:
+        print(f"Chad is in the tray — click it to open {web_url}")
+        sys.stdout.flush()
+        tray.start()
+    except Unavailable as exc:
+        print(f"No system tray on this desktop: {exc}")
+        return False
+    finally:
+        usage.stop()
+    print("\nShutting down Chad")
+    return True
+
+
 def run_unified(
     main_password: str | None,
     api_port: int,
@@ -253,6 +361,8 @@ def run_unified(
     server_url: str | None = None,
     tunnel: bool = False,
     api_host: str = "127.0.0.1",
+    tray: bool = False,
+    open_window: bool = True,
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -266,6 +376,8 @@ def run_unified(
         server_url: External server URL to connect to (skips local server)
         tunnel: Start a Cloudflare tunnel for remote access
         api_host: Host to bind the local API server to
+        tray: Wait in the system tray, so Chad outlives the terminal
+        open_window: Open the browser at the UI on the way up
     """
     import webbrowser
 
@@ -313,11 +425,17 @@ def run_unified(
         return
 
     web_url = api_base_url
-    print(f"Opening React UI at {web_url}")
-    try:
-        webbrowser.open(web_url)
-    except Exception:
-        print(f"Open your browser to {web_url}")
+    if open_window:
+        print(f"Opening React UI at {web_url}")
+        try:
+            webbrowser.open(web_url)
+        except Exception:
+            print(f"Open your browser to {web_url}")
+
+    # Whichever process holds the server holds the tray icon, so a second
+    # chad attaching to it does not put a duplicate in the panel.
+    if tray and not server_url and run_tray(web_url):
+        return
 
     try:
         while True:
@@ -364,6 +482,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--tunnel", action="store_true", help="Start a Cloudflare tunnel for remote access"
+    )
+    parser.add_argument(
+        "--tray", action="store_true",
+        help="Start in the system tray instead of opening a browser (used at login)",
     )
     parser.add_argument(
         "--ui",
@@ -439,6 +561,25 @@ def main() -> int:
             )
             return 0
 
+        # Started at login: the same desktop stack, but waiting in the tray
+        # rather than opening a browser, and with nobody at a terminal to
+        # answer a password prompt.
+        if args.tray:
+            if config_mgr.is_first_run():
+                raise ValueError(
+                    "Chad has not been set up yet — run chad once to configure it."
+                )
+            run_unified(
+                None,
+                api_port=args.api_port,
+                ui_mode="react",
+                server_url=running_server_url(),
+                api_host="127.0.0.1",
+                tray=True,
+                open_window=False,
+            )
+            return 0
+
         # Server-only mode — no password needed (provider CLIs authenticate
         # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
@@ -459,6 +600,13 @@ def main() -> int:
             server_url = f"http://127.0.0.1:{discovered_port}"
             print(f"Autodiscovered server at port {discovered_port}")
 
+        # Attach to a Chad that is already running here (one started at
+        # login, most often) instead of standing up a rival server.
+        if server_url is None:
+            server_url = running_server_url()
+            if server_url:
+                print(f"Chad is already running at {server_url}")
+
         # Determine UI mode from args or config
         ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
 
@@ -475,7 +623,10 @@ def main() -> int:
                 else:
                     main_password = config_mgr.verify_main_password()
 
-        # Run UI with optional local server (--server-url skips local server)
+            offer_autostart(config_mgr)
+
+        # Start-at-login means Chad lives in the tray, however it was
+        # started — answering yes should not leave this run without an icon.
         run_unified(
             main_password,
             api_port=args.api_port,
@@ -483,6 +634,7 @@ def main() -> int:
             server_url=server_url,
             tunnel=args.tunnel,
             api_host=args.api_host or "127.0.0.1",
+            tray=bool(config_mgr.get_autostart()),
         )
 
         return 0

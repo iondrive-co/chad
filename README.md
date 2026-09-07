@@ -18,6 +18,8 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 - Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or with
 [pipx](https://pipx.pypa.io/stable/) by using the command `pipx install chad-ai`
 - Run it locally with the `chad` command OR
+- On first launch Chad offers to start itself when you log in and wait in the system tray — click the
+tray icon to open the window, and change your mind any time under Settings -> Startup
 - Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad. If your server is headless,
 it is easiest to setup your providers via oauth with a chad server on a desktop and then use the export->import function
 in the settings to move your encrypted provider config to the server and setup the required provider binaries there
