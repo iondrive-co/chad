@@ -32,7 +32,10 @@ from chad.util.prompts import (
 )
 from chad.util.installer import AIToolInstaller
 from chad.util.utils import safe_home
-from chad.util.providers import CLAUDE_THINKING_BUDGETS
+from chad.util.providers import (
+    CLAUDE_THINKING_BUDGETS,
+    PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS,
+)
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
@@ -1102,6 +1105,7 @@ class TaskExecutor:
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
         override_prompt: str | None = None,
+        _overload_retry: bool = False,
     ) -> tuple[int, str]:
         """Execute a single phase of the task.
 
@@ -1140,6 +1144,10 @@ class TaskExecutor:
         with self._lock:
             self._activity_times[task.id] = last_output_time
         captured_output: list[str] = []
+        # Parsers suppress provider error envelopes from the displayed output,
+        # so retain a bounded raw tail for transient capacity detection.
+        overload_scan_tail = ""
+        overload_detected = False
         pty_service = get_pty_stream_service()
 
         def log_terminal_delta(text: str) -> int | None:
@@ -1198,7 +1206,7 @@ class TaskExecutor:
                 session_event_loop.feed_output(text)
 
         def log_pty_event(event: PTYEvent):
-            nonlocal last_output_time
+            nonlocal last_output_time, overload_scan_tail, overload_detected
             if event.type == "output":
                 last_output_time = time.time()
                 with self._lock:
@@ -1208,6 +1216,16 @@ class TaskExecutor:
                     chunk_bytes = base64.b64decode(event.data)
                 except Exception:
                     chunk_bytes = b""
+
+                if coding_provider in ("anthropic", "openai"):
+                    from chad.util.handoff import is_provider_overload_error
+
+                    overload_scan_tail = (overload_scan_tail + chunk_bytes.decode(
+                        "utf-8", errors="replace"
+                    ))[-2048:]
+                    overload_detected = overload_detected or is_provider_overload_error(
+                        overload_scan_tail
+                    )
 
                 # For anthropic/qwen, parse stream-json and convert to readable text
                 if json_parser:
@@ -1387,6 +1405,44 @@ class TaskExecutor:
 
         if task.cancel_requested:
             return -1, "\n".join(captured_output)
+
+        # A model-capacity response is transient. Once the PTY exits, start one
+        # continuation phase with the exact message a user would send in the
+        # provider TUI after waiting for recovery.
+        if (
+            overload_detected
+            and coding_provider in ("anthropic", "openai")
+            and not _overload_retry
+            and not task.cancel_requested
+        ):
+            emit(
+                "status",
+                status="Model is at capacity; waiting 60 seconds before continuing...",
+            )
+            time.sleep(PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS)
+            retry_exit, retry_output = self._run_phase(
+                task=task,
+                session=session,
+                worktree_path=worktree_path,
+                task_description=task_description,
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                screenshots=None,
+                phase="continuation",
+                exploration_output="\n".join(captured_output),
+                rows=rows,
+                cols=cols,
+                emit=emit,
+                git_mgr=git_mgr,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
+                override_prompt="continue",
+                _overload_retry=True,
+            )
+            combined_output = "\n".join(captured_output)
+            if retry_output:
+                combined_output = f"{combined_output}\n{retry_output}"
+            return retry_exit, combined_output
 
         # Write Gemini usage stats captured from stream-json result event
         if json_parser and coding_provider == "gemini":

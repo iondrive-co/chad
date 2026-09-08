@@ -53,6 +53,10 @@ CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
 # Prevents agents from getting stuck in endless search/read loops
 CODEX_MAX_EXPLORATION_WITHOUT_IMPL = int(_get_env_float("CODEX_MAX_EXPLORATION_WITHOUT_IMPL", 40.0))
 
+# A model-capacity response is transient. Give the provider a minute to clear
+# before asking the existing session to continue.
+PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS = 60.0
+
 
 def _codex_needs_continuation(agent_message: str) -> bool:
     """Check if a Codex agent message indicates incomplete work needing continuation.
@@ -1928,7 +1932,7 @@ class ClaudeCodeProvider(AIProvider):
         except (BrokenPipeError, OSError):
             pass
 
-    def get_response(self, timeout: float = 30.0) -> str:
+    def get_response(self, timeout: float = 30.0, _overload_retry: bool = False) -> str:
         import time
         import json
 
@@ -1936,6 +1940,7 @@ class ClaudeCodeProvider(AIProvider):
             return ""
 
         result_text = None
+        overload_message: str | None = None
         start_time = time.time()
         idle_timeout = 2.0
         self.accumulated_text = []
@@ -1979,6 +1984,19 @@ class ClaudeCodeProvider(AIProvider):
                 try:
                     msg = json.loads(line.strip())
 
+                    # Error envelopes vary between Claude CLI versions; keep
+                    # the overload text even when it is not wrapped in a
+                    # ``result`` event.
+                    if msg.get("type") == "error":
+                        error = msg.get("message") or msg.get("error")
+                        if isinstance(error, dict):
+                            error = error.get("message")
+                        if error:
+                            from chad.util.handoff import is_provider_overload_error
+
+                            if is_provider_overload_error(str(error)):
+                                overload_message = str(error)
+
                     if msg.get("type") == "assistant":
                         content = msg.get("message", {}).get("content", [])
                         for item in content:
@@ -2011,6 +2029,23 @@ class ClaudeCodeProvider(AIProvider):
         finally:
             stop_reading.set()
             reader.join(timeout=0.5)
+
+        # Anthropic can return a successful stream envelope whose result is a
+        # transient overload message. Keep the session alive, wait for capacity
+        # to recover, and issue the same follow-up a user would type in the TUI.
+        from chad.util.handoff import is_provider_overload_error
+        if (
+            (overload_message or result_text)
+            and is_provider_overload_error(str(overload_message or result_text))
+            and not _overload_retry
+        ):
+            self._notify_activity(
+                "text",
+                "Model is at capacity; waiting 60 seconds before continuing...",
+            )
+            time.sleep(PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS)
+            self.send_message("continue")
+            return self.get_response(timeout=timeout, _overload_retry=True)
 
         return result_text or ""
 
@@ -2163,7 +2198,12 @@ class OpenAICodexProvider(AIProvider):
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1500.0, _is_recovery: bool = False) -> str:  # noqa: C901
+    def get_response(
+        self,
+        timeout: float = 1500.0,
+        _is_recovery: bool = False,
+        _overload_retry: bool = False,
+    ) -> str:  # noqa: C901
         import json
 
         if not self.current_message:
@@ -2543,6 +2583,28 @@ class OpenAICodexProvider(AIProvider):
                     "command": last_event_info.get("command") or "",
                 }
                 raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
+
+            # Check for transient model-capacity errors before treating other
+            # API errors as terminal. Codex has already closed this exec process
+            # by this point, so resume the captured thread after the delay.
+            from chad.util.handoff import is_provider_overload_error
+            overload_message = api_error[0] or output
+            if (
+                overload_message
+                and is_provider_overload_error(str(overload_message))
+                and not _overload_retry
+            ):
+                self._notify_activity(
+                    "stream",
+                    "\033[33m• Model is at capacity; waiting 60 seconds before continuing...\033[0m\n",
+                )
+                time.sleep(PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS)
+                self.current_message = "continue"
+                return self.get_response(
+                    timeout=timeout,
+                    _is_recovery=_is_recovery,
+                    _overload_retry=True,
+                )
 
             # Check for API errors (model not supported, etc.)
             if api_error[0]:

@@ -22,6 +22,7 @@ from chad.util.handoff import (
     build_resume_prompt,
     get_last_checkpoint_provider_session_id,
     is_quota_exhaustion_error,
+    is_provider_overload_error,
     get_quota_error_reason,
 )
 
@@ -569,6 +570,17 @@ class TestQuotaExhaustionDetection:
         assert is_quota_exhaustion_error("Error: rate_limit_exceeded")
         assert is_quota_exhaustion_error("Too many requests, please slow down")
         assert is_quota_exhaustion_error("Error 429: Too many requests")
+
+    def test_detects_transient_provider_overload_without_classifying_quota(self):
+        """Capacity responses trigger retry handling, not account handoff."""
+        message = "⚠ Selected model is at capacity. Please try a different model"
+        assert is_provider_overload_error(message)
+        assert not is_quota_exhaustion_error(message)
+        assert is_provider_overload_error("API is overloaded")
+        assert not is_quota_exhaustion_error("API is overloaded")
+
+    def test_overload_detector_ignores_unrelated_capacity_text(self):
+        assert not is_provider_overload_error("The model has enough capacity for this task")
 
     def test_detects_insufficient_quota(self):
         """Test detection of insufficient quota/credits."""

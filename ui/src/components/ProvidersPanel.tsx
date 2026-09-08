@@ -268,8 +268,14 @@ export function ProvidersPanel({ api, connected }: Props) {
     } catch { /* */ }
   }, [api, refresh, flash]);
 
+  // A window the provider answered about and did not meter: OpenAI dropped the
+  // Codex 5-hour limit for Business/Team plans on 2026-07-12, so a team account
+  // reports a weekly pool and nothing else. Leaving the row out made a plan's
+  // own limits look like a bug in Chad.
+  const NO_LIMIT = "No limit on this account";
+
   const formatUsage = (pct: number | null, eta: string | null): string => {
-    if (pct === null) return "—";
+    if (pct === null) return NO_LIMIT;
     const bar = Math.round(pct / 10);
     const filled = "█".repeat(bar);
     const empty = "░".repeat(10 - bar);
@@ -456,21 +462,23 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </div>
                 )}
 
-                {/* Usage display */}
+                {/* Usage display. Both windows are listed whenever the account
+                    reports either, so a window with no limit on it says so
+                    rather than going quietly missing. */}
                 {usage && !usage.logged_out && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
                   <div className="account-usage">
-                    {usage.session_usage_pct !== null && (
-                      <div className="usage-row">
-                        <span className="field-label">Session:</span>
-                        <span className="usage-bar">{formatUsage(usage.session_usage_pct, usage.session_reset_eta)}</span>
-                      </div>
-                    )}
-                    {usage.weekly_usage_pct !== null && (
-                      <div className="usage-row">
-                        <span className="field-label">Weekly:</span>
-                        <span className="usage-bar">{formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}</span>
-                      </div>
-                    )}
+                    <div className="usage-row">
+                      <span className="field-label">Session:</span>
+                      <span className={usage.session_usage_pct === null ? "usage-absent" : "usage-bar"}>
+                        {formatUsage(usage.session_usage_pct, usage.session_reset_eta)}
+                      </span>
+                    </div>
+                    <div className="usage-row">
+                      <span className="field-label">Weekly:</span>
+                      <span className={usage.weekly_usage_pct === null ? "usage-absent" : "usage-bar"}>
+                        {formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}
+                      </span>
+                    </div>
                     <div className="usage-row">
                       {formatAsOf(usage.usage_as_of) && (
                         <span className="usage-as-of">as of {formatAsOf(usage.usage_as_of)}</span>

@@ -1439,6 +1439,13 @@ label {
   color: var(--text);
 }
 
+/* A window with no limit on it — stated, but not competing with the windows
+   that have real numbers. */
+.usage-absent {
+  color: var(--text-muted, #999);
+  font-style: italic;
+}
+
 .usage-as-of {
   font-size: 14px;
   color: var(--text-muted, #999);

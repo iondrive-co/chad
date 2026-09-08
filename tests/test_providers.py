@@ -1417,6 +1417,45 @@ class TestOpenAICodexProvider:
         mock_stdin.close.assert_called_once()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+    def test_get_response_retries_model_capacity_after_one_minute(self):
+        """A transient capacity error resumes the Codex thread with continue."""
+        events_by_attempt = [
+            [
+                {"type": "thread.started", "thread_id": "thread-capacity"},
+                {"type": "error", "message": "Selected model is at capacity. Please try a different model"},
+            ],
+            [
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "continued"}},
+            ],
+        ]
+
+        def fake_stream(_process, _fd, on_chunk, _timeout, idle_timeout=None, idle_timeout_callback=None):
+            for event in events_by_attempt.pop(0):
+                on_chunk(json.dumps(event) + "\n")
+            return "", False, False
+
+        first_process = Mock(stdin=Mock())
+        second_process = Mock(stdin=Mock())
+        with patch("chad.util.providers._start_pty_process", side_effect=[
+            (first_process, 11),
+            (second_process, 12),
+        ]) as mock_start, patch(
+            "chad.util.providers._stream_pty_output", side_effect=fake_stream
+        ), patch("chad.util.providers.time.sleep") as mock_sleep:
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+
+            assert provider.get_response(timeout=1.0) == "continued"
+
+        mock_sleep.assert_called_once_with(60.0)
+        assert mock_start.call_count == 2
+        first_process.stdin.write.assert_called_once_with(b"Hello")
+        second_process.stdin.write.assert_called_once_with(b"continue")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.util.providers.select.select")
     @patch("chad.util.providers.os.read")
     @patch("chad.util.providers.os.close")
