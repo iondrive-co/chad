@@ -165,9 +165,9 @@ def read_server_port() -> int | None:
 def running_server_url() -> str | None:
     """The URL of a Chad server already up on this machine, or None.
 
-    A Chad started at login owns the port and the port file; a second one
-    would start its own server on a random port and leave the user looking at
-    a different set of sessions than the tray opens.
+    This is used by the login-started tray process, which must reuse the
+    server it owns. Normal launches intentionally do not call this helper:
+    they authenticate and start a fresh local API server.
     """
     port = read_server_port()
     if port is None:
@@ -186,6 +186,66 @@ def running_server_url() -> str | None:
     except Exception:
         return None
     return url
+
+
+def _is_chad_command(command: list[str]) -> bool:
+    """Return whether a process command line starts Chad."""
+    command_names = {Path(part).name.lower() for part in command}
+    if "chad" in command_names or "chad.exe" in command_names:
+        return True
+    return any(
+        command[index - 1] == "-m" and command[index].lower() == "chad"
+        for index in range(1, len(command))
+    )
+
+
+def stop_running_server() -> bool:
+    """Stop existing local Chad processes before a normal restart.
+
+    Normal launches replace old tray processes so restarting Chad cannot leave
+    duplicate tray icons behind. The process command line is checked before
+    termination; unrelated services and explicit remote ``--server-url``
+    clients are left untouched.
+    """
+    try:
+        import psutil
+    except (ImportError, OSError):
+        return False
+
+    processes = []
+    try:
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                pid = process.info["pid"]
+                command = process.info.get("cmdline") or []
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+            if pid == os.getpid() or "--server-url" in command:
+                continue
+            if _is_chad_command(command):
+                processes.append(process)
+    except psutil.Error:
+        return False
+
+    stopped = 0
+    for process in processes:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+            stopped += 1
+        except psutil.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+                stopped += 1
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired, OSError):
+                continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+
+    if stopped:
+        print(f"Stopped {stopped} existing Chad process(es)")
+    return stopped > 0
 
 
 def offer_autostart(config_mgr: ConfigManager) -> None:
@@ -600,13 +660,6 @@ def main() -> int:
             server_url = f"http://127.0.0.1:{discovered_port}"
             print(f"Autodiscovered server at port {discovered_port}")
 
-        # Attach to a Chad that is already running here (one started at
-        # login, most often) instead of standing up a rival server.
-        if server_url is None:
-            server_url = running_server_url()
-            if server_url:
-                print(f"Chad is already running at {server_url}")
-
         # Determine UI mode from args or config
         ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
 
@@ -624,6 +677,10 @@ def main() -> int:
                     main_password = config_mgr.verify_main_password()
 
             offer_autostart(config_mgr)
+
+            # A normal restart replaces the old tray/server process rather
+            # than leaving two tray icons running side by side.
+            stop_running_server()
 
         # Start-at-login means Chad lives in the tray, however it was
         # started — answering yes should not leave this run without an icon.

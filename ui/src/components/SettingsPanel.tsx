@@ -349,8 +349,8 @@ export function SettingsPanel({
         <p className="instructions-hint">
           {autostart?.supported
             ? autostart.enabled
-              ? `Chad starts with your desktop and waits in the tray — ${autostart.location}`
-              : "Chad starts with your desktop and waits in the tray; click it to open this window."
+              ? `${autostart.location}`
+              : ""
             : "The machine running this server has no system tray."}
         </p>
       </section>

@@ -1014,11 +1014,18 @@ class TaskExecutor:
         git_mgr = GitWorktreeManager(path_obj)
         if not git_mgr.is_git_repo():
             raise ValueError(f"Project must be a git repository: {project_path}")
+        coding_provider = accounts[coding_account]
 
         # Create task
         task = Task(session_id=session_id)
         task.started_at = datetime.now(timezone.utc)
         task.state = TaskState.RUNNING
+        session.active = True
+        session.status = "active"
+        session.coding_account = coding_account
+        session.coding_model = coding_model
+        session.provider_type = coding_provider
+        session.task_description = task_description
 
         # Create event log
         task.event_log = EventLog(session_id)
@@ -1034,9 +1041,6 @@ class TaskExecutor:
                     )
             self._tasks[task.id] = task
             self._activity_times[task.id] = now
-
-        # Get provider info
-        coding_provider = accounts[coding_account]
 
         # Build verification config. An account picked for this task wins over
         # the global verification_enabled flag, which only supplies the default:
@@ -1531,30 +1535,9 @@ class TaskExecutor:
                     target_provider=coding_provider,
                 )
 
-            # Create or reuse worktree
-            reuse_worktree = is_followup or is_resume
-            if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
-                emit("status", status="Reusing existing worktree...")
-                worktree_path = Path(session.worktree_path)
-                session.project_path = str(project_path)
-            else:
-                emit("status", status="Creating worktree...")
-                try:
-                    worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
-                    session.worktree_path = worktree_path
-                    session.worktree_branch = git_mgr._branch_name(task.session_id)
-                    session.worktree_base_commit = base_commit
-                    session.project_path = str(project_path)
-                except Exception as e:
-                    emit("error", error=f"Failed to create worktree: {e}")
-                    task.state = TaskState.FAILED
-                    task.error = str(e)
-                    task.completed_at = datetime.now(timezone.utc)
-                    return
-
-                worktree_path = Path(worktree_path)
-
-            # Log session start
+            # Persist the user request before doing any worktree or provider
+            # setup. Those steps can fail independently; the request and the
+            # failure must still be visible after a reload.
             if task.event_log:
                 verification_account = verification_config.get("verification_account") if verification_config else None
                 task.event_log.log(SessionStartedEvent(
@@ -1569,6 +1552,38 @@ class TaskExecutor:
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
                 status_logging_enabled[0] = True
+
+            # Create or reuse worktree
+            reuse_worktree = is_followup or is_resume
+            if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
+                emit("status", status="Reusing existing worktree...")
+                worktree_path = Path(session.worktree_path)
+                session.project_path = str(project_path)
+            else:
+                emit("status", status="Preparing worktree (large LFS files are skipped)...")
+                try:
+                    worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
+                    session.worktree_path = worktree_path
+                    session.worktree_branch = git_mgr._branch_name(task.session_id)
+                    session.worktree_base_commit = base_commit
+                    session.project_path = str(project_path)
+                except Exception as e:
+                    detail = getattr(e, "stderr", None) or getattr(e, "stdout", None)
+                    detail = str(detail).strip() if detail else str(e)
+                    error = f"Failed to create worktree: {detail}"
+                    emit("error", error=error)
+                    emit("complete", success=False, message=error)
+                    task.state = TaskState.FAILED
+                    task.error = error
+                    task.result = error
+                    task.completed_at = datetime.now(timezone.utc)
+                    session.active = False
+                    session.status = "interrupted"
+                    if task.event_log:
+                        task.event_log.log(SessionEndedEvent(success=False, reason=f"error: {error}"))
+                    return
+
+                worktree_path = Path(worktree_path)
 
             emit("status", status=f"Starting {coding_provider} agent...")
             emit("message_start", speaker="CODING AI")

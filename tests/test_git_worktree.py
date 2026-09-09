@@ -80,6 +80,22 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         assert mgr.get_main_branch() == "main"
 
+    def test_create_worktree_skips_lfs_materialization(self, git_repo, monkeypatch):
+        """Task worktrees must not copy the repository's large LFS payloads."""
+        mgr = GitWorktreeManager(git_repo)
+        calls = []
+        original_run_git = mgr._run_git
+
+        def recording_run_git(*args, cwd=None, check=True, env=None):
+            calls.append((args, env))
+            return original_run_git(*args, cwd=cwd, check=check, env=env)
+
+        monkeypatch.setattr(mgr, "_run_git", recording_run_git)
+        mgr.create_worktree("lfs-skip")
+
+        add_call = next(env for args, env in calls if args[:2] == ("worktree", "add"))
+        assert add_call["GIT_LFS_SKIP_SMUDGE"] == "1"
+
     def test_create_worktree(self, git_repo):
         """Test creating a worktree."""
         mgr = GitWorktreeManager(git_repo)

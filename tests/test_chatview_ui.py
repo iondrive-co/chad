@@ -239,6 +239,33 @@ class TestInterruptFollowups:
         )
 
 
+class TestTaskStartupFeedback:
+    """The submitted prompt must remain visible while the agent starts."""
+
+    def test_task_start_adds_optimistic_user_message_and_thinking_state(self):
+        content = CHATVIEW_FILE.read_text()
+
+        assert "optimisticMessagesRef" in content
+        assert "content: taskDesc" in content
+        assert 'role="status"' in content
+        assert "Thinking" in content
+
+    def test_session_id_is_copyable(self):
+        content = (UI_DIR / "components" / "SessionLog.tsx").read_text()
+
+        assert "navigator.clipboard.writeText(sessionId)" in content
+        assert "Copy full session ID" in content
+        assert '<strong className="session-name">{sessionName}</strong>' in content
+        assert "<code>{sessionId}</code>" in content
+
+    def test_missing_completion_is_not_reported_as_success(self):
+        content = CHATVIEW_FILE.read_text()
+
+        assert "MISSING_COMPLETION_REASON" in content
+        assert 'setEndReason(MISSING_COMPLETION_REASON)' in content
+        assert "stream ended without a persisted completion event" in content
+
+
 class TestComposerInitialState:
     """Verify new-session composer state is derived from real task history."""
 

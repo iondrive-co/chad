@@ -417,28 +417,28 @@ export function App() {
               ))}
             </>
           )}
-          {connected && (
-            <select
-              className="new-session-select"
-              value=""
-              onChange={(e) => {
-                const path = e.target.value;
-                if (path) handleNewSession(path);
-              }}
-              disabled={sessionsLoading || projects.length === 0}
-              title={projects.length === 0 ? "Add a project first (Chad menu → Projects)" : "Start a new session"}
-            >
-              <option value="" disabled>+ New</option>
-              {projects.map((p) => (
-                <option key={p.project_path} value={p.project_path}>
-                  {getProjectDisplayName(p.project_path)}
-                </option>
-              ))}
-            </select>
-          )}
         </nav>
+        {connected && (
+          <select
+            className="new-session-select"
+            value=""
+            onChange={(e) => {
+              const path = e.target.value;
+              if (path) handleNewSession(path);
+            }}
+            disabled={sessionsLoading || projects.length === 0}
+            title={projects.length === 0 ? "Add a project first (Chad menu → Projects)" : "Start a new session"}
+          >
+            <option value="" disabled>+ New</option>
+            {projects.map((p) => (
+              <option key={p.project_path} value={p.project_path}>
+                {getProjectDisplayName(p.project_path)}
+              </option>
+            ))}
+          </select>
+        )}
         {connected && apiBaseUrl && (
-          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
+          <span className="connection-indicator" style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
             {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
           </span>
         )}
@@ -453,6 +453,7 @@ export function App() {
                 key={selectedSession}
                 api={api}
                 sessionId={selectedSession}
+                sessionName={selectedSessionData?.name}
                 onSessionChange={refreshSessions}
                 defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}

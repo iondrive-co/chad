@@ -17,6 +17,7 @@ interface UploadedScreenshot {
 interface Props {
   api: ChadAPI;
   sessionId: string;
+  sessionName?: string;
   onSessionChange: () => void;
   defaultProjectPath?: string;
   apiBaseUrl?: string;
@@ -63,9 +64,12 @@ function getSessionActivationSinceSeq(events: Array<{ type?: string; seq?: numbe
   return fallbackSeq;
 }
 
+const MISSING_COMPLETION_REASON = "error: stream ended without a persisted completion event";
+
 export function ChatView({
   api,
   sessionId,
+  sessionName,
   onSessionChange,
   defaultProjectPath = "",
   apiBaseUrl,
@@ -99,6 +103,10 @@ export function ChatView({
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
+  // The task API returns before the WebSocket is guaranteed to be connected.
+  // Keep submitted prompts visible immediately, then consume the matching
+  // persisted user_message event when it arrives without rendering it twice.
+  const optimisticMessagesRef = useRef<Map<string, number>>(new Map());
   const [inputText, setInputText] = useState(() => composerDrafts.get(sessionId)?.inputText ?? "");
   const [hasRunTask, setHasRunTask] = useState(false);
   const [pendingFollowup, setPendingFollowup] = useState<string | null>(null);
@@ -286,6 +294,8 @@ export function ChatView({
           if (ends.length > 0) {
             const lastEnd = ends[ends.length - 1];
             setEndReason(lastEnd.reason || "completed");
+          } else if (starts.length > 0) {
+            setEndReason(MISSING_COMPLETION_REASON);
           }
 
           const status = await api.getWorktreeStatus(sessionId);
@@ -560,9 +570,9 @@ export function ChatView({
     api.getEvents(sessionId, 0, "session_ended").then((data) => {
       const ends = (data.events as { type: string; reason?: string }[])
         .filter((e) => e.type === "session_ended");
-      setEndReason(ends.length > 0 ? ends[ends.length - 1].reason || "completed" : "completed");
+      setEndReason(ends.length > 0 ? ends[ends.length - 1].reason || "completed" : MISSING_COMPLETION_REASON);
     }).catch(() => {
-      setEndReason("completed");
+      setEndReason(MISSING_COMPLETION_REASON);
     });
     api.getWorktreeStatus(sessionId).then((status) => {
       if (status.exists && status.has_changes) {
@@ -596,6 +606,16 @@ export function ChatView({
 
       const item = mapEventToConversationItem(data, seq);
       if (item) {
+        if (evtType === "user_message") {
+          const content = item.content ?? "";
+          const pending = optimisticMessagesRef.current.get(content) ?? 0;
+          if (pending > 0) {
+            if (pending === 1) optimisticMessagesRef.current.delete(content);
+            else optimisticMessagesRef.current.set(content, pending - 1);
+            if (seq) maxSeq = Math.max(maxSeq, seq);
+            continue;
+          }
+        }
         newItems.push(item);
         if (seq) maxSeq = Math.max(maxSeq, seq);
       }
@@ -664,10 +684,10 @@ export function ChatView({
             const lastEnd = ends[ends.length - 1];
             setEndReason(lastEnd.reason || "completed");
           } else {
-            setEndReason("completed");
+            setEndReason(MISSING_COMPLETION_REASON);
           }
         }).catch(() => {
-          setEndReason("completed");
+          setEndReason(MISSING_COMPLETION_REASON);
         }),
         api.getWorktreeStatus(sessionId).then((status) => {
           if (status.exists && status.has_changes) {
@@ -696,6 +716,17 @@ export function ChatView({
       setConversation([]);
       conversationSeqRef.current = 0;
     }
+    const pendingCount = optimisticMessagesRef.current.get(taskDesc) ?? 0;
+    optimisticMessagesRef.current.set(taskDesc, pendingCount + 1);
+    setConversation((prev) => [
+      ...(isFollowup ? prev : []),
+      {
+        seq: -Date.now(),
+        ts: new Date().toISOString(),
+        type: "user",
+        content: taskDesc,
+      },
+    ]);
     setHasRunTask(true);
   }, [reset]);
 
@@ -1055,7 +1086,7 @@ export function ChatView({
           sessionId={sessionId}
           refreshTrigger={worktreeRefresh}
         />
-        <SessionLog api={api} sessionId={sessionId} />
+        <SessionLog api={api} sessionId={sessionId} sessionName={sessionName} />
         {sessionPaused && (
           <button
             type="button"
@@ -1156,6 +1187,14 @@ export function ChatView({
                   </div>
                 );
               })}
+              {taskActive && (
+                <div className="chat-item start" role="status" aria-live="polite">
+                  <div className="chat-bubble assistant thinking-bubble">
+                    <div className="chat-bubble-label">Agent</div>
+                    <div className="chat-bubble-text">Thinking<span className="thinking-dots" aria-hidden="true">…</span></div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div

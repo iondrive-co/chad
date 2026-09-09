@@ -175,7 +175,13 @@ class GitWorktreeManager:
                 self._repo_locks[key] = lock
             return lock
 
-    def _run_git(self, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def _run_git(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
         """Run a git command and return the result."""
         cmd = ["git"] + list(args)
         return subprocess.run(
@@ -186,6 +192,7 @@ class GitWorktreeManager:
             encoding="utf-8",
             errors="replace",
             check=check,
+            env=env,
         )
 
     def is_git_repo(self) -> bool:
@@ -302,6 +309,8 @@ class GitWorktreeManager:
             )
 
         # Create worktree with new branch
+        worktree_env = os.environ.copy()
+        worktree_env["GIT_LFS_SKIP_SMUDGE"] = "1"
         self._run_git(
             "worktree",
             "add",
@@ -309,6 +318,7 @@ class GitWorktreeManager:
             branch_name,
             str(worktree_path),
             base_commit,
+            env=worktree_env,
         )
 
         # Symlink the main project's venv so agents don't need to reinstall deps

@@ -122,3 +122,31 @@ def test_new_session_project_picker_and_draft_persistence():
         "an unsent composer draft was lost after switching session tabs and back: "
         f"got {result['restored_draft']!r}"
     )
+
+
+def test_new_session_picker_stays_visible_on_narrow_header():
+    """Creating a session must not push the picker off-screen on mobile."""
+    env = create_temp_env(screenshot_mode=False)
+    instance = start_chad(env)
+    try:
+        with open_playwright_page(
+            instance.port,
+            headless=True,
+            viewport={"width": 375, "height": 812},
+        ) as page:
+            page.wait_for_selector(".chad-btn.connected", timeout=15000)
+            page.select_option(".new-session-select", index=1)
+            page.wait_for_selector(".session-tab", timeout=10000)
+
+            picker = page.locator(".new-session-select")
+            box = picker.bounding_box()
+            assert box is not None
+            assert box["x"] >= 0 and box["x"] + box["width"] <= 375, (
+                f"new-session picker was pushed outside the mobile viewport: {box}"
+            )
+            assert picker.is_visible()
+    except (PlaywrightUnavailable, ChadLaunchError) as exc:
+        pytest.skip(f"UI runner unavailable: {exc}")
+    finally:
+        stop_chad(instance)
+        env.cleanup()

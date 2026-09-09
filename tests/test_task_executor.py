@@ -704,6 +704,49 @@ def test_idle_warning_threshold_stays_below_timeout(tmp_path, monkeypatch):
     assert executor._idle_warning_threshold() == 1.0
 
 
+def test_worktree_failure_persists_request_and_failure(tmp_path, monkeypatch):
+    """A setup failure must remain visible instead of producing an empty session."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"mock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="worktree-failure")
+    executor = TaskExecutor(ConfigManager(), session_manager)
+
+    import chad.server.services.task_executor as te
+    monkeypatch.setattr(
+        te.GitWorktreeManager,
+        "create_worktree",
+        lambda _self, _task_id: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(
+                128,
+                ["git", "worktree", "add"],
+                stderr="fatal: no space left on device\n",
+            )
+        ),
+    )
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="This must survive setup failure",
+        coding_account="mock",
+    )
+    task._thread.join(timeout=5)
+
+    events = task.event_log.get_events()
+    assert any(e.get("type") == "user_message" and e.get("content") == "This must survive setup failure" for e in events)
+    assert any(e.get("type") == "session_ended" and not e.get("success") for e in events)
+    stream_events = executor.get_events(task.id, timeout=0.01)
+    assert any(e.type == "complete" and not e.data.get("success") for e in stream_events)
+    assert task.state == TaskState.FAILED
+    assert "no space left on device" in (task.error or "")
+
+
 def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
     """Hung agent processes are terminated after inactivity and logged as timeout."""
     repo_path = tmp_path / "repo"

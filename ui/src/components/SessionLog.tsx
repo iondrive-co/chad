@@ -4,6 +4,7 @@ import type { ChadAPI } from "chad-client";
 interface Props {
   api: ChadAPI;
   sessionId: string;
+  sessionName?: string;
 }
 
 interface SessionEvent {
@@ -24,11 +25,12 @@ const VISIBLE_TYPES = new Set([
   "milestone",
 ]);
 
-export function SessionLog({ api, sessionId }: Props) {
+export function SessionLog({ api, sessionId, sessionName }: Props) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [logPath, setLogPath] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
   const retryCountRef = useRef(0);
 
   const loadEvents = useCallback(async () => {
@@ -87,6 +89,17 @@ export function SessionLog({ api, sessionId }: Props) {
 
   const visibleEvents = events.filter((e) => VISIBLE_TYPES.has(e.type));
 
+  const copySessionId = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(sessionId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // The ID remains selectable so it can still be copied manually when the
+      // browser blocks clipboard access.
+    }
+  }, [sessionId]);
+
   // Build tool_call_id → tool name map for correlating finished events
   const toolCallNames = new Map<string, string>();
   for (const e of events) {
@@ -97,14 +110,35 @@ export function SessionLog({ api, sessionId }: Props) {
 
   return (
     <div className="session-log">
-      <button
-        className="session-log-toggle"
-        onClick={() => setExpanded(!expanded)}
-      >
-        {expanded ? "\u25BC" : "\u25B6"} Session Log
-        {logPath && <span className="log-file-name">{getFileName(logPath)}</span>}
-        {!logPath && <span className="log-file-name">{sessionId.slice(0, 8)}.jsonl</span>}
-      </button>
+      <div className="session-log-toolbar">
+        <button
+          className="session-log-toggle"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? "\u25BC" : "\u25B6"} Session Log
+          {logPath && <span className="log-file-name">{getFileName(logPath)}</span>}
+          {!logPath && <span className="log-file-name">{sessionId.slice(0, 8)}.jsonl</span>}
+        </button>
+        <span className="session-id" title={sessionId}>
+          {sessionName && (
+            <>
+              <span className="session-id-label">Session</span>
+              <strong className="session-name">{sessionName}</strong>
+            </>
+          )}
+          <span className="session-id-label">ID</span>
+          <code>{sessionId}</code>
+        </span>
+        <button
+          type="button"
+          className="session-id-copy"
+          onClick={copySessionId}
+          title="Copy full session ID"
+          aria-label="Copy full session ID"
+        >
+          {copied ? "Copied" : "Copy ID"}
+        </button>
+      </div>
 
       {expanded && (
         <div className="session-log-content">
