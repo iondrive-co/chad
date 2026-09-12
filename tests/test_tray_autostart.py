@@ -545,15 +545,36 @@ class TestTrayUsageTable:
         assert "4h" in row and "166h" in row
         assert "18m" not in row and "30m" not in row, "minutes are noise at a glance"
 
-    def test_a_reset_inside_the_hour_says_so(self):
-        """Rounding "resets in 45m" down to 0h would read as "already reset"."""
+    def test_a_reset_you_are_waiting_on_is_counted_in_minutes(self):
+        """A reset close enough to wait out is read for the number itself.
+
+        Rounding it to whole hours says the same thing at 119 minutes as at 61
+        and at 2, right when the difference between them is the whole question.
+        """
+        from chad.ui.tray.usage import tooltip_text, usage_rows
+
+        for eta, expected in [("0m", "0m"), ("2m", "2m"), ("45m", "45m"),
+                              ("59m", "59m"), ("1h 0m", "60m"),
+                              ("1h 5m", "65m"), ("1h 59m", "119m"),
+                              ("2h 0m", "2h"), ("2h 30m", "2h")]:
+            readings = [("A", self.reading(
+                session_pct=99.0, weekly_pct=1.0, session_reset_eta=eta))]
+            _header, row = usage_rows(readings)
+
+            assert f"({expected})" in row, row
+            assert f"({expected})" in tooltip_text(readings), eta
+
+    def test_minutes_and_hours_keep_the_columns_lined_up(self):
         from chad.ui.tray.usage import usage_rows
 
-        _header, row = usage_rows([
-            ("A", self.reading(session_pct=99.0, weekly_pct=1.0, session_reset_eta="45m")),
+        rows = usage_rows([
+            ("A", self.reading(session_pct=1.0, weekly_pct=2.0,
+                               session_reset_eta="1h 59m", weekly_reset_eta="166h 30m")),
+            ("B", self.reading(session_pct=1.0, weekly_pct=2.0,
+                               session_reset_eta="4h 0m", weekly_reset_eta="7m")),
         ])
 
-        assert "(≈1h)" in row
+        assert len({len(row) for row in rows}) == 1, rows
 
     def test_nothing_in_the_table_can_break_pango_markup(self):
         """Some panels put the tooltip through markup, where "<" starts a tag.

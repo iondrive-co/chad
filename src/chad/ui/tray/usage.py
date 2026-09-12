@@ -1,11 +1,12 @@
 """The account usage table at the top of the tray menu.
 
 A read-only section, one row per account: its code, then each window as a
-bar, a percentage, and the hours until it resets.
+bar, a percentage, and the time until it resets — whole hours, or minutes
+once it is within two hours.
 
             session           weekly
     CWO  ███░░  54% (3h)   ██░░░  44% (92h)
-    CIO  █░░░░  21% (5h)   █░░░░  11% (44h)
+    CIO  █░░░░  21% (47m)  █░░░░  11% (44h)
 
 and the same figures, without the bars, as the icon's pointer-over text.
 Accounts are named by a short code (`chad.util.config_manager` assigns and
@@ -56,9 +57,13 @@ EMPTY = "░"
 # spaces are narrower than digits and the columns come out ragged.
 FIGURE_SPACE = " "
 # Columns wide enough for the widest thing that goes in them: "100%", and a
-# weekly reset that can be a week away ("(167h)").
+# reset that is either a week away ("(167h)") or counted in minutes ("(119m)").
 PERCENT_WIDTH = 4
 RESET_WIDTH = 6
+# Where a reset stops being counted in minutes and starts being counted in
+# whole hours. Two hours, so the whole of the wait you would sit out is
+# readable to the minute rather than spending an hour of it saying "1h".
+MINUTES_UNTIL_HOURS = 120
 
 READING = "Reading usage…"
 
@@ -144,20 +149,27 @@ def _gauge(value: float | None, reset_eta: str | None) -> str:
 
 
 def _reset(eta: str | None) -> str:
-    """Whole hours until a window resets, bracketed, right after its percentage.
+    """Time until a window resets, bracketed, right after its percentage.
 
-    Minutes are noise at a glance, but "resets within the hour" is not, so a
-    reset under an hour away says so rather than rounding to 0h. Padded on the
-    right so the opening bracket lands in the same place on every row.
+    Counted in minutes for the last two hours, and in whole hours above that.
+    A reset days away is read for its order of magnitude, where the odd
+    minutes are noise; a reset you are waiting on is read for the number, and
+    rounding that to "1h" says the same thing at 119 minutes as at 61.
 
-    "≈1h" rather than "<1h": a tooltip reaches some panels as Pango markup,
-    where a bare "<" is the start of a tag and a parse failure means no
-    tooltip at all.
+    Digits and "h"/"m" only, no "<": a tooltip reaches some panels as Pango
+    markup, where a bare "<" starts a tag and a parse failure means no tooltip
+    at all.
     """
     if not eta:
         return FIGURE_SPACE * RESET_WIDTH
-    hours = re.match(r"(\d+)h", eta)
-    text = f"({hours.group(1)}h)" if hours else "(≈1h)"
+    hours, minutes = re.match(r"(?:(\d+)h)?\s*(?:(\d+)m)?", eta).groups()
+    if hours is None and minutes is None:
+        return FIGURE_SPACE * RESET_WIDTH
+    total_minutes = int(hours or 0) * 60 + int(minutes or 0)
+    text = (
+        f"({total_minutes}m)" if total_minutes < MINUTES_UNTIL_HOURS
+        else f"({total_minutes // 60}h)"
+    )
     return text.ljust(RESET_WIDTH, FIGURE_SPACE)
 
 
