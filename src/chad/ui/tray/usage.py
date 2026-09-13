@@ -1,11 +1,11 @@
 """The account usage table at the top of the tray menu.
 
 A read-only section, one row per account: its code, then each window as a
-bar, a percentage, and the time until it resets — whole hours, or minutes
-once it is within two hours.
+bar, a percentage, and the time until it resets — whole days once over
+48 hours, whole hours, or minutes once it is within two hours.
 
             session           weekly
-    CWO  ███░░  54% (3h)   ██░░░  44% (92h)
+    CWO  ███░░  54% (3h)   ██░░░  44% (3d)
     CIO  █░░░░  21% (47m)  █░░░░  11% (44h)
 
 and the same figures, without the bars, as the icon's pointer-over text.
@@ -57,13 +57,17 @@ EMPTY = "░"
 # spaces are narrower than digits and the columns come out ragged.
 FIGURE_SPACE = " "
 # Columns wide enough for the widest thing that goes in them: "100%", and a
-# reset that is either a week away ("(167h)") or counted in minutes ("(119m)").
+# reset that is either a week away ("(6d)") or counted in minutes ("(119m)").
 PERCENT_WIDTH = 4
 RESET_WIDTH = 6
 # Where a reset stops being counted in minutes and starts being counted in
 # whole hours. Two hours, so the whole of the wait you would sit out is
 # readable to the minute rather than spending an hour of it saying "1h".
 MINUTES_UNTIL_HOURS = 120
+# Where a reset stops being counted in whole hours and starts being counted in
+# days. Two days, so a wait days away is read by the day rather than in
+# triple-digit hours.
+HOURS_UNTIL_DAYS = 48
 
 READING = "Reading usage…"
 
@@ -151,25 +155,28 @@ def _gauge(value: float | None, reset_eta: str | None) -> str:
 def _reset(eta: str | None) -> str:
     """Time until a window resets, bracketed, right after its percentage.
 
-    Counted in minutes for the last two hours, and in whole hours above that.
-    A reset days away is read for its order of magnitude, where the odd
-    minutes are noise; a reset you are waiting on is read for the number, and
-    rounding that to "1h" says the same thing at 119 minutes as at 61.
+    Counted in minutes for the last two hours, in whole hours up to 48 hours,
+    and in whole days above that. A reset days away is read for its order of
+    magnitude, where the odd minutes are noise; a reset you are waiting on is
+    read for the number, and rounding that to "1h" says the same thing at 119
+    minutes as at 61.
 
-    Digits and "h"/"m" only, no "<": a tooltip reaches some panels as Pango
+    Digits and "d"/"h"/"m" only, no "<": a tooltip reaches some panels as Pango
     markup, where a bare "<" starts a tag and a parse failure means no tooltip
     at all.
     """
     if not eta:
         return FIGURE_SPACE * RESET_WIDTH
-    hours, minutes = re.match(r"(?:(\d+)h)?\s*(?:(\d+)m)?", eta).groups()
-    if hours is None and minutes is None:
+    days, hours, minutes = re.match(r"(?:(\d+)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?", eta).groups()
+    if days is None and hours is None and minutes is None:
         return FIGURE_SPACE * RESET_WIDTH
-    total_minutes = int(hours or 0) * 60 + int(minutes or 0)
-    text = (
-        f"({total_minutes}m)" if total_minutes < MINUTES_UNTIL_HOURS
-        else f"({total_minutes // 60}h)"
-    )
+    total_minutes = int(days or 0) * 24 * 60 + int(hours or 0) * 60 + int(minutes or 0)
+    if total_minutes < MINUTES_UNTIL_HOURS:
+        text = f"({total_minutes}m)"
+    elif total_minutes > HOURS_UNTIL_DAYS * 60:
+        text = f"({total_minutes // (24 * 60)}d)"
+    else:
+        text = f"({total_minutes // 60}h)"
     return text.ljust(RESET_WIDTH, FIGURE_SPACE)
 
 

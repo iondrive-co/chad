@@ -539,11 +539,32 @@ class TestTrayUsageTable:
 
         _header, row = usage_rows([
             ("A", self.reading(session_pct=1.0, weekly_pct=2.0,
-                               session_reset_eta="4h 18m", weekly_reset_eta="166h 30m")),
+                               session_reset_eta="4h 18m", weekly_reset_eta="44h 30m")),
         ])
 
-        assert "4h" in row and "166h" in row
+        assert "4h" in row and "44h" in row
         assert "18m" not in row and "30m" not in row, "minutes are noise at a glance"
+
+    def test_a_reset_over_48h_shows_days(self):
+        """A reset over 48 hours away is read in whole days.
+
+        Beyond two days, triple-digit or high double-digit hours are noise;
+        order of magnitude in days is what matters at a glance.
+        """
+        from chad.ui.tray.usage import tooltip_text, usage_rows
+
+        for eta, expected in [("48h 1m", "2d"), ("48h 30m", "2d"),
+                              ("49h 0m", "2d"), ("71h 59m", "2d"),
+                              ("72h 0m", "3d"), ("92h 0m", "3d"),
+                              ("96h 0m", "4d"), ("120h 0m", "5d"),
+                              ("144h 0m", "6d"), ("166h 30m", "6d"),
+                              ("168h 0m", "7d")]:
+            readings = [("A", self.reading(
+                session_pct=99.0, weekly_pct=1.0, weekly_reset_eta=eta))]
+            _header, row = usage_rows(readings)
+
+            assert f"({expected})" in row, f"expected ({expected}) in row for eta {eta}, got: {row}"
+            assert f"({expected})" in tooltip_text(readings), f"expected ({expected}) in tooltip for eta {eta}"
 
     def test_a_reset_you_are_waiting_on_is_counted_in_minutes(self):
         """A reset close enough to wait out is read for the number itself.
@@ -564,7 +585,7 @@ class TestTrayUsageTable:
             assert f"({expected})" in row, row
             assert f"({expected})" in tooltip_text(readings), eta
 
-    def test_minutes_and_hours_keep_the_columns_lined_up(self):
+    def test_minutes_hours_and_days_keep_the_columns_lined_up(self):
         from chad.ui.tray.usage import usage_rows
 
         rows = usage_rows([
@@ -572,6 +593,8 @@ class TestTrayUsageTable:
                                session_reset_eta="1h 59m", weekly_reset_eta="166h 30m")),
             ("B", self.reading(session_pct=1.0, weekly_pct=2.0,
                                session_reset_eta="4h 0m", weekly_reset_eta="7m")),
+            ("C", self.reading(session_pct=1.0, weekly_pct=2.0,
+                               session_reset_eta="48h 0m", weekly_reset_eta="72h 0m")),
         ])
 
         assert len({len(row) for row in rows}) == 1, rows
