@@ -96,7 +96,7 @@ async def list_providers() -> ProviderListResponse:
     provider_meta = [
         ("anthropic", "Anthropic (Claude Code)", "Claude AI models via Claude Code CLI"),
         ("openai", "OpenAI (Codex)", "OpenAI models via Codex CLI"),
-        ("gemini", "Google (Gemini)", "Google Gemini models"),
+        ("antigravity", "Google (Antigravity)", "Gemini and Claude models via the Antigravity CLI"),
         ("qwen", "Alibaba (Qwen)", "Qwen models via Qwen Code CLI"),
         ("local", "Local (OpenAI-compatible)", "Local model server (llama.cpp, vLLM, ...) via Qwen Code CLI"),
         ("mistral", "Mistral (Vibe)", "Mistral models via Vibe CLI"),

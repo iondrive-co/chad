@@ -27,7 +27,7 @@ _VERIFICATION_NONE = ConfigManager.VERIFICATION_NONE
 _PROVIDER_LOGIN_LABELS = {
     "openai": "Codex",
     "anthropic": "Claude",
-    "gemini": "Gemini",
+    "antigravity": "Antigravity",
     "qwen": "Qwen",
     "kimi": "Kimi",
     "mistral": "Mistral",

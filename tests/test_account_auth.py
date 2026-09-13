@@ -378,9 +378,10 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
     from chad.util.installer import AIToolInstaller
-    monkeypatch.setattr(
-        AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/bin/{key}")
-    )
+    for method in ("ensure_tool", "install_latest"):
+        monkeypatch.setattr(
+            AIToolInstaller, method, lambda self, key: (True, f"/fake/bin/{key}")
+        )
 
     reset_session_manager()
     reset_task_executor()

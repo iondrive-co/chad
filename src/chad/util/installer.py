@@ -78,12 +78,14 @@ class AIToolInstaller:
                 package="@anthropic-ai/claude-code",
                 version="latest",
             ),
-            "gemini": CLIToolSpec(
-                name="Gemini",
-                binary="gemini",
-                installer="npm",
-                package="@google/gemini-cli",
-                version="latest",
+            "agy": CLIToolSpec(
+                name="Antigravity",
+                binary="agy",
+                installer="manifest",
+                # Base of Google's release service: it serves one manifest per
+                # platform naming the current build, its URL and its checksum.
+                package="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app",
+                version=None,
             ),
             "qwen": CLIToolSpec(
                 name="Qwen Code",
@@ -180,6 +182,35 @@ class AIToolInstaller:
 
         return self._install(spec)
 
+    def install_latest(self, tool_key: str) -> tuple[bool, str]:
+        """Install the tool at its latest release. Returns (success, path|error).
+
+        This is the setup path — adding or authorizing an account — where the
+        wait is expected and the version matters: ``ensure_tool`` returns as
+        soon as a binary exists, so a CLI installed months ago kept running
+        months old, and its own auto-updater cannot fix that (it tries to npm
+        install over Chad's managed copy and fails in front of the user).
+
+        A binary the user put on PATH is theirs to manage and is left alone.
+        """
+        spec = self.tool_specs.get(tool_key)
+        if not spec:
+            return False, f"Unknown tool '{tool_key}'"
+
+        existing = self.resolve_tool_path(spec.binary)
+        if existing and not self._is_managed_install(existing):
+            return True, str(existing)
+
+        ok, detail = self._install(spec)
+        if ok:
+            self._write_update_stamp(tool_key, time.time())
+            return ok, detail
+        if existing:
+            # The install we already have still runs; a failed update is not a
+            # reason to block a login.
+            return True, str(existing)
+        return ok, detail
+
     def _install(self, spec: CLIToolSpec) -> tuple[bool, str]:
         if spec.installer == "npm":
             return self._install_with_npm(spec)
@@ -187,6 +218,8 @@ class AIToolInstaller:
             return self._install_with_pip(spec)
         if spec.installer == "binary":
             return self._install_binary(spec)
+        if spec.installer == "manifest":
+            return self._install_from_manifest(spec)
         return False, f"No installer configured for {spec.name}"
 
     @property
@@ -238,7 +271,7 @@ class AIToolInstaller:
         updated: list[str] = []
 
         for tool_key, spec in self.tool_specs.items():
-            if spec.installer not in ("npm", "pip"):
+            if spec.installer not in ("npm", "pip", "manifest"):
                 continue
             if not self._is_managed_install(self.resolve_tool_path(spec.binary)):
                 continue  # Not ours: absent, or the user's own install on PATH
@@ -500,6 +533,132 @@ class AIToolInstaller:
         path = os.environ.get("PATH", "")
         if bin_dir not in path.split(os.pathsep):
             os.environ["PATH"] = bin_dir + os.pathsep + path
+
+    @staticmethod
+    def _installed_version(binary: Path) -> str:
+        """What `--version` reports, or "" when it cannot be asked."""
+        if not binary.exists():
+            return ""
+        try:
+            result = run_command([str(binary), "--version"])
+        except Exception:
+            return ""
+        code, stdout, _stderr = result
+        return stdout.strip().splitlines()[-1].strip() if code == 0 and stdout.strip() else ""
+
+    def _manifest_platform(self) -> str:
+        """The platform key Google's release manifests are named by."""
+        import platform
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64"):
+            arch = "amd64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "arm64"
+        else:
+            raise ValueError(f"Unsupported architecture: {machine}")
+
+        if system == "windows":
+            return f"windows_{arch}"
+        if system == "darwin":
+            return f"darwin_{arch}"
+        if system == "linux":
+            # musl builds are published separately; the glibc binary will not
+            # run on Alpine and friends.
+            musl = any(
+                Path(f"/lib/libc.musl-{name}.so.1").exists()
+                for name in ("x86_64", "aarch64")
+            )
+            return f"linux_{arch}_musl" if musl else f"linux_{arch}"
+        raise ValueError(f"Unsupported platform: {system}")
+
+    def _install_from_manifest(self, spec: CLIToolSpec) -> tuple[bool, str]:
+        """Install a tool from a per-platform release manifest.
+
+        The manifest names the current version, its download URL and its SHA-512.
+        Checking the digest is the point: this is a binary fetched over the
+        network and then executed.
+        """
+        import hashlib
+        import stat
+        import tarfile
+        import tempfile
+        import urllib.request
+
+        ensure_directory(self.tools_dir)
+        ensure_directory(self.bin_dir)
+
+        try:
+            platform_key = self._manifest_platform()
+        except ValueError as exc:
+            return False, str(exc)
+
+        manifest_url = f"{spec.package}/manifests/{platform_key}.json"
+        try:
+            with urllib.request.urlopen(manifest_url, timeout=60) as response:
+                manifest = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            return False, f"Could not read the {spec.name} release manifest: {exc}"
+
+        url = manifest.get("url")
+        expected_digest = manifest.get("sha512")
+        if not url or not expected_digest:
+            return False, f"The {spec.name} release manifest named no download"
+
+        target_name = "agy.exe" if platform_key.startswith("windows") else spec.binary
+        target = self.bin_dir / target_name
+
+        version = manifest.get("version")
+        if version and self._installed_version(target) == version:
+            # Already the build the manifest names. This runs on every login,
+            # and the download is hundreds of megabytes.
+            return True, str(target)
+
+        with tempfile.TemporaryDirectory(prefix="chad-agy-") as staging:
+            payload = Path(staging) / "payload"
+            try:
+                urllib.request.urlretrieve(url, str(payload))
+            except Exception as exc:
+                return False, f"Failed to download {spec.name}: {exc}"
+
+            digest = hashlib.sha512()
+            with open(payload, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_digest:
+                return False, (
+                    f"{spec.name} download did not match the checksum in its manifest "
+                    "— refusing to install it"
+                )
+
+            binary = payload
+            if url.split("?")[0].endswith(".tar.gz"):
+                try:
+                    with tarfile.open(payload, "r:gz") as archive:
+                        _assert_safe_tar_members(archive)
+                        archive.extractall(staging, filter="data")
+                except (tarfile.TarError, ValueError) as exc:
+                    return False, f"Could not unpack {spec.name}: {exc}"
+                # The archive carries the binary under the product's own name.
+                binary = Path(staging) / "antigravity"
+                if not binary.exists():
+                    return False, f"{spec.name} archive did not contain its binary"
+
+            try:
+                import shutil
+
+                shutil.copyfile(binary, target)
+                if not target_name.endswith(".exe"):
+                    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            except OSError as exc:
+                return False, f"Could not install {spec.name} to {target}: {exc}"
+
+        resolved = self.resolve_tool_path(spec.binary)
+        if not resolved:
+            return False, f"{spec.name} installed but '{spec.binary}' was not found."
+        return True, str(resolved)
 
     def _install_binary(self, spec: CLIToolSpec) -> tuple[bool, str]:
         """Install a tool by downloading a platform-appropriate binary."""

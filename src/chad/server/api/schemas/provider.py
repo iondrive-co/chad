@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"]
+ProviderType = Literal["anthropic", "openai", "antigravity", "qwen", "local", "mistral", "kimi", "mock"]
 # Account names become directory names (CLAUDE_CONFIG_DIR, codex/kimi homes) —
 # restrict to a safe charset so '../'-style names can't escape ~/.chad/.
 ACCOUNT_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"

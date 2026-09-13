@@ -92,7 +92,7 @@ export interface TaskFollowupResponse {
 export type ProviderType =
   | "anthropic"
   | "openai"
-  | "gemini"
+  | "antigravity"
   | "qwen"
   | "local"
   | "mistral"

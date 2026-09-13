@@ -56,6 +56,7 @@ def _mock_installer(monkeypatch):
 
     from chad.util.installer import AIToolInstaller
     monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+    monkeypatch.setattr(AIToolInstaller, "install_latest", fake_ensure_tool)
     return installed
 
 
@@ -220,12 +221,12 @@ class TestProviderEndpoints:
         assert response.status_code == 200
         data = response.json()
         providers = data["providers"]
-        assert len(providers) >= 5  # anthropic, openai, gemini, qwen, mistral
+        assert len(providers) >= 5  # anthropic, openai, antigravity, qwen, mistral
 
         provider_types = [p["type"] for p in providers]
         assert "anthropic" in provider_types
         assert "openai" in provider_types
-        assert "gemini" in provider_types
+        assert "antigravity" in provider_types
         assert "local" in provider_types
         assert "kimi" in provider_types
 
@@ -642,14 +643,14 @@ class TestConfigEndpoints:
                     "accounts": {
                         "my-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
                         "my-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
-                        "my-gemini": {"provider": "gemini", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-agy": {"provider": "antigravity", "key": "x", "model": "default", "reasoning": "default"},
                     },
                 }
             },
         )
         assert response.status_code == 200
         assert response.json()["ok"] is True
-        assert sorted(installed) == ["claude", "codex", "gemini"]
+        assert sorted(installed) == ["agy", "claude", "codex"]
 
     def test_import_config_reports_install_errors(self, client, monkeypatch):
         """Import reports tool installation failures without failing the import."""

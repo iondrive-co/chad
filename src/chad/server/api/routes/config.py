@@ -688,7 +688,7 @@ class ConfigImportRequest(BaseModel):
 PROVIDER_TO_TOOL_KEY: dict[str, str] = {
     "anthropic": "claude",
     "openai": "codex",
-    "gemini": "gemini",
+    "antigravity": "agy",
     "qwen": "qwen",
     "local": "qwen",
     "kimi": "kimi",

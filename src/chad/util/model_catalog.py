@@ -45,10 +45,18 @@ class ModelCatalog:
     # Claude models are discovered live from the Anthropic Models API (see
     # _claude_models), so no hardcoded list is kept here to go stale.
     ANTHROPIC_FALLBACK: tuple[str, ...] = ("default",)
-    GEMINI_FALLBACK: tuple[str, ...] = (
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
+    # Antigravity serves Gemini, Claude and open models under one login, and
+    # names each with its reasoning effort baked in. `agy models` lists what a
+    # given account may use; this is the list to fall back on.
+    ANTIGRAVITY_FALLBACK: tuple[str, ...] = (
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-opus-4-6-thinking",
+        "claude-sonnet-4-6",
+        "gpt-oss-120b-medium",
         "default",
     )
     QWEN_FALLBACK: tuple[str, ...] = (
@@ -66,7 +74,7 @@ class ModelCatalog:
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "qwen", "local", "mistral", "kimi", "mock"}
+        return {"anthropic", "openai", "antigravity", "qwen", "local", "mistral", "kimi", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -105,7 +113,7 @@ class ModelCatalog:
         return {
             "anthropic": self.ANTHROPIC_FALLBACK,
             "openai": self.OPENAI_FALLBACK,
-            "gemini": self.GEMINI_FALLBACK,
+            "antigravity": self.ANTIGRAVITY_FALLBACK,
             "qwen": self.QWEN_FALLBACK,
             "local": self.LOCAL_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
@@ -131,8 +139,9 @@ class ModelCatalog:
             return False
         if provider == "anthropic":
             return normalized.startswith("claude-")
-        if provider == "gemini":
-            return normalized.startswith("gemini-")
+        if provider == "antigravity":
+            # One login, several model families.
+            return normalized.startswith(("gemini-", "claude-", "gpt-"))
         if provider == "qwen":
             return normalized.startswith("qwen")
         if provider == "kimi":

@@ -133,13 +133,13 @@ class TestSetupScreenConfig:
         """Can have accounts for different providers."""
         config_manager.store_account("my-claude", "anthropic", "key1", "test")
         config_manager.store_account("my-codex", "openai", "key2", "test")
-        config_manager.store_account("my-gemini", "gemini", "key3", "test")
+        config_manager.store_account("my-agy", "antigravity", "key3", "test")
 
         accounts = config_manager.list_accounts()
         assert len(accounts) == 3
         assert accounts["my-claude"] == "anthropic"
         assert accounts["my-codex"] == "openai"
-        assert accounts["my-gemini"] == "gemini"
+        assert accounts["my-agy"] == "antigravity"
 
 
 class TestTaskScreenConfig:
@@ -242,14 +242,14 @@ class TestProviderCommandGeneration:
         assert cmd[0] == str(fake)
         assert cmd[0] != "codex"
 
-    def test_gemini_command_has_yolo(self):
-        """Gemini command includes YOLO flag."""
+    def test_antigravity_command_skips_approval_prompts(self):
+        """Antigravity runs unattended, so nothing may wait on approval."""
         from chad.server.services.task_executor import build_agent_command
 
-        cmd, env, _ = build_agent_command("gemini", "test", Path("/tmp"))
+        cmd, env, _ = build_agent_command("antigravity", "test", Path("/tmp"))
 
-        assert any("gemini" in c for c in cmd)
-        assert "-y" in cmd
+        assert any("agy" in c for c in cmd)
+        assert "--dangerously-skip-permissions" in cmd
 
     def test_qwen_command_has_yolo(self):
         """Qwen command includes YOLO flag."""

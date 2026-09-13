@@ -8,6 +8,7 @@ authenticated. Used by both the CLI (`chad.ui.cli.app`) and the web API
 
 import json
 import os
+import time
 import shlex
 import shutil
 import subprocess
@@ -16,7 +17,16 @@ import tempfile
 from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
-from chad.util.providers import claude_account_authenticated, is_mistral_configured
+from chad.util.providers import (
+    antigravity_env,
+    antigravity_home_dir,
+    antigravity_logged_in,
+    capture_antigravity_login,
+    claude_account_authenticated,
+    clear_antigravity_login,
+    is_mistral_configured,
+    read_antigravity_keyring,
+)
 from chad.util.utils import safe_home
 
 _INSTALLER = AIToolInstaller()
@@ -24,13 +34,13 @@ _INSTALLER = AIToolInstaller()
 # Providers whose login launches an interactive terminal UI (Ink/raw-mode) and
 # therefore needs a real TTY. From a detached server thread these must open in a
 # new terminal window; the CLI front-end runs them in its own terminal instead.
-TTY_LOGIN_PROVIDERS = frozenset({"anthropic", "gemini", "qwen", "kimi"})
+TTY_LOGIN_PROVIDERS = frozenset({"anthropic", "antigravity", "qwen", "kimi"})
 
 # Provider type -> installer tool key
 PROVIDER_TOOL_KEYS: dict[str, str] = {
     "openai": "codex",
     "anthropic": "claude",
-    "gemini": "gemini",
+    "antigravity": "agy",
     "qwen": "qwen",
     "local": "qwen",
     "mistral": "vibe",
@@ -41,6 +51,10 @@ PROVIDER_TOOL_KEYS: dict[str, str] = {
 API_KEY_PROVIDERS = frozenset({"mistral"})
 
 _LOGIN_TIMEOUT_SECS = 120
+# How long to keep watching the keyring for a sign-in finished in a terminal
+# window Chad opened, and how often to look.
+_ANTIGRAVITY_CAPTURE_SECS = 600
+_ANTIGRAVITY_POLL_SECS = 2
 
 
 # ── Isolated home / config paths ──
@@ -60,9 +74,9 @@ def kimi_home(account_name: str) -> Path:
     return safe_home() / ".chad" / "kimi-homes" / account_name
 
 
-def gemini_home(account_name: str) -> Path:
-    """Isolated Gemini CLI home (via GEMINI_CLI_HOME) for a Gemini account."""
-    return safe_home() / ".chad" / "gemini-homes" / account_name
+def antigravity_home(account_name: str) -> Path:
+    """Isolated home (config, conversations, logs) for an Antigravity account."""
+    return antigravity_home_dir(account_name)
 
 
 def qwen_home(account_name: str) -> Path:
@@ -84,7 +98,7 @@ def vibe_home(account_name: str) -> Path:
 _ACCOUNT_HOMES = {
     "anthropic": claude_config_dir,
     "openai": codex_home,
-    "gemini": gemini_home,
+    "antigravity": antigravity_home,
     "qwen": qwen_home,
     "local": qwen_home,
     "mistral": vibe_home,
@@ -150,15 +164,17 @@ def write_kimi_default_config(config_file: Path) -> None:
 # ── CLI installation ──
 
 def ensure_cli(provider: str) -> tuple[bool, str]:
-    """Ensure the provider's CLI is installed in Chad's managed tools dir.
+    """Ensure the provider's latest CLI is installed in Chad's managed tools dir.
 
     Returns (success, resolved_path_or_error). For providers with no managed CLI
-    (e.g. mock) returns (True, "").
+    (e.g. mock) returns (True, ""). This runs as part of setting an account up,
+    so it takes the update: a login is the one moment a version too old to
+    authorize is worth a wait.
     """
     tool_key = PROVIDER_TOOL_KEYS.get(provider)
     if not tool_key:
         return True, ""
-    return _INSTALLER.ensure_tool(tool_key)
+    return _INSTALLER.install_latest(tool_key)
 
 
 def _resolve_cli(provider: str) -> str | None:
@@ -186,7 +202,7 @@ def _codex_authenticated(account_name: str) -> bool:
 def is_logged_in(provider: str, account_name: str) -> bool:
     """Return True if the account has usable credentials.
 
-    For Claude this means the token still works: the credentials file merely
+    For Claude and Gemini this means the credentials still work: a file merely
     existing said "Ready" for accounts whose OAuth session had died weeks
     earlier, and the user only found out three minutes into a task.
     """
@@ -197,8 +213,8 @@ def is_logged_in(provider: str, account_name: str) -> bool:
         if provider == "anthropic":
             return claude_account_authenticated(account_name)
 
-        if provider == "gemini":
-            return (gemini_home(account_name) / ".gemini" / "oauth_creds.json").exists()
+        if provider == "antigravity":
+            return antigravity_logged_in(account_name)
 
         if provider == "qwen":
             return (qwen_home(account_name) / ".qwen" / "oauth_creds.json").exists()
@@ -298,26 +314,52 @@ def _tty_login_command(provider: str, account_name: str, cli_path: str) -> tuple
         home = kimi_home(account_name)
         home.mkdir(parents=True, exist_ok=True)
         return [cli_path, "login"], _home_redirect_env(home)
-    if provider == "gemini":
-        home = gemini_home(account_name)
-        home.mkdir(parents=True, exist_ok=True)
-        return [cli_path, "-y"], {"GEMINI_CLI_HOME": str(home)}
+    if provider == "antigravity":
+        # Bare `agy` opens the sign-in; the account's own home keeps its
+        # conversations and settings apart from every other account's.
+        return [cli_path], antigravity_env(account_name)
     # qwen authenticates in YOLO mode against its per-account HOME.
     home = qwen_home(account_name)
     home.mkdir(parents=True, exist_ok=True)
     return [cli_path, "-y"], _home_redirect_env(home)
 
 
+def _claim_antigravity_login(account_name: str, deadline: float) -> bool:
+    """Wait for the CLI to write a login, then keep it for this account.
+
+    The CLI stores its login in one keyring slot shared by every account, so it
+    is claimed as soon as it appears and before another account can sign in
+    over it.
+    """
+    while time.monotonic() < deadline:
+        if read_antigravity_keyring():
+            return capture_antigravity_login(account_name)
+        time.sleep(_ANTIGRAVITY_POLL_SECS)
+    return False
+
+
 def _run_tty_login(
     provider: str, account_name: str, cmd: list[str], extra_env: dict, new_terminal: bool
 ) -> tuple[bool, str]:
+    if provider == "antigravity":
+        # Clear the slot first: whatever turns up in it afterwards is this
+        # account's login and nobody else's.
+        clear_antigravity_login()
+
     if new_terminal:
-        if _spawn_terminal(cmd, extra_env):
-            return True, "Login started — finish signing in in the terminal window that opened."
-        return False, (
-            "Could not open a terminal window for login. Open a terminal and run: "
-            + " ".join(shlex.quote(c) for c in cmd)
-        )
+        if not _spawn_terminal(cmd, extra_env):
+            return False, (
+                "Could not open a terminal window for login. Open a terminal and run: "
+                + " ".join(shlex.quote(c) for c in cmd)
+            )
+        if provider == "antigravity":
+            # This runs on the login thread, so waiting here costs the caller
+            # nothing and the account goes ready the moment the sign-in lands.
+            deadline = time.monotonic() + _ANTIGRAVITY_CAPTURE_SECS
+            if _claim_antigravity_login(account_name, deadline):
+                return True, "Login successful"
+            return False, "Login was not completed"
+        return True, "Login started — finish signing in in the terminal window that opened."
 
     env = os.environ.copy()
     env.update(extra_env)
@@ -327,6 +369,9 @@ def _run_tty_login(
         return False, f"{provider} CLI not found after install"
     except subprocess.TimeoutExpired:
         return False, "Login timed out"
+    if provider == "antigravity":
+        # The CLI has exited, so its login is already in the slot.
+        capture_antigravity_login(account_name)
     if is_logged_in(provider, account_name):
         return True, "Login successful"
     return False, "Login failed or was cancelled"

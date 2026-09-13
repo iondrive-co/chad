@@ -58,6 +58,7 @@ def _stub_installer(monkeypatch, result=None):
         return True, f"/fake/bin/{tool_key}"
 
     monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+    monkeypatch.setattr(AIToolInstaller, "install_latest", fake_ensure_tool)
 
 
 class TestProviderOauthFlow:

@@ -68,13 +68,38 @@ def _normalize_tool_call(name: str, inp: dict) -> tuple[str, dict]:
     if name == "glob":
         return "Glob", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
     if name in ("grep", "grep_search", "search_file_content"):
-        return "Grep", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+        return "Grep", {
+            "pattern": inp.get("pattern") or inp.get("Query", ""),
+            "path": inp.get("path") or inp.get("SearchPath"),
+        }
     if name in ("web_search", "google_web_search"):
         return "WebSearch", {"query": inp.get("query", "")}
     if name == "web_fetch":
         return "WebFetch", {"url": inp.get("url") or inp.get("prompt", "")}
     if name == "task":
         return "Task", inp
+
+    # Antigravity (agy) names its tools in snake_case and their arguments in
+    # PascalCase, as its tool_info payload shows.
+    if name == "view_file":
+        return "Read", {"file_path": inp.get("AbsolutePath", "")}
+    if name == "write_to_file":
+        return "Write", {"file_path": inp.get("TargetFile", "")}
+    if name in ("replace_file_content", "multi_replace_file_content", "sed_file"):
+        return "Edit", {"file_path": inp.get("TargetFile", "")}
+    if name in ("run_command", "command_status", "send_command_input"):
+        return "Bash", {"command": inp.get("CommandLine", "")}
+    if name == "list_dir":
+        return "LS", {"path": inp.get("DirectoryPath", "")}
+    if name == "find_by_name":
+        return "Glob", {"pattern": inp.get("Pattern", ""), "path": inp.get("SearchDirectory")}
+    if name in ("read_url_content", "open_browser_url"):
+        return "WebFetch", {"url": inp.get("Url") or inp.get("URL", "")}
+    if name == "search_web":
+        return "WebSearch", {"query": inp.get("Query", "")}
+    if name == "invoke_subagent":
+        return "Task", inp
+
     return name, inp
 
 
@@ -106,9 +131,11 @@ class ClaudeStreamJsonParser:
         self._tool_details: list[str] = []
         self._pending_summary = False  # True when we have tools to summarize
         self._last_emitted_summary: str | None = None
-        # Usage stats captured from result events (Gemini stream-json)
+        # Usage stats captured from result events
         self.result_stats: dict = {}
         self.init_model: str | None = None
+        # Conversation id, for the CLIs that resume by one (Antigravity)
+        self.session_id: str | None = None
         # Structured tool call records for event logging.
         # Each entry: {"id": str, "name": str, "input": dict}
         self.pending_tool_calls: list[dict] = []
@@ -162,6 +189,65 @@ class ClaudeStreamJsonParser:
             results.append(line.decode("utf-8", errors="replace"))
         return results
 
+    def _format_antigravity_event(self, obj: dict) -> list[str]:
+        """Format one Antigravity (agy) NDJSON event.
+
+        Its stream is shaped differently from the other CLIs': the kind is in
+        "event" and the payload is nested under a key of the same name.
+        """
+        outputs: list[str] = []
+        name = obj.get("event")
+
+        if name == "init":
+            self.session_id = (obj.get("conversation_id") or "") or self.session_id
+            return outputs
+
+        if name == "step_update":
+            step = obj.get("step_update") or {}
+            step_type = step.get("step_type", "")
+            text = step.get("text_delta") or ""
+            if step_type == "agent_response":
+                if text:
+                    outputs.extend(self._emit_summary_if_changed())
+                    outputs.append(text)
+                    self._reset_tool_state()
+                return outputs
+            if step_type in ("user_input", "", "system_message"):
+                # The prompt echoed back, and housekeeping: not the agent's work.
+                return outputs
+            # Anything else is the agent using a tool. Its step_type is the
+            # literal "tool"; the name and arguments are nested.
+            if step.get("state") != "ACTIVE":
+                return outputs
+            tool_info = step.get("tool_info") or {}
+            tool_name, tool_input = _normalize_tool_call(
+                step.get("tool_name") or tool_info.get("name") or step_type,
+                tool_info.get("parameters") or {},
+            )
+            self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
+            tool_desc = self._format_tool_use(tool_name, tool_input)
+            if tool_desc:
+                self._tool_details.append(tool_desc)
+            self._pending_summary = True
+            outputs.extend(self._emit_summary_if_changed())
+            self.pending_tool_calls.append({
+                "id": f"{self.session_id or ''}:{step.get('step_index', '')}",
+                "name": tool_name,
+                "input": tool_input,
+            })
+            return outputs
+
+        if name == "result":
+            result = obj.get("result") or {}
+            usage = result.get("usage")
+            if isinstance(usage, dict):
+                self.result_stats = usage
+            self.session_id = (result.get("conversation_id") or "") or self.session_id
+            # The response text already arrived as agent_response deltas.
+            return outputs
+
+        return outputs
+
     def _format_json_event(self, obj: dict) -> list[str]:
         """Convert a stream-json event to human-readable text chunks.
 
@@ -171,6 +257,9 @@ class ClaudeStreamJsonParser:
         Returns:
             List of human-readable text chunks (may be empty if event should be hidden)
         """
+        if "event" in obj and "type" not in obj:
+            return self._format_antigravity_event(obj)
+
         event_type = obj.get("type", "")
         outputs: list[str] = []
 
@@ -242,7 +331,7 @@ class ClaudeStreamJsonParser:
             return outputs
 
         elif event_type == "message":
-            # Qwen/Gemini CLI format: {type: "message", role: "assistant", content: "..."}
+            # Qwen CLI format: {type: "message", role: "assistant", content: "..."}
             role = obj.get("role", "")
             if role == "assistant":
                 content = obj.get("content", "")
@@ -532,7 +621,7 @@ def build_agent_command(
     """Build CLI command and environment for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, local, mistral, mock)
+        provider: Provider type (anthropic, openai, antigravity, qwen, local, mistral, mock)
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
@@ -629,20 +718,25 @@ def build_agent_command(
         if full_prompt:
             initial_input = full_prompt + "\n"
 
-    elif provider == "gemini":
-        # Gemini CLI in YOLO mode with stream-json output.
-        # Use -p for headless execution; positional prompts keep the CLI interactive.
-        # GEMINI_CLI_HOME is the CLI's home override: it resolves its .gemini
-        # config/credentials dir under it, isolating accounts from each other.
-        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
-        gemini_home = safe_home() / ".chad" / "gemini-homes" / account_name
-        gemini_home.mkdir(parents=True, exist_ok=True)
-        cmd = [resolve_tool("gemini"), "-y", "--output-format", "stream-json"]
-        if model and model != "default":
-            cmd.extend(["-m", model])
-        if full_prompt:
-            cmd.extend(["-p", full_prompt])
-        env["GEMINI_CLI_HOME"] = str(gemini_home)
+    elif provider == "antigravity":
+        # Antigravity CLI in print mode with stream-json output. The account's
+        # login lives in a keyring slot shared by every account, so it is made
+        # the active one here, right before the CLI starts and reads it.
+        from chad.util.providers import (
+            activate_antigravity_account,
+            antigravity_env,
+            build_antigravity_command,
+        )
+
+        activate_antigravity_account(account_name)
+        cmd = build_antigravity_command(
+            resolve_tool("agy"),
+            full_prompt or "",
+            project_path=project_path,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        env.update(antigravity_env(account_name))
 
     elif provider == "qwen":
         # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
@@ -1195,7 +1289,7 @@ class TaskExecutor:
         use_stdin_pipe = coding_provider == "openai"
 
         # Create JSON parser for providers that use stream-json output
-        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "gemini", "kimi") else None
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "antigravity", "kimi") else None
         # Codex prints its own rendered transcript; normalize it into clean prose
         # plus structured tool calls so the UI renders it like every other provider.
         codex_parser = CodexStreamParser() if coding_provider == "openai" else None
@@ -1447,16 +1541,6 @@ class TaskExecutor:
             if retry_output:
                 combined_output = f"{combined_output}\n{retry_output}"
             return retry_exit, combined_output
-
-        # Write Gemini usage stats captured from stream-json result event
-        if json_parser and coding_provider == "gemini":
-            from chad.util.providers import _append_gemini_usage
-            model = json_parser.init_model or coding_model or "default"
-            if json_parser.result_stats:
-                _append_gemini_usage(coding_account, model, json_parser.result_stats)
-            else:
-                # Fallback: write a minimal usage record so the session shows activity
-                _append_gemini_usage(coding_account, model, {"num_api_requests": 1})
 
         return exit_code, "\n".join(captured_output)
 

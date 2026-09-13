@@ -1302,17 +1302,315 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     return _codex_window_used_percent(session)
 
 
-def _gemini_home_dir(account_name: str | None) -> Path:
-    """Isolated Gemini CLI home for an account (or the real home if unset).
+# ── Antigravity ──
+#
+# Google withdrew Gemini Code Assist for individuals from the Gemini CLI and
+# moved it to Antigravity, whose CLI (`agy`) is what Chad drives now. Two things
+# differ from every other provider Chad installs:
+#
+#   * it keeps its config, conversations and logs under $HOME/.gemini/
+#     antigravity-cli, so an account is isolated by redirecting HOME; but
+#   * it keeps the login itself in the OS keyring, under one fixed key — so a
+#     second account signing in replaces the first. Chad therefore owns that
+#     slot: each account's credential is kept beside its home and written into
+#     the keyring just before that account runs.
+_AGY_KEYRING_SERVICE = "gemini"
+_AGY_KEYRING_USER = "antigravity"
+_AGY_KEYRING_ATTRS = {"service": _AGY_KEYRING_SERVICE, "username": _AGY_KEYRING_USER}
+# Held across "install this account's credential, then start its process", so
+# two accounts starting at once cannot read each other's login.
+_agy_keyring_lock = threading.Lock()
 
-    The Gemini CLI resolves its ``.gemini`` config dir from the
-    ``GEMINI_CLI_HOME`` env var (falling back to ``os.homedir()``), so pointing
-    that at this directory gives each account its own credentials.
-    """
+
+def antigravity_home_dir(account_name: str | None) -> Path:
+    """Isolated Antigravity home for an account (or the real home if unset)."""
     base_home = platform_path(safe_home())
     if account_name:
-        return base_home / ".chad" / "gemini-homes" / account_name
+        return base_home / ".chad" / "antigravity-homes" / account_name
     return base_home
+
+
+def antigravity_credential_file(account_name: str) -> Path:
+    """Where Chad keeps this account's Antigravity login."""
+    return antigravity_home_dir(account_name) / "credential.json"
+
+
+def _secret_service_items() -> list:
+    """The CLI's credential wherever the Secret Service keeps it (Linux).
+
+    Needed because the two sides disagree about where to look: the CLI writes
+    to the login collection, while python-keyring only ever searches the one
+    the Secret Service calls default — a different collection on a desktop that
+    has both. Chad polled the empty one and never saw a completed sign-in.
+    """
+    try:
+        import secretstorage
+    except ImportError:
+        return []  # macOS and Windows have one store, and keyring finds it.
+    try:
+        connection = secretstorage.dbus_init()
+        items = []
+        for collection in secretstorage.get_all_collections(connection):
+            if collection.is_locked():
+                continue
+            items.extend(collection.search_items(_AGY_KEYRING_ATTRS))
+        return items
+    except Exception:
+        return []
+
+
+def read_antigravity_keyring() -> str:
+    """The credential currently in the CLI's keyring slot, or ""."""
+    import keyring
+
+    try:
+        stored = keyring.get_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
+        if stored:
+            return stored
+    except Exception:
+        pass  # No keyring is a state, not a crash: nothing is signed in.
+
+    for item in _secret_service_items():
+        try:
+            secret = item.get_secret()
+        except Exception:
+            continue
+        if secret:
+            return secret.decode("utf-8", errors="replace")
+    return ""
+
+
+def clear_antigravity_login() -> None:
+    """Empty the keyring slot, so the next login in it is unambiguously new.
+
+    Chad keeps every account's credential itself and puts the right one back
+    before that account runs, so nothing is lost by clearing it.
+
+    The item is blanked rather than deleted: the CLI created it in a collection
+    of its own choosing, and writing a fresh one would land in the collection
+    python-keyring prefers, which is not the one the CLI reads.
+    """
+    import keyring
+
+    emptied = False
+    for item in _secret_service_items():
+        try:
+            item.set_secret(b"")
+            emptied = True
+        except Exception:
+            pass
+    if emptied:
+        return
+    try:
+        keyring.delete_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
+    except Exception:
+        pass  # Nothing stored, or no keyring: either way the slot is not ours.
+
+
+def capture_antigravity_login(account_name: str) -> bool:
+    """Take the login the CLI just wrote and keep it for this account.
+
+    Called after an interactive sign-in. Returns False when no login was made.
+    """
+    credential = read_antigravity_keyring()
+    if not credential:
+        return False
+    target = antigravity_credential_file(account_name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(credential, encoding="utf-8")
+    os.chmod(target, 0o600)
+    return True
+
+
+def activate_antigravity_account(account_name: str) -> bool:
+    """Put this account's login in the keyring slot the CLI reads.
+
+    Returns False when the account has no stored login, which is what "not
+    signed in" looks like to every caller.
+    """
+    import keyring
+
+    try:
+        credential = antigravity_credential_file(account_name).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not credential.strip():
+        return False
+    if credential == read_antigravity_keyring():
+        return True  # Already the active account.
+
+    # Write it back where the CLI actually reads from, which is the item that
+    # already exists when there is one.
+    for item in _secret_service_items():
+        try:
+            item.set_secret(credential.encode("utf-8"))
+            return True
+        except Exception:
+            continue
+    try:
+        keyring.set_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER, credential)
+    except Exception:
+        return False
+    return True
+
+
+def antigravity_account_email(account_name: str) -> str:
+    """The Google account this login belongs to, for showing which one it is."""
+    import base64
+
+    try:
+        credential = json.loads(
+            antigravity_credential_file(account_name).read_text(encoding="utf-8")
+        )
+        payload = credential["id_token"].split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("email", "")
+    except (OSError, ValueError, KeyError, IndexError):
+        return ""
+
+
+def antigravity_logged_in(account_name: str) -> bool:
+    """True when this account has a login Chad can run it with."""
+    try:
+        credential = json.loads(
+            antigravity_credential_file(account_name).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False
+    return bool(credential.get("token", {}).get("refresh_token"))
+
+
+# `/usage` is a slash command the CLI expands in print mode. It answers with
+# one tab-separated row per limit:
+#   Gemini Models\tFive Hour Limit Remaining\t92%\t2026-09-13T13:11:58Z
+# Asking costs a CLI start, so the answer is kept for a few minutes — the tray
+# re-reads usage far more often than a limit moves.
+_AGY_USAGE_TTL_SECONDS = 300
+_AGY_USAGE_TIMEOUT_SECONDS = 120
+_AGY_GEMINI_FAMILY = "gemini models"
+_AGY_OTHER_FAMILY = "claude and gpt models"
+_agy_usage_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _parse_antigravity_usage(output: str) -> dict:
+    """Turn `/usage` output into {(family, window): (used_percent, resets_at)}."""
+    usage: dict[tuple[str, str], tuple[float, str]] = {}
+    for line in output.splitlines():
+        fields = [field.strip() for field in line.split("\t")]
+        if len(fields) < 4 or not fields[2].endswith("%"):
+            continue
+        family, limit, remaining, resets_at = fields[0], fields[1], fields[2], fields[3]
+        window = "session" if "five hour" in limit.lower() else (
+            "weekly" if "weekly" in limit.lower() else ""
+        )
+        if not window:
+            continue
+        try:
+            # The CLI reports what is left; Chad shows what is used.
+            used = 100.0 - float(remaining.rstrip("%"))
+        except ValueError:
+            continue
+        usage[(family.strip().lower(), window)] = (max(0.0, min(100.0, used)), resets_at)
+    return usage
+
+
+def read_antigravity_usage(account_name: str | None) -> dict:
+    """Ask the CLI what this account has left. {} when it could not be asked."""
+    if not account_name:
+        return {}
+    key = account_name
+    cached = _agy_usage_cache.get(key)
+    if cached and time.monotonic() - cached[0] < _AGY_USAGE_TTL_SECONDS:
+        return cached[1]
+
+    cli_path = find_cli_executable("agy")
+    if not cli_path:
+        return {}
+    env = os.environ.copy()
+    env.update(antigravity_env(account_name))
+    try:
+        with _agy_keyring_lock:
+            # Read this account's limits, not whichever account ran last.
+            if not activate_antigravity_account(account_name):
+                return {}
+            result = subprocess.run(
+                [cli_path, "-p", "/usage", "--output-format", "text"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_AGY_USAGE_TIMEOUT_SECONDS,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+
+    usage = _parse_antigravity_usage(result.stdout)
+    if usage:
+        _agy_usage_cache[key] = (time.monotonic(), usage)
+    return usage
+
+
+def antigravity_usage_family(model: str | None) -> str:
+    """Which limit applies to the model this account runs."""
+    normalized = (model or "").strip().lower()
+    if normalized.startswith(("claude-", "gpt-")):
+        return _AGY_OTHER_FAMILY
+    return _AGY_GEMINI_FAMILY
+
+
+def build_antigravity_command(
+    cli_path: str,
+    prompt: str,
+    *,
+    project_path: str | Path | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    conversation_id: str | None = None,
+    timeout: float | None = None,
+) -> list[str]:
+    """The `agy` invocation for one non-interactive turn.
+
+    Built in one place so a task, a provider session and autoconfigure cannot
+    drift into running the CLI with different permissions or output shapes.
+    """
+    cmd = [
+        cli_path,
+        "--output-format",
+        "stream-json",
+        # Chad's agents run unattended, and the default is to soft-deny every
+        # tool that wants approval and carry on — which looks like an agent that
+        # simply refused to do the work.
+        "--dangerously-skip-permissions",
+    ]
+    if project_path:
+        # Without this the CLI treats the directory as untrusted and quietly
+        # works in a scratch workspace of its own instead — the task reports
+        # success having never touched the project.
+        cmd.extend(["--add-dir", str(project_path)])
+    if model and model != "default":
+        cmd.extend(["--model", model])
+    if reasoning_effort and reasoning_effort != "default":
+        cmd.extend(["--effort", reasoning_effort])
+    if conversation_id:
+        cmd.extend(["--conversation", conversation_id])
+    if timeout:
+        # The CLI gives up after 5 minutes by default; Chad's tasks run for as
+        # long as the task executor allows.
+        cmd.extend(["--print-timeout", f"{int(timeout)}s"])
+    cmd.extend(["-p", prompt])
+    return cmd
+
+
+def antigravity_env(account_name: str | None) -> dict[str, str]:
+    """The environment an Antigravity CLI run needs for this account."""
+    home = antigravity_home_dir(account_name)
+    home.mkdir(parents=True, exist_ok=True)
+    env = {"HOME": str(home)}
+    if os.name == "nt":
+        # Go reads USERPROFILE for the home directory on Windows.
+        env["USERPROFILE"] = str(home)
+    return env
 
 
 def _qwen_home_dir(account_name: str | None) -> Path:
@@ -1337,93 +1635,6 @@ def _vibe_home_dir(account_name: str | None) -> Path:
     if account_name:
         return base_home / ".chad" / "vibe-homes" / account_name
     return base_home / ".vibe"
-
-
-def _gemini_usage_path() -> Path:
-    """Get the path to the Gemini usage JSONL file."""
-    return Path(safe_home()) / ".chad" / "gemini-usage.jsonl"
-
-
-def _append_gemini_usage(account: str, model: str, stats: dict) -> None:
-    """Append a usage record to the Gemini usage JSONL file."""
-    from datetime import datetime, timezone
-
-    usage_file = _gemini_usage_path()
-    usage_file.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "account": account,
-        "model": model,
-        "input_tokens": stats.get("input_tokens", 0),
-        "output_tokens": stats.get("output_tokens", 0),
-        "cached_tokens": stats.get("cached", 0),
-        "total_tokens": stats.get("total_tokens", 0),
-        "tool_calls": stats.get("tool_calls", 0),
-        "duration_ms": stats.get("duration_ms", 0),
-    }
-    with open(usage_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-
-
-def _read_gemini_usage() -> list[dict]:
-    """Read all records from the Gemini usage JSONL file."""
-    usage_file = _gemini_usage_path()
-    if not usage_file.exists():
-        return []
-    records = []
-    try:
-        with open(usage_file, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-    return records
-
-
-def _get_gemini_usage_percentage(account_name: str) -> float | None:
-    """Get Gemini usage percentage by counting today's requests from JSONL.
-
-    Gemini free tier allows ~2000 requests/day.
-
-    Args:
-        account_name: The account name for the isolated Gemini home
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
-    """
-    from datetime import datetime, timezone
-
-    gemini_dir = _gemini_home_dir(account_name) / ".gemini"
-    oauth_file = gemini_dir / "oauth_creds.json"
-    if not oauth_file.exists():
-        return None
-
-    records = _read_gemini_usage()
-    if not records:
-        return 0.0  # Logged in but no usage yet
-
-    today = datetime.now(timezone.utc).date()
-    today_requests = 0
-    for rec in records:
-        ts = rec.get("timestamp", "")
-        if ts:
-            try:
-                rec_date = datetime.fromisoformat(ts).date()
-                if rec_date == today:
-                    today_requests += 1
-            except (ValueError, AttributeError):
-                pass
-
-    # Gemini Code Assist free tier allows ~2000 requests/day (must match the
-    # docstring above — the old value of 100 tripped usage actions 20x early)
-    daily_limit = 2000
-    return min((today_requests / daily_limit) * 100, 100.0)
 
 
 def _get_qwen_usage_percentage(account_name: str) -> float | None:
@@ -2781,12 +2992,12 @@ class OpenAICodexProvider(AIProvider):
         return "session_limit_reached"
 
 
-class GeminiCodeAssistProvider(AIProvider):
-    """Provider for Gemini Code Assist with multi-turn support.
+class AntigravityProvider(AIProvider):
+    """Provider for Google Antigravity, with multi-turn support.
 
-    Uses the `gemini` command-line interface in "YOLO" mode for
-    non-interactive, programmatic calls with PTY for real-time streaming.
-    Supports multi-turn via `--resume <session_id>`.
+    Drives the `agy` CLI in print mode with stream-json output. Multi-turn is
+    native: every run reports a conversation id that the next one resumes with
+    ``--conversation``.
     """
 
     def __init__(self, config: ModelConfig):
@@ -2796,20 +3007,17 @@ class GeminiCodeAssistProvider(AIProvider):
         self.current_message: str | None = None
         self.process: object | None = None
         self.master_fd: int | None = None
-        self.session_id: str | None = None  # For multi-turn support
+        self.conversation_id: str | None = None  # For multi-turn support
 
     def _get_env(self) -> dict:
-        """Environment with the per-account Gemini home for this account."""
-        home = _gemini_home_dir(self.config.account_name)
-        # The CLI errors out (ENOENT) if the home doesn't exist.
-        home.mkdir(parents=True, exist_ok=True)
+        """Environment with this account's isolated Antigravity home."""
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        env["GEMINI_CLI_HOME"] = str(home)
+        env.update(antigravity_env(self.config.account_name))
         return env
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
-        ok, detail = _ensure_cli_tool("gemini", self._notify_activity)
+        ok, detail = _ensure_cli_tool("agy", self._notify_activity)
         if not ok:
             return False
 
@@ -2819,128 +3027,110 @@ class GeminiCodeAssistProvider(AIProvider):
         return True
 
     def send_message(self, message: str) -> None:
-        # Only prepend system prompt on first message (no session_id yet)
-        if self.system_prompt and not self.session_id:
+        # Only prepend system prompt on the first message of a conversation.
+        if self.system_prompt and not self.conversation_id:
             self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
-        import json
-
+    def get_response(self, timeout: float = 1800.0) -> str:
         if not self.current_message:
             return ""
 
-        gemini_cli = getattr(self, "cli_path", None) or find_cli_executable("gemini")
-
-        # Build command - use resume if we have a session_id (multi-turn)
-        if self.session_id:
-            cmd = [
-                gemini_cli,
-                "-y",
-                "--output-format",
-                "stream-json",
-                "--resume",
-                self.session_id,
-                "-p",
-                self.current_message,
-            ]
-        else:
-            cmd = [gemini_cli, "-y", "--output-format", "stream-json"]
-            if self.config.model_name and self.config.model_name != "default":
-                cmd.extend(["-m", self.config.model_name])
-            cmd.extend(["-p", self.current_message])
+        agy_cli = getattr(self, "cli_path", None) or find_cli_executable("agy")
+        cmd = build_antigravity_command(
+            agy_cli,
+            self.current_message,
+            project_path=self.project_path,
+            model=self.config.model_name,
+            reasoning_effort=self.config.reasoning_effort,
+            conversation_id=self.conversation_id,
+            timeout=timeout,
+        )
 
         try:
             env = self._get_env()
-
-            json_events = []
-            response_parts = []
-            usage_stats = {}
-            init_model = [None]  # mutable for closure
+            response_parts: list[str] = []
+            final_response = [""]
 
             def handle_chunk(decoded: str) -> None:
                 # Stream raw output for live display
                 self._notify_activity("stream", decoded)
-                # Parse JSON lines
                 for line in decoded.split("\n"):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         event = json.loads(line)
-                        if not isinstance(event, dict):
-                            continue
-                        json_events.append(event)
-                        evt_type = event.get("type")
-                        # Extract session_id from init event
-                        if evt_type == "init":
-                            if "session_id" in event:
-                                self.session_id = event["session_id"]
-                            if "model" in event:
-                                init_model[0] = event["model"]
-                        # Collect response content
-                        elif evt_type == "message" and event.get("role") == "assistant":
-                            content = event.get("content", "")
-                            if content:
-                                response_parts.append(content)
-                                self._notify_activity("text", content[:80])
-                        # Capture usage stats from result event
-                        elif evt_type == "result":
-                            stats = event.get("stats")
-                            if stats and isinstance(stats, dict):
-                                usage_stats.update(stats)
                     except json.JSONDecodeError:
-                        # Non-JSON line (warnings, etc.) - just notify
-                        if line and len(line) > 10:
+                        if len(line) > 10:
                             self._notify_activity("text", line[:80])
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    name = event.get("event")
+                    if name == "init":
+                        self.conversation_id = event.get("conversation_id")
+                    elif name == "step_update":
+                        step = event.get("step_update") or {}
+                        text = step.get("text_delta") or ""
+                        if text and step.get("step_type") == "agent_response":
+                            response_parts.append(text)
+                            self._notify_activity("text", text[:80])
+                    elif name == "result":
+                        result = event.get("result") or {}
+                        final_response[0] = result.get("response") or ""
+                        if not self.conversation_id:
+                            self.conversation_id = result.get("conversation_id")
 
-            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+            with _agy_keyring_lock:
+                # The login has to be the active one in the keyring slot when
+                # the CLI starts and reads it.
+                activate_antigravity_account(self.config.account_name or "")
+                self.process, self.master_fd = _start_pty_process(
+                    cmd, cwd=self.project_path, env=env
+                )
 
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
-
-            # Record usage stats if we got any
-            if usage_stats:
-                model = init_model[0] or self.config.model_name or "default"
-                account = self.config.account_name or ""
-                _append_gemini_usage(account, model, usage_stats)
+            output, timed_out, idle_stalled = _stream_pty_output(
+                self.process, self.master_fd, handle_chunk, timeout
+            )
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
             if idle_stalled:
-                return f"Error: Gemini execution stalled (no output for {int(timeout)}s)"
+                return f"Error: Antigravity execution stalled (no output for {int(timeout)}s)"
             if timed_out:
-                return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
+                return f"Error: Antigravity execution timed out ({int(timeout / 60)} minutes)"
 
-            # Return collected response parts if any
+            if final_response[0]:
+                return final_response[0].strip()
             if response_parts:
                 return "".join(response_parts).strip()
 
-            # Fallback to raw output
             output = _strip_ansi_codes(output)
-            return output.strip() if output else "No response from Gemini"
+            return output.strip() if output else "No response from Antigravity"
 
         except FileNotFoundError:
             self.current_message = None
             self.process = None
             _close_master_fd(self.master_fd)
             self.master_fd = None
-            return "Failed to run Gemini: command not found\n\nInstall with: npm install -g @google/gemini-cli"
+            return "Failed to run Antigravity: command not found"
         except (PermissionError, OSError) as exc:
             self.current_message = None
             self.process = None
             _close_master_fd(self.master_fd)
             self.master_fd = None
-            return f"Failed to run Gemini: {exc}"
+            return f"Failed to run Antigravity: {exc}"
 
     def stop_session(self) -> None:
         self.current_message = None
-        self.session_id = None  # Clear session_id to end multi-turn
+        self.conversation_id = None  # Clear to end multi-turn
         _close_master_fd(self.master_fd)
         self.master_fd = None
         if self.process:
@@ -2952,23 +3142,42 @@ class GeminiCodeAssistProvider(AIProvider):
             self.process = None
 
     def is_alive(self) -> bool:
-        # Session is "alive" if we have a session_id for resuming
-        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+        return self.conversation_id is not None or (
+            self.process is not None and self.process.poll() is None
+        )
 
     def supports_multi_turn(self) -> bool:
         return True
 
     def get_session_id(self) -> str | None:
-        """Get the Gemini session_id for native resume."""
-        return self.session_id
+        """The conversation id ``--conversation`` resumes with."""
+        return self.conversation_id
 
     def supports_usage_reporting(self) -> bool:
-        """Gemini supports usage reporting via local session files."""
+        """Antigravity reports both its limits through `/usage`."""
         return True
 
+    def _usage_window(self, window: str) -> tuple[float, str] | None:
+        usage = read_antigravity_usage(self.config.account_name)
+        family = antigravity_usage_family(self.config.model_name)
+        return usage.get((family, window))
+
     def get_session_usage_percentage(self) -> float | None:
-        """Get Gemini usage percentage from local session files."""
-        return _get_gemini_usage_percentage(self.config.account_name)
+        """Usage against the five-hour limit, as a percentage used."""
+        reading = self._usage_window("session")
+        return reading[0] if reading else None
+
+    def get_weekly_usage_percentage(self) -> float | None:
+        reading = self._usage_window("weekly")
+        return reading[0] if reading else None
+
+    def get_session_reset_eta(self) -> str | None:
+        reading = self._usage_window("session")
+        return _parse_reset_eta(reading[1]) if reading else None
+
+    def get_weekly_reset_eta(self) -> str | None:
+        reading = self._usage_window("weekly")
+        return _parse_reset_eta(reading[1]) if reading else None
 
 
 def discover_local_models(endpoint: str, timeout: float = 3.0) -> list[str]:
@@ -3964,8 +4173,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return ClaudeCodeProvider(config)
     elif config.provider == "openai":
         return OpenAICodexProvider(config)
-    elif config.provider == "gemini":
-        return GeminiCodeAssistProvider(config)
+    elif config.provider == "antigravity":
+        return AntigravityProvider(config)
     elif config.provider == "qwen":
         return QwenCodeProvider(config)
     elif config.provider == "local":

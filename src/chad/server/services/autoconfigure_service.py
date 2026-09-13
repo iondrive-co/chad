@@ -90,8 +90,18 @@ def _build_command(
             "-",
         ]
         stdin_input = prompt + "\n"
-    elif provider == "gemini":
-        cmd = [_resolve_tool("gemini"), "-y", "-p", prompt]
+    elif provider == "antigravity":
+        from chad.util.providers import (
+            activate_antigravity_account,
+            antigravity_env,
+            build_antigravity_command,
+        )
+
+        activate_antigravity_account(account_name)
+        env.update(antigravity_env(account_name))
+        cmd = build_antigravity_command(
+            _resolve_tool("agy"), prompt, project_path=project_path
+        )
     elif provider == "qwen":
         cmd = [_resolve_tool("qwen"), "-y", "-p", prompt]
     elif provider == "local":

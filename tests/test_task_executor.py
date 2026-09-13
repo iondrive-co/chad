@@ -135,6 +135,69 @@ class TestClaudeStreamJsonParser:
         assert results == []
         assert parser.init_model == "claude-sonnet-4-5"
 
+    def test_antigravity_tool_arguments_are_read_from_tool_info(self):
+        """Its tools name themselves in tool_name, with PascalCase arguments.
+
+        Reading step_type as the tool name rendered every call as
+        `tool({"conversation_id": ...})` with the whole event as its arguments.
+        """
+        parser = ClaudeStreamJsonParser()
+        stream = (
+            b'{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file",'
+            b'"parameters":{"AbsolutePath":"/w/a.py"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"grep_search","tool_info":{"name":"grep_search",'
+            b'"parameters":{"Query":"needle","SearchPath":"/w"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file",'
+            b'"parameters":{"TargetFile":"/w/c.py"}}}}\n'
+        )
+
+        parser.feed(stream)
+
+        calls = {c["name"]: c["input"] for c in parser.pending_tool_calls}
+        assert calls["Read"]["file_path"] == "/w/a.py"
+        assert calls["Grep"]["pattern"] == "needle"
+        assert calls["Grep"]["path"] == "/w"
+        assert calls["Write"]["file_path"] == "/w/c.py"
+        # Nothing may leak the raw event through as arguments.
+        assert "tool" not in calls
+        assert not any("conversation_id" in args for args in calls.values())
+
+    def test_antigravity_events_become_prose_and_tool_calls(self):
+        """Antigravity's stream is shaped differently from every other CLI's.
+
+        The kind is in "event" and the payload is nested, so a parser that only
+        reads "type" renders the whole run as nothing.
+        """
+        parser = ClaudeStreamJsonParser()
+        stream = (
+            b'{"event":"init","conversation_id":"conv-1",'
+            b'"init":{"cwd":"/w","tools":["run_command"]}}\n'
+            b'{"event":"step_update","step_update":{"step_index":0,"state":"DONE",'
+            b'"step_type":"user_input"}}\n'
+            b'{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"run_command","tool_info":'
+            b'{"name":"run_command","parameters":{"CommandLine":"pytest tests/"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE",'
+            b'"step_type":"agent_response","text_delta":"All tests pass"}}\n'
+            b'{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS",'
+            b'"response":"All tests pass","usage":{"total_tokens":15837}}}\n'
+        )
+
+        out = parser.feed(stream)
+
+        # The prompt echo is not the agent's work and must not be displayed.
+        assert not any("user_input" in chunk for chunk in out)
+        assert "All tests pass" in out
+        # The conversation id is what the next turn resumes with.
+        assert parser.session_id == "conv-1"
+        # Tool steps are named in Chad's vocabulary, not the CLI's.
+        assert [c["name"] for c in parser.pending_tool_calls] == ["Bash"]
+        assert parser.pending_tool_calls[0]["input"]["command"] == "pytest tests/"
+        assert parser.result_stats["total_tokens"] == 15837
+
     def test_init_captures_model_from_gemini_event(self):
         """Parser captures model name from Gemini-style init events."""
         parser = ClaudeStreamJsonParser()
@@ -467,14 +530,14 @@ class TestBuildAgentCommand:
         assert len(cmd) == 7  # claude, -p, --verbose, --output-format, stream-json, --permission-mode, bypassPermissions
         assert initial_input is None
 
-    def test_gemini_uses_non_interactive_prompt_flag(self, tmp_path):
-        """Gemini must run headless with -p so the process exits after each phase."""
+    def test_antigravity_uses_non_interactive_prompt_flag(self, tmp_path):
+        """Antigravity must run headless with -p so the process exits each phase."""
         cmd, env, initial_input = build_agent_command(
-            "gemini", "test-account", tmp_path, "Fix the bug"
+            "antigravity", "test-account", tmp_path, "Fix the bug"
         )
 
-        assert "gemini" in Path(cmd[0]).name
-        assert "-y" in cmd
+        assert "agy" in Path(cmd[0]).name
+        assert "--dangerously-skip-permissions" in cmd
         assert "--output-format" in cmd and "stream-json" in cmd
         assert "-p" in cmd
         prompt_idx = cmd.index("-p")
@@ -482,17 +545,40 @@ class TestBuildAgentCommand:
         assert "EXPLORATION_RESULT:" in cmd[prompt_idx + 1]
         assert initial_input is None
 
-    def test_gemini_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
-        """Each Gemini account gets its own GEMINI_CLI_HOME (credential isolation)."""
+    def test_antigravity_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Antigravity account runs with its own home (conversations, settings)."""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
 
-        _, env_a, _ = build_agent_command("gemini", "acct-a", tmp_path)
-        _, env_b, _ = build_agent_command("gemini", "acct-b", tmp_path)
+        _, env_a, _ = build_agent_command("antigravity", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("antigravity", "acct-b", tmp_path)
 
-        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
-        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
-        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
+
+    def test_antigravity_is_given_the_project_to_work_in(self, tmp_path, monkeypatch):
+        """The worktree has to be added, or the agent works somewhere else.
+
+        An unadded directory is treated as untrusted: the CLI silently works in
+        a scratch workspace of its own and still reports success, so the task
+        comes back green having never touched the project.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        cmd, _, _ = build_agent_command("antigravity", "acct", tmp_path)
+
+        assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path)
+
+    def test_antigravity_streams_machine_readable_output(self, tmp_path, monkeypatch):
+        """Chad reads the run as events, not as a rendered transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        cmd, _, _ = build_agent_command("antigravity", "acct", tmp_path)
+
+        assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
     def test_qwen_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
         """Each Qwen account gets its own HOME (credential isolation)."""
@@ -1348,14 +1434,12 @@ class TestModelPassThrough:
         )
         assert "MAX_THINKING_TOKENS" not in env_default
 
-    def test_gemini_model_flag(self, tmp_path):
-        """Gemini provider passes -m flag."""
+    def test_antigravity_model_flag(self, tmp_path):
+        """Antigravity names the model with --model."""
         cmd, env, _ = build_agent_command(
-            "gemini", "test", tmp_path, "fix bug", model="gemini-2.5-pro"
+            "antigravity", "test", tmp_path, "fix bug", model="gemini-3.1-pro-high"
         )
-        assert "-m" in cmd
-        idx = cmd.index("-m")
-        assert cmd[idx + 1] == "gemini-2.5-pro"
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro-high"
 
     def test_qwen_model_flag(self, tmp_path):
         """Qwen provider passes -m flag."""

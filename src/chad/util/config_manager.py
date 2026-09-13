@@ -246,10 +246,25 @@ class ConfigManager:
 
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return self._migrate_retired_providers(json.load(f))
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Could not load config file: {e}")
             return {}
+
+    @staticmethod
+    def _migrate_retired_providers(config: dict[str, Any]) -> dict[str, Any]:
+        """Carry accounts of a retired provider over to the one that replaced it.
+
+        Google withdrew Gemini Code Assist for individuals from the Gemini CLI
+        and moved it to Antigravity, so Chad drives that instead. A stored
+        "gemini" account would otherwise fail validation everywhere it is read.
+        The credentials do not carry over — a different CLI signs in — so the
+        account simply reports logged out until it is signed in again.
+        """
+        for account in (config.get("accounts") or {}).values():
+            if isinstance(account, dict) and account.get("provider") == "gemini":
+                account["provider"] = "antigravity"
+        return config
 
     def save_config(self, config: dict[str, Any]) -> None:
         """Save configuration to file atomically.
@@ -382,7 +397,7 @@ class ConfigManager:
         "anthropic": ("claude-configs", ".claude.json"),
         "openai": ("codex-homes", ".codex/auth.json"),
         "kimi": ("kimi-homes", ".kimi/config.toml"),
-        "gemini": ("gemini-homes", ".gemini/oauth_creds.json"),
+        "antigravity": ("antigravity-homes", "credential.json"),
         "qwen": ("qwen-homes", ".qwen/oauth_creds.json"),
         "mistral": ("vibe-homes", ".env"),
     }
