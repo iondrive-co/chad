@@ -1,5 +1,6 @@
 """Tests for git worktree management."""
 
+import os
 import subprocess
 import threading
 import time
@@ -1473,3 +1474,51 @@ class TestWorktreeRegressionFixes:
         manager = GitWorktreeManager(repo)
         with pytest.raises(ValueError, match="no commits"):
             manager.create_worktree("nocommits")
+
+    def test_clean_stale_locks_removes_old_lock_files(self, git_repo):
+        """Stale lock files in git administrative directory must be cleaned."""
+        manager = GitWorktreeManager(git_repo)
+        lock_file = git_repo / ".git" / "index.lock"
+        lock_file.write_text("")
+        # Make the lock file timestamp older
+        old_time = time.time() - 10.0
+        os.utime(lock_file, (old_time, old_time))
+
+        cleaned = manager._clean_stale_locks(git_repo, min_age_seconds=2.0)
+        assert lock_file in cleaned
+        assert not lock_file.exists()
+
+    def test_commit_all_changes_recovers_from_stale_index_lock(self, git_repo):
+        """commit_all_changes must clean stale index.lock in worktree and succeed."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("locktest")
+        (worktree_path / "hello.txt").write_text("hello world\n")
+
+        # Plant a stale index.lock in the worktree's gitdir
+        git_dir = manager._get_git_dir_for_path(worktree_path)
+        assert git_dir is not None
+        lock_file = git_dir / "index.lock"
+        lock_file.write_text("")
+        old_time = time.time() - 10.0
+        os.utime(lock_file, (old_time, old_time))
+
+        success, error = manager.commit_all_changes("locktest", "commit with lock")
+        assert success is True, f"Expected success but got error: {error}"
+        assert not lock_file.exists()
+
+    def test_merge_to_main_recovers_from_stale_index_lock(self, git_repo):
+        """merge_to_main must clean stale index.lock and successfully merge."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("mergelock")
+        (worktree_path / "feature.txt").write_text("feature content\n")
+
+        # Plant a stale index.lock in the main repository gitdir
+        main_lock = git_repo / ".git" / "index.lock"
+        main_lock.write_text("")
+        old_time = time.time() - 10.0
+        os.utime(main_lock, (old_time, old_time))
+
+        success, conflicts, error = manager.merge_to_main("mergelock", "merged feature")
+        assert success is True, f"Merge failed with error: {error}"
+        assert (git_repo / "feature.txt").read_text() == "feature content\n"
+        assert not main_lock.exists()

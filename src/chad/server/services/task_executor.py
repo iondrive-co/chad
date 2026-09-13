@@ -1046,6 +1046,7 @@ class TaskExecutor:
         verification_reasoning: str | None = None,
         is_followup: bool = False,
         notify_slack: bool = True,
+        use_worktree: bool = True,
         # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -1177,6 +1178,7 @@ class TaskExecutor:
                 verification_config,
                 is_followup,
                 notify_slack,
+                use_worktree,
             ),
             daemon=True,
         )
@@ -1563,6 +1565,7 @@ class TaskExecutor:
         verification_config: dict | None = None,
         is_followup: bool = False,
         notify_slack: bool = True,
+        use_worktree: bool = True,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1573,7 +1576,7 @@ class TaskExecutor:
 
         rows = terminal_rows if terminal_rows else TERMINAL_ROWS
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
-        status_logging_enabled = [False]
+        status_logging_enabled = [True]
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
@@ -1635,37 +1638,43 @@ class TaskExecutor:
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
-                status_logging_enabled[0] = True
 
             # Create or reuse worktree
-            reuse_worktree = is_followup or is_resume
-            if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
-                emit("status", status="Reusing existing worktree...")
-                worktree_path = Path(session.worktree_path)
+            if not use_worktree:
+                worktree_path = Path(project_path)
+                session.worktree_path = None
+                session.worktree_branch = None
+                session.worktree_base_commit = None
                 session.project_path = str(project_path)
             else:
-                emit("status", status="Preparing worktree (large LFS files are skipped)...")
-                try:
-                    worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
-                    session.worktree_path = worktree_path
-                    session.worktree_branch = git_mgr._branch_name(task.session_id)
-                    session.worktree_base_commit = base_commit
+                reuse_worktree = is_followup or is_resume
+                if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
+                    emit("status", status="Reusing existing worktree...")
+                    worktree_path = Path(session.worktree_path)
                     session.project_path = str(project_path)
-                except Exception as e:
-                    detail = getattr(e, "stderr", None) or getattr(e, "stdout", None)
-                    detail = str(detail).strip() if detail else str(e)
-                    error = f"Failed to create worktree: {detail}"
-                    emit("error", error=error)
-                    emit("complete", success=False, message=error)
-                    task.state = TaskState.FAILED
-                    task.error = error
-                    task.result = error
-                    task.completed_at = datetime.now(timezone.utc)
-                    session.active = False
-                    session.status = "interrupted"
-                    if task.event_log:
-                        task.event_log.log(SessionEndedEvent(success=False, reason=f"error: {error}"))
-                    return
+                else:
+                    emit("status", status="Preparing worktree (large LFS files are skipped)...")
+                    try:
+                        worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
+                        session.worktree_path = worktree_path
+                        session.worktree_branch = git_mgr._branch_name(task.session_id)
+                        session.worktree_base_commit = base_commit
+                        session.project_path = str(project_path)
+                    except Exception as e:
+                        detail = getattr(e, "stderr", None) or getattr(e, "stdout", None)
+                        detail = str(detail).strip() if detail else str(e)
+                        error = f"Failed to create worktree: {detail}"
+                        emit("error", error=error)
+                        emit("complete", success=False, message=error)
+                        task.state = TaskState.FAILED
+                        task.error = error
+                        task.result = error
+                        task.completed_at = datetime.now(timezone.utc)
+                        session.active = False
+                        session.status = "interrupted"
+                        if task.event_log:
+                            task.event_log.log(SessionEndedEvent(success=False, reason=f"error: {error}"))
+                        return
 
                 worktree_path = Path(worktree_path)
 
@@ -1767,9 +1776,10 @@ class TaskExecutor:
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
-                session.has_worktree_changes = git_mgr.has_changes(
-                    task.session_id,
-                    session.worktree_base_commit,
+                session.has_worktree_changes = (
+                    git_mgr.has_changes(task.session_id, session.worktree_base_commit)
+                    if use_worktree
+                    else False
                 )
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
@@ -1784,9 +1794,10 @@ class TaskExecutor:
                     task.result = "Task completed, but verification did not pass"
                 else:
                     task.result = "Task completed successfully"
-                session.has_worktree_changes = git_mgr.has_changes(
-                    task.session_id,
-                    session.worktree_base_commit,
+                session.has_worktree_changes = (
+                    git_mgr.has_changes(task.session_id, session.worktree_base_commit)
+                    if use_worktree
+                    else False
                 )
                 session.status = "completed"
                 emit(

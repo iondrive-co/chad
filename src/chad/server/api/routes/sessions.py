@@ -339,6 +339,7 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             verification_reasoning=request.verification_reasoning,
             is_followup=request.is_followup,
             notify_slack=request.notify_slack,
+            use_worktree=request.use_worktree,
         )
     except TaskAlreadyRunningError as e:
         raise HTTPException(status_code=409, detail=str(e))

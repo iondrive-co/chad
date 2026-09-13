@@ -402,8 +402,6 @@ def run_tray(web_url: str) -> bool:
     usage.start()
 
     try:
-        print(f"Chad is in the tray — click it to open {web_url}")
-        sys.stdout.flush()
         tray.start()
     except Unavailable as exc:
         print(f"No system tray on this desktop: {exc}")

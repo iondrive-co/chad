@@ -1361,14 +1361,18 @@ def _secret_service_items() -> list:
 
 def read_antigravity_keyring() -> str:
     """The credential currently in the CLI's keyring slot, or ""."""
-    import keyring
-
     try:
-        stored = keyring.get_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
-        if stored:
-            return stored
-    except Exception:
-        pass  # No keyring is a state, not a crash: nothing is signed in.
+        import keyring
+    except ImportError:
+        keyring = None
+
+    if keyring is not None:
+        try:
+            stored = keyring.get_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
+            if stored:
+                return stored
+        except Exception:
+            pass  # No keyring is a state, not a crash: nothing is signed in.
 
     for item in _secret_service_items():
         try:
@@ -1390,7 +1394,10 @@ def clear_antigravity_login() -> None:
     of its own choosing, and writing a fresh one would land in the collection
     python-keyring prefers, which is not the one the CLI reads.
     """
-    import keyring
+    try:
+        import keyring
+    except ImportError:
+        keyring = None
 
     emptied = False
     for item in _secret_service_items():
@@ -1401,10 +1408,11 @@ def clear_antigravity_login() -> None:
             pass
     if emptied:
         return
-    try:
-        keyring.delete_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
-    except Exception:
-        pass  # Nothing stored, or no keyring: either way the slot is not ours.
+    if keyring is not None:
+        try:
+            keyring.delete_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER)
+        except Exception:
+            pass  # Nothing stored, or no keyring: either way the slot is not ours.
 
 
 def capture_antigravity_login(account_name: str) -> bool:
@@ -1428,7 +1436,10 @@ def activate_antigravity_account(account_name: str) -> bool:
     Returns False when the account has no stored login, which is what "not
     signed in" looks like to every caller.
     """
-    import keyring
+    try:
+        import keyring
+    except ImportError:
+        keyring = None
 
     try:
         credential = antigravity_credential_file(account_name).read_text(encoding="utf-8")
@@ -1447,11 +1458,13 @@ def activate_antigravity_account(account_name: str) -> bool:
             return True
         except Exception:
             continue
-    try:
-        keyring.set_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER, credential)
-    except Exception:
-        return False
-    return True
+    if keyring is not None:
+        try:
+            keyring.set_password(_AGY_KEYRING_SERVICE, _AGY_KEYRING_USER, credential)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def antigravity_account_email(account_name: str) -> str:

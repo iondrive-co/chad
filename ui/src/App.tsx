@@ -228,6 +228,8 @@ export function App() {
 
   // Once the real session list has loaded, drop any restored tabs/selection that
   // no longer exist on the server (e.g. deleted, or lost to a server restart).
+  // Also ensure any active sessions or sessions with unmerged changes are automatically
+  // opened as tabs so they don't disappear on restart or across different browser ports.
   // Runs once so it never fights a freshly opened tab on a later poll.
   useEffect(() => {
     if (!connected || !sessionsLoaded || reconciledRef.current) return;
@@ -235,6 +237,11 @@ export function App() {
     const byId = new Map(sessions.map((s) => [s.id, s]));
     setOpenedSessionIds((prev) => {
       const next = new Set([...prev].filter((id) => byId.has(id)));
+      for (const s of sessions) {
+        if (s.active || s.has_changes) {
+          next.add(s.id);
+        }
+      }
       // Keep the restored selection visible as a tab even if storage was inconsistent.
       if (selectedSession && byId.has(selectedSession)) next.add(selectedSession);
       return next;
@@ -243,7 +250,20 @@ export function App() {
       const projectPath = byId.get(selectedSession)?.project_path;
       if (projectPath) setSessionProjectPath(projectPath);
     } else if (selectedSession) {
-      setSelectedSession(null);
+      const fallback = sessions.find((s) => s.has_changes || s.active);
+      if (fallback) {
+        setSelectedSession(fallback.id);
+        if (fallback.project_path) setSessionProjectPath(fallback.project_path);
+      } else {
+        setSelectedSession(null);
+      }
+    } else {
+      const pending = sessions.find((s) => s.has_changes || s.active);
+      if (pending) {
+        setSelectedSession(pending.id);
+        if (pending.project_path) setSessionProjectPath(pending.project_path);
+        setTab("chat");
+      }
     }
   }, [connected, sessionsLoaded, sessions, selectedSession]);
 

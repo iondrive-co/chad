@@ -47,6 +47,7 @@ interface ComposerDraft {
   codingReasoning: string;
   verificationAccountName: string | null;
   postToSlack: boolean;
+  useWorktree: boolean;
 }
 
 const composerDrafts = new Map<string, ComposerDraft>();
@@ -90,6 +91,8 @@ export function ChatView({
   // toggle) and whether the next task should post its milestones to Slack.
   const [slackEnabled, setSlackEnabled] = useState(false);
   const [postToSlack, setPostToSlack] = useState(() => composerDrafts.get(sessionId)?.postToSlack ?? true);
+  const [useWorktree, setUseWorktree] = useState(() => composerDrafts.get(sessionId)?.useWorktree ?? true);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
   // Models available for the selected coding agent and the per-message override
   // chosen for the next answer ("" = use the account's configured model).
   const [codingModels, setCodingModels] = useState<string[]>([]);
@@ -518,8 +521,9 @@ export function ChatView({
       codingReasoning,
       verificationAccountName: verificationAccount?.name ?? null,
       postToSlack,
+      useWorktree,
     });
-  }, [sessionId, inputText, codingAccount, codingModel, codingReasoning, verificationAccount, postToSlack]);
+  }, [sessionId, inputText, codingAccount, codingModel, codingReasoning, verificationAccount, postToSlack, useWorktree]);
 
   // React to session becoming active (from polling or on mount).
   // When another UI starts a task, the polled sessionActive prop flips to true
@@ -602,6 +606,16 @@ export function ChatView({
         latestStart = data;
         if (seq) maxSeq = Math.max(maxSeq, seq);
         continue;
+      }
+
+      if (evtType === "status" && data.status) {
+        setTaskStatus(String(data.status));
+        if (seq) maxSeq = Math.max(maxSeq, seq);
+        continue;
+      }
+
+      if (evtType === "assistant_message") {
+        setTaskStatus(null);
       }
 
       const item = mapEventToConversationItem(data, seq);
@@ -708,6 +722,7 @@ export function ChatView({
     setHistoricalChunks([]);
     setHistoricalEvents([]);
     setTaskActive(true);
+    setTaskStatus(useWorktree ? "Preparing worktree…" : "Starting agent…");
     setShowMerge(false);
     setEndReason(null);
     setTaskDescription(taskDesc);
@@ -728,7 +743,7 @@ export function ChatView({
       },
     ]);
     setHasRunTask(true);
-  }, [reset]);
+  }, [reset, useWorktree]);
 
   const handleMergeDone = useCallback(() => {
     setShowMerge(false);
@@ -909,6 +924,7 @@ export function ChatView({
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
       notify_slack: slackEnabled && postToSlack,
+      use_worktree: useWorktree,
     });
 
     handleTaskStart(message, isFollowup);
@@ -924,6 +940,7 @@ export function ChatView({
     handleTaskStart,
     slackEnabled,
     postToSlack,
+    useWorktree,
   ]);
 
   const handleSendMessage = useCallback(async () => {
@@ -1191,7 +1208,7 @@ export function ChatView({
                 <div className="chat-item start" role="status" aria-live="polite">
                   <div className="chat-bubble assistant thinking-bubble">
                     <div className="chat-bubble-label">Agent</div>
-                    <div className="chat-bubble-text">Thinking<span className="thinking-dots" aria-hidden="true">…</span></div>
+                    <div className="chat-bubble-text">{taskStatus || "Thinking"}<span className="thinking-dots" aria-hidden="true">…</span></div>
                   </div>
                 </div>
               )}
@@ -1292,6 +1309,19 @@ export function ChatView({
                       onChange={(e) => setPostToSlack(e.target.checked)}
                     />
                     Slack
+                  </label>
+                  <label
+                    className="worktree-toggle composer-control composer-control-secondary"
+                    title="Run task in an isolated Git worktree (uncheck to run directly in the project directory)"
+                  >
+                    <input
+                      type="checkbox"
+                      className="worktree-toggle-checkbox"
+                      checked={useWorktree}
+                      disabled={sending || taskActive}
+                      onChange={(e) => setUseWorktree(e.target.checked)}
+                    />
+                    Worktree
                   </label>
                   {!taskActive && (
                     <button

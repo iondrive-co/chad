@@ -418,6 +418,7 @@ class APIClient:
         override_prompt: str | None = None,
         is_followup: bool = False,
         notify_slack: bool = True,
+        use_worktree: bool = True,
         # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -460,6 +461,8 @@ class APIClient:
             data["is_followup"] = True
         if not notify_slack:
             data["notify_slack"] = False
+        if not use_worktree:
+            data["use_worktree"] = False
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),

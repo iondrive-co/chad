@@ -291,3 +291,26 @@ class TestEndToEndFullLoop:
         assert started.get("task_description") == task_desc
         assert started.get("coding_provider") == "mock"
         assert started.get("coding_account") == "e2e-mock"
+
+    def test_task_with_use_worktree_false_has_no_worktree(self, client, git_repo):
+        """When use_worktree=False, no git worktree is created."""
+        session_id = self._setup_session(client, git_repo)
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "Task without worktree",
+                "coding_agent": "e2e-mock",
+                "use_worktree": False,
+            },
+        )
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        _wait_terminal(client, session_id, task_id)
+
+        wt_status = client.get(f"/api/v1/sessions/{session_id}/worktree").json()
+        assert wt_status["exists"] is False
+
+        session_status = client.get(f"/api/v1/sessions/{session_id}").json()
+        assert session_status["has_worktree"] is False
+        assert session_status["has_changes"] is False

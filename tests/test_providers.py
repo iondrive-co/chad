@@ -2751,6 +2751,35 @@ class TestAntigravityCredentials:
         assert providers.antigravity_logged_in("acct-a") is False
         providers.clear_antigravity_login()  # must not raise
 
+    def test_missing_keyring_module_reports_signed_out(self, tmp_path, monkeypatch):
+        """When keyring is not installed, accounts report signed out without raising."""
+        from chad.util import providers
+        from chad.server.services.task_executor import build_agent_command
+
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        monkeypatch.setitem(
+            sys.modules, "secretstorage",
+            types.SimpleNamespace(
+                dbus_init=lambda: (_ for _ in ()).throw(RuntimeError("no session bus")),
+                get_all_collections=lambda _c: [],
+            ),
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        assert providers.read_antigravity_keyring() == ""
+        assert providers.capture_antigravity_login("acct-a") is False
+        assert providers.activate_antigravity_account("acct-a") is False
+        assert providers.antigravity_logged_in("acct-a") is False
+        providers.clear_antigravity_login()  # must not raise
+
+        # build_agent_command must also not raise
+        cmd, env, _ = build_agent_command("antigravity", "acct-a", tmp_path)
+        assert len(cmd) > 0
+
 
 class TestAntigravityProvider:
     """Tests for AntigravityProvider."""

@@ -941,8 +941,9 @@ label {
   color: var(--text-muted);
 }
 
-.composer-control-secondary:not(.slack-toggle):hover:not(:disabled),
-.slack-toggle.composer-control-secondary:hover:not(:has(.slack-toggle-checkbox:disabled)) {
+.composer-control-secondary:not(.slack-toggle):not(.worktree-toggle):hover:not(:disabled),
+.slack-toggle.composer-control-secondary:hover:not(:has(.slack-toggle-checkbox:disabled)),
+.worktree-toggle.composer-control-secondary:hover:not(:has(.worktree-toggle-checkbox:disabled)) {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -960,16 +961,19 @@ label {
 }
 
 .composer-control:disabled,
-.slack-toggle:has(.slack-toggle-checkbox:disabled) {
+.slack-toggle:has(.slack-toggle-checkbox:disabled),
+.worktree-toggle:has(.worktree-toggle-checkbox:disabled) {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.slack-toggle {
+.slack-toggle,
+.worktree-toggle {
   user-select: none;
 }
 
-.slack-toggle .slack-toggle-checkbox {
+.slack-toggle .slack-toggle-checkbox,
+.worktree-toggle .worktree-toggle-checkbox {
   width: 14px;
   height: 14px;
   margin: 0;
@@ -978,7 +982,8 @@ label {
   cursor: pointer;
 }
 
-.slack-toggle .slack-toggle-checkbox:disabled {
+.slack-toggle .slack-toggle-checkbox:disabled,
+.worktree-toggle .worktree-toggle-checkbox:disabled {
   cursor: not-allowed;
 }
 

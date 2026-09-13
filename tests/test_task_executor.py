@@ -833,6 +833,46 @@ def test_worktree_failure_persists_request_and_failure(tmp_path, monkeypatch):
     assert "no space left on device" in (task.error or "")
 
 
+def test_task_without_worktree_runs_directly_in_project(tmp_path, monkeypatch):
+    """When use_worktree=False, task runs directly in project without creating worktree."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"mock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="no-worktree")
+    executor = TaskExecutor(ConfigManager(), session_manager)
+
+    import chad.server.services.task_executor as te
+    worktree_created = []
+
+    def mock_create_worktree(_self, task_id):
+        worktree_created.append(task_id)
+        raise AssertionError("create_worktree should not be called when use_worktree=False")
+
+    monkeypatch.setattr(te.GitWorktreeManager, "create_worktree", mock_create_worktree)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Run directly in project directory",
+        coding_account="mock",
+        use_worktree=False,
+    )
+    task._thread.join(timeout=5)
+
+    assert not worktree_created
+    assert session.worktree_path is None
+    assert session.worktree_branch is None
+    assert session.worktree_base_commit is None
+    assert session.has_worktree_changes is False
+    assert task.state == TaskState.COMPLETED
+
+
 def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
     """Hung agent processes are terminated after inactivity and logged as timeout."""
     repo_path = tmp_path / "repo"

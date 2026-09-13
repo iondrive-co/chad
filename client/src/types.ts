@@ -65,6 +65,7 @@ export interface TaskCreate {
   override_prompt?: string | null;
   is_followup?: boolean;
   notify_slack?: boolean;
+  use_worktree?: boolean;
 }
 
 export interface TaskStatus {
