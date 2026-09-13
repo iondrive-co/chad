@@ -379,6 +379,7 @@ class TestManifestInstall:
         import json as json_mod
 
         installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        monkeypatch.setenv("PATH", str(tmp_path / "tools" / "bin"))
         monkeypatch.setattr(installer, "_manifest_platform", lambda: "linux_amd64")
         manifest = json_mod.dumps({
             "version": "1.2.2",

@@ -15,7 +15,7 @@ CODEX_RAW = (
     "\x1b[2m2026-06-21T10:00:00Z\x1b[0m \x1b[31mERROR\x1b[0m transient startup warning\n"
     "OpenAI Codex v0.141.0\n"
     "--------\n"
-    "\x1b[1mworkdir:\x1b[0m /home/miles/chad/.chad-worktrees/00f848b9\n"
+    "\x1b[1mworkdir:\x1b[0m /workspace/chad/.chad-worktrees/00f848b9\n"
     "\x1b[1mmodel:\x1b[0m gpt-5.5\n"
     "\x1b[1mprovider:\x1b[0m openai\n"
     "\x1b[1msandbox:\x1b[0m danger-full-access\n"
@@ -33,7 +33,7 @@ CODEX_RAW = (
     "is implied by “Summarise this repo,” so I’m gathering structure.\n"
     "\x1b[36mexec\x1b[0m\n"
     "/bin/bash -lc \"find . -maxdepth 2 -type f | sort | sed -n '1,220p'\" "
-    "in /home/miles/chad/.chad-worktrees/00f848b9\n"
+    "in /workspace/chad/.chad-worktrees/00f848b9\n"
     " succeeded in 0ms:\n"
     "./.claude/Claude.md\n"
     "./AGENTS.md\n"
@@ -41,10 +41,10 @@ CODEX_RAW = (
     "\x1b[36mcodex\x1b[0m\n"
     "EXPLORATION_RESULT: Lint passed with no flake8 output; starting the test suite.\n"
     "\x1b[36mexec\x1b[0m\n"
-    "/bin/bash -lc '/home/miles/chad/.venv/bin/python -m flake8 .' in /home/miles/chad\n"
+    "/bin/bash -lc '/workspace/chad/.venv/bin/python -m flake8 .' in /workspace/chad\n"
     " succeeded in 793ms:\n"
     "\x1b[36mexec\x1b[0m\n"
-    "/bin/bash -lc '/home/miles/chad/.venv/bin/python -m pytest tests/ -v' in /home/miles/chad\n"
+    "/bin/bash -lc '/workspace/chad/.venv/bin/python -m pytest tests/ -v' in /workspace/chad\n"
     "\x1b[36mcodex\x1b[0m\n"
     "EXPLORATION_RESULT: Pytest collected 1203 tests; no failures so far.\n"
     "tokens used\n"
@@ -97,7 +97,7 @@ class TestCodexStreamParser:
         assert any("pytest tests/ -v" in c for c in commands)
         # The bash -lc wrapper and the trailing `in <dir>` are stripped from the command.
         assert all("bash -lc" not in c for c in commands)
-        assert all(" in /home/miles" not in c for c in commands)
+        assert all(" in /workspace" not in c for c in commands)
 
     def test_drops_command_output(self):
         prose, _ = _run(CodexStreamParser(), CODEX_RAW)

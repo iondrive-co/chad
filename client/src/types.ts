@@ -12,6 +12,9 @@ export interface Session {
   coding_model: string | null;
   coding_provider: string | null;
   task_description: string | null;
+  verification_account?: string | null;
+  notify_slack?: boolean;
+  use_worktree?: boolean;
   status: "active" | "completed" | "interrupted";
   resumable: boolean;
   created_at: string;
@@ -330,6 +333,8 @@ export interface ConversationTask {
   coding_account: string;
   coding_model: string | null;
   verification_account: string | null;
+  notify_slack?: boolean;
+  use_worktree?: boolean;
   screenshots?: string[];
 }
 

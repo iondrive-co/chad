@@ -185,6 +185,10 @@ class GitWorktreeManager:
     ) -> subprocess.CompletedProcess:
         """Run a git command and return the result."""
         cmd = ["git"] + list(args)
+        run_env = os.environ.copy() if env is None else env.copy()
+        for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"):
+            if env is None or var not in env:
+                run_env.pop(var, None)
         return subprocess.run(
             cmd,
             cwd=cwd or self.project_path,
@@ -193,7 +197,7 @@ class GitWorktreeManager:
             encoding="utf-8",
             errors="replace",
             check=check,
-            env=env,
+            env=run_env,
         )
 
     def is_git_repo(self) -> bool:

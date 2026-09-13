@@ -103,6 +103,22 @@ def sync_to_package() -> None:
     print("Sync complete.")
 
 
+def verify_ui_tests() -> None:
+    print("\n--- Verifying UI tests ---")
+    python = sys.executable
+    ui_tests = [
+        "tests/test_chatview_ui.py",
+        "tests/test_css_styles.py",
+        "tests/test_session_grouping.py",
+        "tests/test_defaults.py",
+        "tests/test_ui_build.py",
+    ]
+    result = subprocess.run([python, "-m", "pytest", "-v"] + ui_tests, cwd=str(ROOT))
+    if result.returncode != 0:
+        print("\nFAILED: UI tests failed. Fix errors before committing.", file=sys.stderr)
+        sys.exit(result.returncode)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -117,8 +133,9 @@ def main() -> None:
 
     build_ui(npm)
     sync_to_package()
+    verify_ui_tests()
 
-    print("\nAll UI assets built and synced.")
+    print("\nAll UI assets built, synced, and verified.")
 
 
 if __name__ == "__main__":

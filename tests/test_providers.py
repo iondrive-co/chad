@@ -2823,6 +2823,7 @@ class TestAntigravityProvider:
         assert "--add-dir" not in cmd
         assert "--dangerously-skip-permissions" in cmd
         assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+        assert cmd[cmd.index("--print-timeout") + 1] == "86400s"
 
     def test_command_carries_model_effort_and_conversation(self):
         """Model, reasoning effort and multi-turn resume all reach the CLI."""

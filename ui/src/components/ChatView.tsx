@@ -103,6 +103,7 @@ export function ChatView({
   // session that has not run a task yet.
   const [sessionCodingAgent, setSessionCodingAgent] = useState<string | null>(null);
   const [sessionCodingModel, setSessionCodingModel] = useState<string | null>(null);
+  const [sessionVerificationAgent, setSessionVerificationAgent] = useState<string | null | undefined>(undefined);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
@@ -333,6 +334,23 @@ export function ChatView({
         setVerificationAgent(conversationHasTask ? convo.task.verification_account || null : null);
         setTaskScreenshots(conversationHasTask ? convo.task.screenshots || [] : []);
         setHasRunTask(conversationHasTask);
+        if (conversationHasTask) {
+          if (convo.task.coding_account) {
+            setSessionCodingAgent(convo.task.coding_account);
+          }
+          if (convo.task.coding_model) {
+            setSessionCodingModel(convo.task.coding_model);
+          }
+          if (convo.task.verification_account !== undefined) {
+            setSessionVerificationAgent(convo.task.verification_account || null);
+          }
+          if (convo.task.notify_slack !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+            setPostToSlack(convo.task.notify_slack);
+          }
+          if (convo.task.use_worktree !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+            setUseWorktree(convo.task.use_worktree);
+          }
+        }
         conversationSeqRef.current = conversationHasTask ? convo.latest_seq : 0;
       } catch {
         if (!cancelled) {
@@ -347,17 +365,27 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
-  // Load this session's own coding agent/model (set once it has run a task)
-  // so the composer can reuse it instead of a global default.
+  // Load this session's own coding agent/model
+  // (set once it has run a task) so the composer can reuse it instead of a global default.
   useEffect(() => {
     let cancelled = false;
     setSessionCodingAgent(null);
     setSessionCodingModel(null);
+    setSessionVerificationAgent(undefined);
     api.getSession(sessionId)
       .then((s) => {
         if (cancelled) return;
         setSessionCodingAgent(s.coding_account);
         setSessionCodingModel(s.coding_model);
+        if (s.verification_account !== undefined) {
+          setSessionVerificationAgent(s.verification_account);
+        }
+        if (s.notify_slack !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+          setPostToSlack(s.notify_slack);
+        }
+        if (s.use_worktree !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+          setUseWorktree(s.use_worktree);
+        }
       })
       .catch(() => { /* new/unknown session: fall back to defaults */ });
     return () => { cancelled = true; };
@@ -372,7 +400,7 @@ export function ChatView({
       // An unsent draft for this session (from before a tab switch) wins over
       // every other default — it's what the user last had selected.
       const draft = composerDrafts.get(sessionId);
-      if (draft?.codingAccountName) {
+      if (draft?.inputText && draft?.codingAccountName) {
         const draftAccount = res.accounts.find((a) => a.name === draft.codingAccountName);
         if (draftAccount) {
           setCodingAccount(draftAccount);
@@ -464,20 +492,15 @@ export function ChatView({
   }, [api, sessionId, codingAccount, sessionCodingAgent, sessionCodingModel]);
 
   // Seed the verification agent picker. The global settings only supply its
-  // initial value — whatever the picker ends up holding is what runs, so the
-  // enabled flag and the default account are resolved in one chain rather than
-  // racing to set it.
+  // initial value for new sessions. For sessions that have already run a task,
+  // the initial task's verification agent is reused.
   useEffect(() => {
     let cancelled = false;
-    // Claim the defaults BEFORE any await so concurrent/repeat runs can't both
-    // apply them — a later run must never wipe a manual account pick.
-    if (verificationDefaultsApplied.current) return;
-    verificationDefaultsApplied.current = true;
 
-    // An unsent draft for this session restores its verification pick
-    // (including an explicit "None") instead of re-resolving the global default.
+    // An unsent draft with text for this session restores its verification pick
+    // (including an explicit "None") instead of re-resolving the default.
     const draft = composerDrafts.get(sessionId);
-    if (draft) {
+    if (draft?.inputText) {
       if (!draft.verificationAccountName) {
         setVerificationAccount(null);
       } else {
@@ -487,6 +510,23 @@ export function ChatView({
       }
       return () => { cancelled = true; };
     }
+
+    // Reuse the verification agent this session already runs with (including None).
+    if (sessionVerificationAgent !== undefined) {
+      if (!sessionVerificationAgent) {
+        setVerificationAccount(null);
+      } else {
+        api.getAccount(sessionVerificationAgent)
+          .then((acct) => { if (!cancelled) setVerificationAccount(acct); })
+          .catch(() => { if (!cancelled) setVerificationAccount(null); });
+      }
+      return () => { cancelled = true; };
+    }
+
+    // Claim the defaults BEFORE any await so concurrent/repeat runs can't both
+    // apply them — a later run must never wipe a manual account pick.
+    if (verificationDefaultsApplied.current) return;
+    verificationDefaultsApplied.current = true;
 
     api.getVerificationSettings()
       .catch((): VerificationSettings => ({ enabled: true }))
@@ -508,12 +548,13 @@ export function ChatView({
       .catch(() => { /* no default account to seed */ });
 
     return () => { cancelled = true; };
-  }, [api, sessionId]);
+  }, [api, sessionId, sessionVerificationAgent]);
 
   // Persist unsent composer state (draft text + next-message settings) so a
   // session switch that remounts this view doesn't lose it — see
   // composerDrafts above.
   useEffect(() => {
+    if (!inputText && !codingAccount) return;
     composerDrafts.set(sessionId, {
       inputText,
       codingAccountName: codingAccount?.name ?? null,
@@ -927,6 +968,12 @@ export function ChatView({
       use_worktree: useWorktree,
     });
 
+    if (!isFollowup) {
+      setSessionCodingAgent(codingAccount.name);
+      setSessionCodingModel(codingModel || null);
+      setSessionVerificationAgent(verificationAccount ? verificationAccount.name : null);
+    }
+
     handleTaskStart(message, isFollowup);
   }, [
     api,
@@ -992,6 +1039,7 @@ export function ChatView({
     try {
       await startTaskRequest(message, hasRunTask, screenshots);
       setInputText("");
+      clearComposerDraft(sessionId);
       screenshots.forEach((s) => {
         URL.revokeObjectURL(s.previewUrl);
         previewUrlsRef.current.delete(s.previewUrl);

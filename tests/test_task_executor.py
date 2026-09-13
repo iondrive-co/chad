@@ -539,6 +539,7 @@ class TestBuildAgentCommand:
         assert "agy" in Path(cmd[0]).name
         assert "--dangerously-skip-permissions" in cmd
         assert "--output-format" in cmd and "stream-json" in cmd
+        assert cmd[cmd.index("--print-timeout") + 1] == "86400s"
         assert "-p" in cmd
         prompt_idx = cmd.index("-p")
         assert "Fix the bug" in cmd[prompt_idx + 1]
@@ -1818,3 +1819,122 @@ class TestVerificationSelectionOverridesGlobalFlag:
             },
         )
         assert result is None
+
+
+class TestAntigravityTimeoutExecution:
+    """Tests for Antigravity timeout detection during task execution."""
+
+    def test_task_executor_detects_antigravity_timeout_in_event_loop_output(
+        self, tmp_path, monkeypatch
+    ):
+        """When event loop finishes with exit 0 but accumulated output has [agy] print timeout,
+        TaskExecutor marks task as FAILED with timeout and session status as interrupted."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config_path = tmp_path / "chad.conf"
+        config_path.write_text(
+            json.dumps({
+                "accounts": {"acct": {"provider": "antigravity"}},
+            })
+        )
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        session_manager = SessionManager()
+        session = session_manager.create_session(project_path=str(tmp_path), name="test-timeout")
+        executor = TaskExecutor(ConfigManager(), session_manager)
+
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util import provider_login
+        monkeypatch.setattr(provider_login, "is_logged_in", lambda *args: True)
+
+        # Mock event_loop.run to return exit 0 but with agy timeout in output
+        monkeypatch.setattr(
+            SessionEventLoop,
+            "run",
+            lambda *args, **kwargs: (
+                0,
+                "[agy] print timeout after 5m0s with turn in progress; returning partial output\n",
+            ),
+        )
+
+        task = executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Explore project",
+            coding_account="acct",
+            use_worktree=False,
+        )
+        task._thread.join(timeout=5)
+
+        assert task.state == TaskState.FAILED
+        assert task.error == "Agent timed out"
+        assert session.status == "interrupted"
+
+        events = task.event_log.get_events()
+        ended_event = next(e for e in events if e.get("type") == "session_ended")
+        assert ended_event["success"] is False
+        assert ended_event["reason"] == "timeout"
+
+    def test_initial_task_saves_settings_on_session(self, tmp_path, monkeypatch):
+        """Initial task saves verification_account, notify_slack, use_worktree on session."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config_path = tmp_path / "chad.conf"
+        config_path.write_text(
+            json.dumps({
+                "accounts": {"coder1": {"provider": "mock"}},
+            })
+        )
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+        from chad.util import provider_login
+        monkeypatch.setattr(provider_login, "is_logged_in", lambda *args: True)
+
+        session_mgr = SessionManager()
+        executor = TaskExecutor(ConfigManager(), session_mgr)
+        session = session_mgr.create_session(project_path=str(tmp_path), name="Test")
+
+        monkeypatch.setattr(
+            executor,
+            "_run_task",
+            lambda *args, **kwargs: None,
+        )
+
+        task1 = executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Initial task",
+            coding_account="coder1",
+            coding_model="model1",
+            verification_account="checker1",
+            notify_slack=False,
+            use_worktree=False,
+            is_followup=False,
+        )
+
+        assert session.coding_account == "coder1"
+        assert session.coding_model == "model1"
+        assert session.verification_account == "checker1"
+        assert session.notify_slack is False
+        assert session.use_worktree is False
+
+        # Mark first task as completed
+        task1.state = TaskState.COMPLETED
+
+        # Follow-up should not overwrite the session's initial settings
+        executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Follow-up task",
+            coding_account="coder1",
+            coding_model="model2",
+            verification_account="other_checker",
+            notify_slack=True,
+            use_worktree=True,
+            is_followup=True,
+        )
+
+        assert session.coding_account == "coder1"
+        assert session.coding_model == "model1"
+        assert session.verification_account == "checker1"
+        assert session.notify_slack is False
+        assert session.use_worktree is False

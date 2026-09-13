@@ -580,7 +580,7 @@ class TestExplorationMilestoneDetection:
         """Discovery markers with terminal metadata should be ignored."""
         loop, event_log, emitted = self._make_loop()
 
-        loop.feed_output("EXPLORATION_RESULT: workdir: /home/miles/chad/.chad-worktrees/abc123\n")
+        loop.feed_output("EXPLORATION_RESULT: workdir: /workspace/chad/.chad-worktrees/abc123\n")
         loop.feed_output("EXPLORATION_RESULT: model: gpt-5.1-codex\n")
         loop._analyze_output()
 
@@ -2399,3 +2399,88 @@ class TestExplorationNarrationFilter:
             if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
         ]
         assert len(exploration) == 2
+
+
+class TestAntigravityTimeoutDetection:
+    """Tests that [agy] print timeout is detected as a timeout (exit code -2)."""
+
+    def test_coding_phase_detects_agy_print_timeout_and_returns_minus_two(self):
+        """When agy exits 0 on print timeout, event loop treats it as exit code -2."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        def run_phase_fn(**kwargs):
+            return 0, "[agy] print timeout after 5m0s with turn in progress; returning partial output\n"
+
+        loop = SessionEventLoop(
+            session_id="test-agy-timeout",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=run_phase_fn,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=lambda _: None,
+        )
+
+        exit_code, output = loop._run_coding_phase(
+            session=None,
+            task_description="test task",
+            coding_account="google-aloancloud",
+            coding_provider="antigravity",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert exit_code == -2
+        assert "[agy] print timeout" in output
+
+    def test_continuation_phase_detects_agy_print_timeout_and_stops(self):
+        """When continuation phase hits print timeout, loop bails with -2."""
+        event_log = FakeEventLog()
+        emitted = []
+        calls = 0
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        def run_phase_fn(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # Initial run exits 0 with partial progress, no summary
+                return 0, "Partial exploration output without summary\n"
+            # Continuation hits agy timeout
+            return 0, "[agy] print timeout after 5m0s with turn in progress; returning partial output\n"
+
+        loop = SessionEventLoop(
+            session_id="test-agy-timeout-cont",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=run_phase_fn,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=lambda _: None,
+        )
+
+        exit_code, output = loop._run_coding_phase(
+            session=None,
+            task_description="test task",
+            coding_account="google-aloancloud",
+            coding_provider="antigravity",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert exit_code == -2
+        # Should have stopped after the first continuation hit timeout, not done 3 attempts
+        assert calls == 2
+        assert "[agy] print timeout" in output

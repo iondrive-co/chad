@@ -972,7 +972,15 @@ label {
   user-select: none;
 }
 
-.slack-toggle .slack-toggle-checkbox,
+.slack-toggle .slack-toggle-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .worktree-toggle .worktree-toggle-checkbox {
   width: 14px;
   height: 14px;

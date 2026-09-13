@@ -52,6 +52,9 @@ def _session_to_response(session: Session) -> SessionResponse:
         coding_account=getattr(session, "coding_account", None),
         coding_model=getattr(session, "coding_model", None),
         coding_provider=getattr(session, "provider_type", None),
+        verification_account=getattr(session, "verification_account", None),
+        notify_slack=getattr(session, "notify_slack", True),
+        use_worktree=getattr(session, "use_worktree", True),
         task_description=session.task_description,
         status=status,
         resumable=resumable,
@@ -138,14 +141,17 @@ def _build_conversation(event_log: EventLog, since_seq: int = 0) -> Conversation
                 "summary": event.get("summary", ""),
             })
 
+    initial_start = starts[0]
     task_meta = {
         "seq": start_seq,
         "task_description": latest_start.get("task_description", ""),
         "project_path": latest_start.get("project_path", ""),
         "coding_provider": latest_start.get("coding_provider", ""),
-        "coding_account": latest_start.get("coding_account", ""),
-        "coding_model": latest_start.get("coding_model", None),
-        "verification_account": latest_start.get("verification_account", None),
+        "coding_account": initial_start.get("coding_account") or latest_start.get("coding_account", ""),
+        "coding_model": initial_start.get("coding_model") if initial_start.get("coding_model") is not None else latest_start.get("coding_model", None),
+        "verification_account": initial_start.get("verification_account") if "verification_account" in initial_start else latest_start.get("verification_account", None),
+        "notify_slack": initial_start.get("notify_slack", latest_start.get("notify_slack", True)),
+        "use_worktree": initial_start.get("use_worktree", latest_start.get("use_worktree", True)),
         "screenshots": latest_start.get("screenshots", []),
     }
 
@@ -421,14 +427,17 @@ async def stream_session(
         mux = EventMultiplexer(session_id, event_log)
 
         # Stream events through the multiplexer
-        async for event in mux.stream_with_since(
-            pty_service,
-            since_seq=since_seq,
-            include_terminal=include_terminal,
-            include_events=include_events,
-            keep_polling_fn=lambda: executor.get_running_task_for_session(session_id) is not None,
-        ):
-            yield format_sse_event(event)
+        try:
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=since_seq,
+                include_terminal=include_terminal,
+                include_events=include_events,
+                keep_polling_fn=lambda: executor.get_running_task_for_session(session_id) is not None,
+            ):
+                yield format_sse_event(event)
+        except (asyncio.CancelledError, GeneratorExit):
+            return
 
     return StreamingResponse(
         event_generator(),

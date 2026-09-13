@@ -47,6 +47,9 @@ class SessionStartedEventSchema(EventBaseSchema):
     coding_provider: str = Field(description="Provider type")
     coding_account: str = Field(description="Account name")
     coding_model: str | None = Field(default=None, description="Model name")
+    verification_account: str | None = Field(default=None, description="Verification account name")
+    notify_slack: bool = Field(default=True, description="Whether slack notifications are enabled")
+    use_worktree: bool = Field(default=True, description="Whether git worktree was used")
     screenshots: list[str] = Field(default_factory=list, description="Attached screenshot paths")
 
 
@@ -213,6 +216,8 @@ class ConversationTaskSchema(BaseModel):
     coding_account: str = Field(description="Account used for coding")
     coding_model: str | None = Field(default=None, description="Model used for coding")
     verification_account: str | None = Field(default=None, description="Account used for verification")
+    notify_slack: bool = Field(default=True, description="Whether slack notifications are enabled")
+    use_worktree: bool = Field(default=True, description="Whether git worktree was used")
     screenshots: list[str] = Field(default_factory=list, description="Attached screenshot paths")
 
 

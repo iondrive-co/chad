@@ -338,6 +338,7 @@ class TestComposerControlStyling:
             'className="model-select composer-control composer-control-secondary"',
             'className="reasoning-select composer-control composer-control-secondary"',
             'className="slack-toggle composer-control composer-control-secondary"',
+            'className="worktree-toggle composer-control composer-control-secondary"',
             'className="attach-btn composer-control composer-control-secondary"',
             'className="send-btn composer-control composer-control-primary"',
         ]
@@ -380,6 +381,21 @@ class TestComposerControlStyling:
         assert "width:" in rule_content, "Slack checkbox should set its own width"
         assert "height:" in rule_content, "Slack checkbox should set its own height"
         assert "margin: 0" in rule_content, "Slack checkbox should reset input margin"
+
+    def test_worktree_checkbox_overrides_global_input_width(self):
+        """The Worktree checkbox should not inherit the full-width form input rule."""
+        content = CSS_FILE.read_text()
+
+        match = re.search(
+            r"\.worktree-toggle \.worktree-toggle-checkbox\s*\{([^}]+)\}",
+            content,
+        )
+        assert match, "Should style .worktree-toggle-checkbox"
+        rule_content = match.group(1)
+
+        assert "width:" in rule_content, "Worktree checkbox should set its own width"
+        assert "height:" in rule_content, "Worktree checkbox should set its own height"
+        assert "margin: 0" in rule_content, "Worktree checkbox should reset input margin"
 
     def test_pending_followup_auto_starts_real_followup_task(self):
         """Queued interrupt follow-ups should auto-start a real is_followup task."""
@@ -529,3 +545,28 @@ class TestNewSessionRequiresProjectChoice:
         assert "new-session-btn" not in content, (
             "the old unconditional New button should be removed"
         )
+
+
+class TestFollowUpSettingsDefaults:
+    """Follow-up tasks should default agent, verification, slack, and worktree to the initial task."""
+
+    def test_initial_task_start_records_session_settings(self):
+        """startTaskRequest should record session settings when not a followup."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "setSessionCodingAgent(codingAccount.name);" in content
+        assert "setSessionVerificationAgent(verificationAccount ? verificationAccount.name : null);" in content
+
+    def test_chatview_restores_session_settings(self):
+        """ChatView should restore verification_account, notify_slack, and use_worktree."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "setSessionVerificationAgent(s.verification_account);" in content
+        assert "setPostToSlack(s.notify_slack);" in content
+        assert "setUseWorktree(s.use_worktree);" in content
+
+    def test_sending_clears_composer_draft(self):
+        """Sending a message clears composer draft so follow-ups use session settings."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "clearComposerDraft(sessionId);" in content

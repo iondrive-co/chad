@@ -1522,3 +1522,16 @@ class TestWorktreeRegressionFixes:
         assert success is True, f"Merge failed with error: {error}"
         assert (git_repo / "feature.txt").read_text() == "feature content\n"
         assert not main_lock.exists()
+
+    def test_run_git_strips_ambient_git_env(self, git_repo, monkeypatch):
+        """_run_git must strip ambient GIT_DIR, GIT_WORK_TREE, and GIT_INDEX_FILE."""
+        manager = GitWorktreeManager(git_repo)
+        monkeypatch.setenv("GIT_DIR", "/fake/nonexistent/gitdir")
+        monkeypatch.setenv("GIT_WORK_TREE", "/fake/nonexistent/worktree")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/fake/nonexistent/index")
+        monkeypatch.setenv("GIT_PREFIX", "fake/")
+
+        # rev-parse --git-dir should still succeed because ambient vars were stripped
+        res = manager._run_git("rev-parse", "--git-dir", check=False)
+        assert res.returncode == 0
+        assert res.stdout.strip() == ".git"

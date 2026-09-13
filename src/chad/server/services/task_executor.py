@@ -1116,11 +1116,14 @@ class TaskExecutor:
         task.started_at = datetime.now(timezone.utc)
         task.state = TaskState.RUNNING
         session.active = True
-        session.status = "active"
-        session.coding_account = coding_account
-        session.coding_model = coding_model
         session.provider_type = coding_provider
         session.task_description = task_description
+        if not is_followup or session.coding_account is None:
+            session.coding_account = coding_account
+            session.coding_model = coding_model
+            session.verification_account = verification_account
+            session.notify_slack = notify_slack
+            session.use_worktree = use_worktree
 
         # Create event log
         task.event_log = EventLog(session_id)
@@ -1506,6 +1509,10 @@ class TaskExecutor:
         if task.cancel_requested:
             return -1, "\n".join(captured_output)
 
+        if json_parser and json_parser.session_id:
+            session.provider_session_id = json_parser.session_id
+            session.provider_type = coding_provider
+
         # A model-capacity response is transient. Once the PTY exits, start one
         # continuation phase with the exact message a user would send in the
         # provider TUI after waiting for recovery.
@@ -1544,7 +1551,11 @@ class TaskExecutor:
                 combined_output = f"{combined_output}\n{retry_output}"
             return retry_exit, combined_output
 
-        return exit_code, "\n".join(captured_output)
+        captured_text = "\n".join(captured_output)
+        if exit_code == 0 and "[agy] print timeout" in captured_text:
+            exit_code = -2
+
+        return exit_code, captured_text
 
     def _run_task(
         self,
@@ -1634,6 +1645,8 @@ class TaskExecutor:
                     coding_account=coding_account,
                     coding_model=coding_model,
                     verification_account=verification_account,
+                    notify_slack=notify_slack,
+                    use_worktree=use_worktree,
                     screenshots=screenshots or [],
                 ))
                 task.event_log.start_turn()
@@ -1767,6 +1780,9 @@ class TaskExecutor:
                 return
 
             # Handle timeout
+            if final_exit_code == 0 and "[agy] print timeout" in accumulated_output:
+                final_exit_code = -2
+
             if final_exit_code == -2:
                 emit("complete", success=False, message="Agent timed out", exit_code=-2)
                 emit("message_complete", speaker="CODING AI", content="Task timed out")

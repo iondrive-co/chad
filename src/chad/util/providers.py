@@ -1572,6 +1572,9 @@ def antigravity_usage_family(model: str | None) -> str:
     return _AGY_GEMINI_FAMILY
 
 
+DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT: float = 86400.0
+
+
 def build_antigravity_command(
     cli_path: str,
     prompt: str,
@@ -1580,7 +1583,7 @@ def build_antigravity_command(
     model: str | None = None,
     reasoning_effort: str | None = None,
     conversation_id: str | None = None,
-    timeout: float | None = None,
+    timeout: float | None = DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT,
 ) -> list[str]:
     """The `agy` invocation for one non-interactive turn.
 

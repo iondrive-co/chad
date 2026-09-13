@@ -9,36 +9,50 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
 from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads, preview_tunnel
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+class SecurityHeadersMiddleware:
     """Apply baseline browser hardening headers to Chad UI responses."""
 
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("Referrer-Policy", "same-origin")
-        response.headers.setdefault(
-            "Content-Security-Policy",
-            "; ".join([
-                "default-src 'self'",
-                "script-src 'self'",
-                "style-src 'self' 'unsafe-inline'",
-                "img-src 'self' data: blob:",
-                "connect-src 'self' ws: wss: https:",
-                "font-src 'self' data:",
-                "object-src 'none'",
-                "base-uri 'self'",
-                "frame-ancestors 'none'",
-            ]),
-        )
-        return response
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_security_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                header_names = {k.lower() for k, v in headers}
+                csp = (
+                    "default-src 'self'; "
+                    "script-src 'self'; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data: blob:; "
+                    "connect-src 'self' ws: wss: https:; "
+                    "font-src 'self' data:; "
+                    "object-src 'none'; "
+                    "base-uri 'self'; "
+                    "frame-ancestors 'none'"
+                )
+                defaults = [
+                    (b"x-frame-options", b"DENY"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"same-origin"),
+                    (b"content-security-policy", csp.encode("latin1")),
+                ]
+                for key, val in defaults:
+                    if key not in header_names:
+                        headers.append((key, val))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
 
 
 def _source_project_root() -> Path:
