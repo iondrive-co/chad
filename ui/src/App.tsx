@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, Fragment, useLayoutE
 import type { Session } from "chad-client";
 import { ChadAPI } from "chad-client";
 import type { ProjectSettings } from "chad-client";
-import { ChatView } from "./components/ChatView.tsx";
+import { ChatView, clearComposerDraft } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
 import { ProjectsPanel } from "./components/ProjectsPanel.tsx";
@@ -228,6 +228,8 @@ export function App() {
 
   // Once the real session list has loaded, drop any restored tabs/selection that
   // no longer exist on the server (e.g. deleted, or lost to a server restart).
+  // Also ensure any active sessions or sessions with unmerged changes are automatically
+  // opened as tabs so they don't disappear on restart or across different browser ports.
   // Runs once so it never fights a freshly opened tab on a later poll.
   useEffect(() => {
     if (!connected || !sessionsLoaded || reconciledRef.current) return;
@@ -235,6 +237,11 @@ export function App() {
     const byId = new Map(sessions.map((s) => [s.id, s]));
     setOpenedSessionIds((prev) => {
       const next = new Set([...prev].filter((id) => byId.has(id)));
+      for (const s of sessions) {
+        if (s.active || s.has_changes) {
+          next.add(s.id);
+        }
+      }
       // Keep the restored selection visible as a tab even if storage was inconsistent.
       if (selectedSession && byId.has(selectedSession)) next.add(selectedSession);
       return next;
@@ -243,7 +250,20 @@ export function App() {
       const projectPath = byId.get(selectedSession)?.project_path;
       if (projectPath) setSessionProjectPath(projectPath);
     } else if (selectedSession) {
-      setSelectedSession(null);
+      const fallback = sessions.find((s) => s.has_changes || s.active);
+      if (fallback) {
+        setSelectedSession(fallback.id);
+        if (fallback.project_path) setSessionProjectPath(fallback.project_path);
+      } else {
+        setSelectedSession(null);
+      }
+    } else {
+      const pending = sessions.find((s) => s.has_changes || s.active);
+      if (pending) {
+        setSelectedSession(pending.id);
+        if (pending.project_path) setSessionProjectPath(pending.project_path);
+        setTab("chat");
+      }
     }
   }, [connected, sessionsLoaded, sessions, selectedSession]);
 
@@ -274,22 +294,24 @@ export function App() {
     }
   }, []);
 
-  const handleNewSession = useCallback(async (projectPath?: string) => {
-    // Default to first configured project when none specified
-    const effectivePath = projectPath || (projects.length > 0 ? projects[0].project_path : undefined);
+  // The project a session runs against can't be changed after creation (see
+  // ChatView), so it must be picked explicitly here rather than silently
+  // defaulting — a silent default previously left every new session (and its
+  // tab grouping) stuck on whichever project was configured first.
+  const handleNewSession = useCallback(async (projectPath: string) => {
     try {
-      const session = await createSession(effectivePath);
+      const session = await createSession(projectPath);
       if (session) {
         setSelectedSession(session.id);
         setOpenedSessionIds(prev => new Set(prev).add(session.id));
-        if (effectivePath) setSessionProjectPath(effectivePath);
+        setSessionProjectPath(projectPath);
         setTab("chat");
         refreshSessions();
       }
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Failed to create session");
     }
-  }, [createSession, refreshSessions, projects]);
+  }, [createSession, refreshSessions]);
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -299,6 +321,7 @@ export function App() {
       window.alert(err instanceof Error ? err.message : "Failed to delete session");
       return;
     }
+    clearComposerDraft(id);
     setOpenedSessionIds(prev => {
       const next = new Set(prev);
       next.delete(id);
@@ -414,19 +437,28 @@ export function App() {
               ))}
             </>
           )}
-          {connected && (
-            <button
-              className="new-session-btn"
-              onClick={() => handleNewSession()}
-              disabled={sessionsLoading}
-              title="New session"
-            >
-              New
-            </button>
-          )}
         </nav>
+        {connected && (
+          <select
+            className="new-session-select"
+            value=""
+            onChange={(e) => {
+              const path = e.target.value;
+              if (path) handleNewSession(path);
+            }}
+            disabled={sessionsLoading || projects.length === 0}
+            title={projects.length === 0 ? "Add a project first (Chad menu → Projects)" : "Start a new session"}
+          >
+            <option value="" disabled>+ New</option>
+            {projects.map((p) => (
+              <option key={p.project_path} value={p.project_path}>
+                {getProjectDisplayName(p.project_path)}
+              </option>
+            ))}
+          </select>
+        )}
         {connected && apiBaseUrl && (
-          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
+          <span className="connection-indicator" style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
             {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
           </span>
         )}
@@ -441,8 +473,8 @@ export function App() {
                 key={selectedSession}
                 api={api}
                 sessionId={selectedSession}
+                sessionName={selectedSessionData?.name}
                 onSessionChange={refreshSessions}
-                onProjectsChange={loadProjects}
                 defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}

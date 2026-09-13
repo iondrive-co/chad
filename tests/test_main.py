@@ -4,6 +4,8 @@ import os
 import sys
 import time
 from pathlib import Path
+
+import pytest
 from unittest.mock import Mock, patch
 from chad.__main__ import (
     main,
@@ -12,7 +14,18 @@ from chad.__main__ import (
     write_server_port,
     read_server_port,
     get_chad_dir,
+    stop_running_server,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_chad_already_running(monkeypatch):
+    """Keep implicit server discovery out of tests unless a test opts into it.
+
+    The tray startup path explicitly patches this helper when it needs to
+    exercise reuse of an existing server.
+    """
+    monkeypatch.setattr("chad.__main__.running_server_url", lambda: None)
 
 
 class TestMain:
@@ -66,6 +79,161 @@ class TestMain:
         mock_run_unified.assert_called_once()
         call_args = mock_run_unified.call_args
         assert call_args.args[0] == "new-password"  # main_password
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_tray_mode_runs_the_desktop_stack_without_a_prompt(
+        self, mock_config_class, mock_run_unified
+    ):
+        """--tray is a login start: same server, no browser, nobody to ask."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tray"]):
+            result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        kwargs = mock_run_unified.call_args.kwargs
+        assert kwargs["tray"] is True
+        assert kwargs["ui_mode"] == "react"
+        assert kwargs["api_host"] == "127.0.0.1"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_tray_mode_refuses_before_chad_is_set_up(
+        self, mock_config_class, mock_run_unified
+    ):
+        """A login start cannot answer a first-run password prompt."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = True
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tray"]):
+            result = main()
+
+        assert result == 1
+        mock_run_unified.assert_not_called()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_tray_mode_opens_no_browser(self, mock_config_class, mock_run_unified):
+        """Nobody asked for a browser window at login."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tray"]):
+            assert main() == 0
+
+        assert mock_run_unified.call_args.kwargs["open_window"] is False
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_start_at_login_puts_this_run_in_the_tray_too(
+        self, mock_config_class, mock_run_unified
+    ):
+        """Saying yes must not leave the run you said it in without an icon."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "pw"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config.get_ui_mode.return_value = "react"
+        mock_config.get_autostart.return_value = True
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad"]):
+            with patch.dict(os.environ, {"CHAD_PASSWORD": "pw"}):
+                assert main() == 0
+
+        kwargs = mock_run_unified.call_args.kwargs
+        assert kwargs["tray"] is True
+        assert kwargs.get("open_window", True) is True
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_without_start_at_login_there_is_no_tray(
+        self, mock_config_class, mock_run_unified
+    ):
+        """A plain terminal Chad stays a plain terminal Chad."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config.get_ui_mode.return_value = "react"
+        mock_config.get_autostart.return_value = None
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad"]):
+            with patch.dict(os.environ, {"CHAD_PASSWORD": "pw"}):
+                assert main() == 0
+
+        assert mock_run_unified.call_args.kwargs["tray"] is False
+
+    @patch("chad.__main__.running_server_url", return_value="http://127.0.0.1:3184")
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_normal_launch_starts_fresh_when_chad_is_already_running(
+        self, mock_config_class, mock_run_unified, mock_running
+    ):
+        """A normal launch must not attach to a stale tray server."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config.get_ui_mode.return_value = "react"
+        mock_config.get_autostart.return_value = False
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad"]):
+            with patch("chad.__main__.stop_running_server") as mock_stop:
+                with patch.dict(os.environ, {}, clear=True):
+                    os.environ.pop("CHAD_PASSWORD", None)
+                    result = main()
+
+        assert result == 0
+        mock_running.assert_not_called()
+        mock_stop.assert_called_once()
+        mock_config.verify_main_password.assert_called_once()
+        assert mock_run_unified.call_args.args[0] == "password"
+        assert mock_run_unified.call_args.kwargs["server_url"] is None
+
+    @patch("chad.__main__.running_server_url", return_value="http://127.0.0.1:3184")
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_tray_launch_attaches_to_existing_server(
+        self, mock_config_class, mock_run_unified, mock_running
+    ):
+        """The login-started tray process may reuse the existing server."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.list_project_configs.return_value = {}
+        mock_config.load_preferences.return_value = None
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tray"]):
+            result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        assert mock_run_unified.call_args.kwargs["server_url"] == "http://127.0.0.1:3184"
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
@@ -455,6 +623,29 @@ class TestServerPortAutodiscovery:
             port = read_server_port()
 
         assert port is None
+
+    def test_stop_running_server_terminates_chad_listener_only(self, monkeypatch):
+        """A restart stops Chad processes without touching remote clients."""
+        import psutil
+
+        process = Mock()
+        process.info = {"pid": 1234, "cmdline": ["python", "-m", "chad"]}
+        older_process = Mock()
+        older_process.info = {"pid": 2345, "cmdline": ["/opt/chad", "--tray"]}
+        remote = Mock()
+        remote.info = {
+            "pid": 5678,
+            "cmdline": ["python", "-m", "chad", "--server-url", "https://example.test"],
+        }
+        monkeypatch.setattr(
+            psutil, "process_iter", lambda fields: [process, older_process, remote]
+        )
+
+        assert stop_running_server() is True
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=5)
+        older_process.terminate.assert_called_once()
+        remote.terminate.assert_not_called()
 
     def test_get_chad_dir_uses_env(self, tmp_path):
         """Test get_chad_dir uses CHAD_DIR env var when set."""

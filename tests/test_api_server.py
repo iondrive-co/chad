@@ -37,6 +37,15 @@ def client(tmp_path, monkeypatch):
     reset_state()
 
 
+@pytest.fixture
+def isolated_login_entry(tmp_path, monkeypatch):
+    """Keep start-at-login tests away from the developer's own login entry."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr("chad.util.autostart._launchctl", lambda *args: None)
+
+
 def _mock_installer(monkeypatch):
     """Stub out CLI installation so account creation doesn't shell out to npm/pip."""
     installed = []
@@ -47,6 +56,7 @@ def _mock_installer(monkeypatch):
 
     from chad.util.installer import AIToolInstaller
     monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+    monkeypatch.setattr(AIToolInstaller, "install_latest", fake_ensure_tool)
     return installed
 
 
@@ -211,12 +221,12 @@ class TestProviderEndpoints:
         assert response.status_code == 200
         data = response.json()
         providers = data["providers"]
-        assert len(providers) >= 5  # anthropic, openai, gemini, qwen, mistral
+        assert len(providers) >= 5  # anthropic, openai, antigravity, qwen, mistral
 
         provider_types = [p["type"] for p in providers]
         assert "anthropic" in provider_types
         assert "openai" in provider_types
-        assert "gemini" in provider_types
+        assert "antigravity" in provider_types
         assert "local" in provider_types
         assert "kimi" in provider_types
 
@@ -278,6 +288,141 @@ class TestAccountUsageEndpoint:
         data = resp.json()
         assert data["usage_as_of"] == "2026-06-25T09:30:00+00:00"
         assert data["weekly_usage_pct"] == 100.0
+
+
+class TestAccountCode:
+    """The short code an account shows under in the tray."""
+
+    def test_a_new_account_gets_a_code_from_its_name(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "claude-work", "anthropic")
+
+        assert client.get("/api/v1/accounts/claude-work").json()["code"] == "CWO"
+
+    def test_accounts_never_share_a_code(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "claude-work", "anthropic")
+        assert client.post(
+            "/api/v1/accounts", json={"name": "claude-wombat", "provider": "anthropic"},
+        ).status_code == 201
+
+        codes = [a["code"] for a in client.get("/api/v1/accounts").json()["accounts"]]
+
+        assert len(set(codes)) == len(codes), codes
+
+    def test_a_code_can_be_set_and_comes_back_upper_case(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "claude-work", "anthropic")
+
+        resp = client.put("/api/v1/accounts/claude-work/code", json={"code": "wrk"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["code"] == "WRK"
+
+    def test_a_code_another_account_uses_is_a_conflict(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "one", "mock")
+        assert client.post(
+            "/api/v1/accounts", json={"name": "two", "provider": "mock"},
+        ).status_code == 201
+        client.put("/api/v1/accounts/one/code", json={"code": "ABC"})
+
+        resp = client.put("/api/v1/accounts/two/code", json={"code": "abc"})
+
+        assert resp.status_code == 409, resp.text
+
+    def test_a_code_that_would_not_fit_is_refused(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "one", "mock")
+
+        for bad in ["ABCD", "", "A B", "a-b"]:
+            resp = client.put("/api/v1/accounts/one/code", json={"code": bad})
+            assert resp.status_code == 422, f"{bad!r} was accepted: {resp.text}"
+
+    def test_a_code_survives_a_rename(self, client, monkeypatch):
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "one", "mock")
+        client.put("/api/v1/accounts/one/code", json={"code": "ONE"})
+
+        resp = client.put("/api/v1/accounts/one/name", json={"name": "uno"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["code"] == "ONE"
+
+
+class TestAccountRename:
+    """Renaming an account keeps its settings, its login, and its identity."""
+
+    def test_rename_keeps_settings_and_moves_credentials(self, client, tmp_path, monkeypatch):
+        """The renamed account answers on the new name and keeps its login."""
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "old-name", "anthropic")
+        assert client.put(
+            "/api/v1/accounts/old-name/role", json={"role": "CODING"}
+        ).status_code == 200
+
+        creds = tmp_path / ".chad" / "claude-configs" / "old-name"
+        creds.mkdir(parents=True)
+        (creds / ".credentials.json").write_text("{}", encoding="utf-8")
+
+        resp = client.put("/api/v1/accounts/old-name/name", json={"name": "new-name"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "new-name"
+        assert resp.json()["role"] == "CODING"
+
+        assert client.get("/api/v1/accounts/old-name").status_code == 404
+        assert client.get("/api/v1/accounts/new-name").status_code == 200
+        moved = tmp_path / ".chad" / "claude-configs" / "new-name" / ".credentials.json"
+        assert moved.read_text(encoding="utf-8") == "{}"
+        assert not creds.exists()
+
+    def test_rename_onto_existing_name_is_a_conflict(self, client, monkeypatch):
+        """Two accounts may not share a name — their credential dirs would collide."""
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "first", "mock")
+        assert client.post(
+            "/api/v1/accounts", json={"name": "second", "provider": "mock"}
+        ).status_code == 201
+
+        resp = client.put("/api/v1/accounts/first/name", json={"name": "second"})
+        assert resp.status_code == 409, resp.text
+        assert client.get("/api/v1/accounts/first").status_code == 200
+
+    def test_rename_missing_account_is_not_found(self, client):
+        resp = client.put("/api/v1/accounts/ghost/name", json={"name": "fresh"})
+        assert resp.status_code == 404
+
+    def test_rename_rejects_names_that_escape_the_chad_dir(self, client, monkeypatch):
+        """Account names become directory names, so the charset stays restricted."""
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "safe", "mock")
+
+        for bad in ["../evil", "with space", "", "a/b"]:
+            resp = client.put("/api/v1/accounts/safe/name", json={"name": bad})
+            assert resp.status_code == 422, f"{bad!r} was accepted: {resp.text}"
+        assert client.get("/api/v1/accounts/safe").status_code == 200
+
+    def test_rename_refused_while_a_live_session_uses_the_account(self, client, monkeypatch):
+        """Moving the credential dir under a running CLI would break it mid-task."""
+        from chad.server.services import get_session_manager
+
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "busy", "mock")
+
+        session = get_session_manager().create_session()
+        session.coding_account = "busy"
+        session.active = True
+
+        resp = client.put("/api/v1/accounts/busy/name", json={"name": "renamed"})
+        assert resp.status_code == 409, resp.text
+        assert "busy" in resp.json()["detail"]
+        assert client.get("/api/v1/accounts/busy").status_code == 200
+
+        # Once the session finishes, the rename goes through.
+        session.active = False
+        resp = client.put("/api/v1/accounts/busy/name", json={"name": "renamed"})
+        assert resp.status_code == 200, resp.text
 
 
 class _InlineThread:
@@ -413,6 +558,38 @@ class TestConfigEndpoints:
         data = response.json()
         assert "ui_mode" in data
 
+    def test_get_autostart(self, client, isolated_login_entry):
+        """Can read whether Chad starts at login."""
+        response = client.get("/api/v1/config/autostart")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is False
+        assert "supported" in data and "location" in data
+
+    def test_set_autostart_writes_the_login_entry(self, client, isolated_login_entry):
+        """Turning it on creates the entry, and reading back agrees."""
+        from chad.util import autostart
+
+        response = client.put("/api/v1/config/autostart", json={"enabled": True})
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
+        assert autostart.is_enabled() is True
+        assert get_config_manager().get_autostart() is True
+
+        assert client.get("/api/v1/config/autostart").json()["enabled"] is True
+
+    def test_set_autostart_off_removes_it(self, client, isolated_login_entry):
+        """Turning it off again leaves nothing behind."""
+        from chad.util import autostart
+
+        client.put("/api/v1/config/autostart", json={"enabled": True})
+        response = client.put("/api/v1/config/autostart", json={"enabled": False})
+
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+        assert autostart.is_enabled() is False
+        assert get_config_manager().get_autostart() is False
+
     def test_export_config(self, client):
         """Can export config (settings only without a passphrase)."""
         response = client.post("/api/v1/config/export", json={})
@@ -466,14 +643,14 @@ class TestConfigEndpoints:
                     "accounts": {
                         "my-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
                         "my-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
-                        "my-gemini": {"provider": "gemini", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-agy": {"provider": "antigravity", "key": "x", "model": "default", "reasoning": "default"},
                     },
                 }
             },
         )
         assert response.status_code == 200
         assert response.json()["ok"] is True
-        assert sorted(installed) == ["claude", "codex", "gemini"]
+        assert sorted(installed) == ["agy", "claude", "codex"]
 
     def test_import_config_reports_install_errors(self, client, monkeypatch):
         """Import reports tool installation failures without failing the import."""

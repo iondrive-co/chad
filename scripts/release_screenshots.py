@@ -50,7 +50,7 @@ def screenshot_page(page, output_path: Path) -> Path:
 
 def fill_task_form(page):
     """Create a session and seed the task form before injecting the chat view."""
-    page.locator("button.new-session-btn").click()
+    page.select_option(".new-session-select", index=1)
     page.wait_for_timeout(2000)
 
     task_input = page.locator(".task-form textarea")

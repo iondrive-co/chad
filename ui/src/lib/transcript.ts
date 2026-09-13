@@ -154,6 +154,8 @@ export function buildTranscript(
     const seq = typeof data.seq === "number" ? data.seq : event.seq ?? 0;
     if (data.type === "tool_call_started") {
       segments.push({ seq, rank: 1, kind: "tool", text: formatToolLine(data) });
+    } else if (data.type === "status" && data.status) {
+      segments.push({ seq, rank: 1, kind: "tool", text: String(data.status) });
     } else if (data.type === "user_message") {
       // What the model was asked — shown so the panel isn't empty while the
       // model works on its first response.

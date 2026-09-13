@@ -1,5 +1,6 @@
 """Tests for CLI installer behavior."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -214,6 +215,62 @@ class TestManagedToolUpdates:
         assert "claude" in updated
         assert any("@anthropic-ai/claude-code@latest" in " ".join(c) for c in commands)
 
+    def test_setting_an_account_up_installs_the_latest_cli(self, monkeypatch, tmp_path):
+        """A login is where the version is settled, not left to the weekly timer.
+
+        The CLI's own updater cannot fix a managed install — it shells out to
+        `npm install -g` and fails in front of the user — so setup has to.
+        """
+        installer = self._installed(tmp_path, tool="claude")
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        commands = []
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda cmd, cwd=None: (commands.append(cmd), (0, "", ""))[1],
+        )
+
+        ok, detail = installer.install_latest("claude")
+
+        assert ok, detail
+        assert any("@anthropic-ai/claude-code@latest" in " ".join(c) for c in commands)
+        # Stamped, so the weekly sweep doesn't immediately redo it.
+        assert "claude" in installer._read_update_stamps()
+
+    def test_setup_leaves_an_install_the_user_manages_alone(self, monkeypatch, tmp_path):
+        """A binary on the user's PATH is theirs — Chad neither owns nor updates it."""
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        user_bin = tmp_path / "usr" / "bin"
+        user_bin.mkdir(parents=True)
+        (user_bin / "agy").write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr("chad.util.installer.is_tool_installed", lambda _b: True)
+        monkeypatch.setattr("shutil.which", lambda b: str(user_bin / b))
+        monkeypatch.setattr(
+            "chad.util.installer.run_command",
+            lambda *a, **k: pytest.fail("the user's own install must not be replaced"),
+        )
+
+        ok, detail = installer.install_latest("agy")
+
+        assert ok
+        assert detail == str(user_bin / "agy")
+
+    def test_a_failed_update_still_leaves_a_usable_cli(self, monkeypatch, tmp_path):
+        """Being offline at login is not a reason to lose the CLI already there."""
+        installer = self._installed(tmp_path, tool="claude")
+        monkeypatch.setattr(
+            "chad.util.installer.is_tool_installed", lambda b: b in ("node", "npm")
+        )
+        monkeypatch.setattr(
+            "chad.util.installer.run_command", lambda *a, **k: (1, "", "network unreachable")
+        )
+
+        ok, detail = installer.install_latest("claude")
+
+        assert ok
+        assert detail.endswith("claude")
+
     def test_recently_updated_tool_is_left_alone(self, monkeypatch, tmp_path):
         installer = self._installed(tmp_path)
         # Only node/npm come from PATH; real provider CLIs on this machine must
@@ -307,6 +364,86 @@ class TestManagedToolUpdates:
         )
         assert installer.update_stale_tools(max_age_days=7) == ["claude"]
         assert calls, "a failed update must be retried on the next check"
+
+
+class TestManifestInstall:
+    """The Antigravity CLI is fetched as a binary and then executed.
+
+    Its release manifest names the build, its URL and its SHA-512; the digest is
+    the only thing standing between a bad download and running it.
+    """
+
+    def _manifest_installer(self, tmp_path, monkeypatch, payload: bytes, digest: str):
+        import hashlib
+        import io
+        import json as json_mod
+
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        monkeypatch.setenv("PATH", str(tmp_path / "tools" / "bin"))
+        monkeypatch.setattr(installer, "_manifest_platform", lambda: "linux_amd64")
+        manifest = json_mod.dumps({
+            "version": "1.2.2",
+            "url": "https://example.invalid/cli_linux_x64.bin",
+            "sha512": digest if digest != "real" else hashlib.sha512(payload).hexdigest(),
+        }).encode()
+
+        class _Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.close()
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen", lambda url, timeout=None: _Response(manifest)
+        )
+        monkeypatch.setattr(
+            "urllib.request.urlretrieve",
+            lambda url, dest: Path(dest).write_bytes(payload),
+        )
+        return installer
+
+    def test_installs_the_build_the_manifest_names(self, tmp_path, monkeypatch):
+        installer = self._manifest_installer(tmp_path, monkeypatch, b"#!/bin/sh\ntrue\n", "real")
+
+        ok, detail = installer.install_latest("agy")
+
+        assert ok, detail
+        binary = tmp_path / "tools" / "bin" / "agy"
+        assert binary.exists()
+        assert os.access(binary, os.X_OK), "a CLI Chad spawns has to be executable"
+
+    def test_refuses_a_download_that_fails_its_checksum(self, tmp_path, monkeypatch):
+        """A payload that isn't what the manifest described is never installed."""
+        installer = self._manifest_installer(
+            tmp_path, monkeypatch, b"tampered", "0" * 128
+        )
+
+        ok, detail = installer.install_latest("agy")
+
+        assert ok is False
+        assert "checksum" in detail
+        assert not (tmp_path / "tools" / "bin" / "agy").exists()
+
+    def test_platform_key_covers_every_supported_target(self, monkeypatch, tmp_path):
+        """Each OS/arch Chad supports maps to a manifest Google publishes."""
+        installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+        cases = {
+            ("Linux", "x86_64"): "linux_amd64",
+            ("Linux", "aarch64"): "linux_arm64",
+            ("Darwin", "arm64"): "darwin_arm64",
+            ("Darwin", "x86_64"): "darwin_amd64",
+            ("Windows", "AMD64"): "windows_amd64",
+            ("Windows", "ARM64"): "windows_arm64",
+        }
+        for (system, machine), expected in cases.items():
+            monkeypatch.setattr("platform.system", lambda s=system: s)
+            monkeypatch.setattr("platform.machine", lambda m=machine: m)
+            assert installer._manifest_platform() == expected
+
+        monkeypatch.setattr("platform.machine", lambda: "mips")
+        with pytest.raises(ValueError, match="architecture"):
+            installer._manifest_platform()
 
 
 class TestArchiveExtractionSafety:

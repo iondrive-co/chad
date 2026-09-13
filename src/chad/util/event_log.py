@@ -99,6 +99,8 @@ class SessionStartedEvent(EventBase):
     coding_account: str = ""
     coding_model: str | None = None
     verification_account: str | None = None
+    notify_slack: bool = True
+    use_worktree: bool = True
     screenshots: list[str] = field(default_factory=list)
 
 

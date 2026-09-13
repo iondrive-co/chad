@@ -33,7 +33,6 @@ QUOTA_EXHAUSTION_PATTERNS = [
 
     # Anthropic/Claude specific
     r"\bcredit_balance\b.*\binsufficient\b",
-    r"api\s+is\s+overloaded",
     r"rate\s+limit\s+exceeded",  # With spaces, more specific than rate_limit_exceeded
 
     # Gemini specific (case-sensitive match for this one)
@@ -59,11 +58,33 @@ QUOTA_EXHAUSTION_PATTERNS = [
     r"error\s+429\b",
 ]
 
+# Messages emitted when a provider is temporarily unable to serve a model.
+# Capacity errors are transient and should be retried on the same session,
+# rather than treated as account quota exhaustion or a reason to hand off.
+OVERLOAD_PATTERNS = [
+    r"selected\s+model\s+is\s+at\s+capacity",
+    r"\bmodel\s+is\s+at\s+capacity\b",
+    r"\b(?:api|service|server)\s+is\s+overloaded\b",
+    r"\boverloaded_error\b",
+    r"\btemporarily\s+overloaded\b",
+]
+
 # Compiled regex for efficiency
 _QUOTA_PATTERN = re.compile(
     "|".join(f"({p})" for p in QUOTA_EXHAUSTION_PATTERNS),
     re.IGNORECASE,
 )
+_OVERLOAD_PATTERN = re.compile(
+    "|".join(f"({p})" for p in OVERLOAD_PATTERNS),
+    re.IGNORECASE,
+)
+
+
+def is_provider_overload_error(error_message: str) -> bool:
+    """Return whether provider output indicates a transient model overload."""
+    if not error_message:
+        return False
+    return bool(_OVERLOAD_PATTERN.search(error_message))
 
 
 def is_quota_exhaustion_error(error_message: str) -> bool:

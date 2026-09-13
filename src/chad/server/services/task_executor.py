@@ -32,7 +32,10 @@ from chad.util.prompts import (
 )
 from chad.util.installer import AIToolInstaller
 from chad.util.utils import safe_home
-from chad.util.providers import CLAUDE_THINKING_BUDGETS
+from chad.util.providers import (
+    CLAUDE_THINKING_BUDGETS,
+    PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS,
+)
 from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
@@ -65,13 +68,38 @@ def _normalize_tool_call(name: str, inp: dict) -> tuple[str, dict]:
     if name == "glob":
         return "Glob", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
     if name in ("grep", "grep_search", "search_file_content"):
-        return "Grep", {"pattern": inp.get("pattern", ""), "path": inp.get("path")}
+        return "Grep", {
+            "pattern": inp.get("pattern") or inp.get("Query", ""),
+            "path": inp.get("path") or inp.get("SearchPath"),
+        }
     if name in ("web_search", "google_web_search"):
         return "WebSearch", {"query": inp.get("query", "")}
     if name == "web_fetch":
         return "WebFetch", {"url": inp.get("url") or inp.get("prompt", "")}
     if name == "task":
         return "Task", inp
+
+    # Antigravity (agy) names its tools in snake_case and their arguments in
+    # PascalCase, as its tool_info payload shows.
+    if name == "view_file":
+        return "Read", {"file_path": inp.get("AbsolutePath", "")}
+    if name == "write_to_file":
+        return "Write", {"file_path": inp.get("TargetFile", "")}
+    if name in ("replace_file_content", "multi_replace_file_content", "sed_file"):
+        return "Edit", {"file_path": inp.get("TargetFile", "")}
+    if name in ("run_command", "command_status", "send_command_input"):
+        return "Bash", {"command": inp.get("CommandLine", "")}
+    if name == "list_dir":
+        return "LS", {"path": inp.get("DirectoryPath", "")}
+    if name == "find_by_name":
+        return "Glob", {"pattern": inp.get("Pattern", ""), "path": inp.get("SearchDirectory")}
+    if name in ("read_url_content", "open_browser_url"):
+        return "WebFetch", {"url": inp.get("Url") or inp.get("URL", "")}
+    if name == "search_web":
+        return "WebSearch", {"query": inp.get("Query", "")}
+    if name == "invoke_subagent":
+        return "Task", inp
+
     return name, inp
 
 
@@ -103,9 +131,11 @@ class ClaudeStreamJsonParser:
         self._tool_details: list[str] = []
         self._pending_summary = False  # True when we have tools to summarize
         self._last_emitted_summary: str | None = None
-        # Usage stats captured from result events (Gemini stream-json)
+        # Usage stats captured from result events
         self.result_stats: dict = {}
         self.init_model: str | None = None
+        # Conversation id, for the CLIs that resume by one (Antigravity)
+        self.session_id: str | None = None
         # Structured tool call records for event logging.
         # Each entry: {"id": str, "name": str, "input": dict}
         self.pending_tool_calls: list[dict] = []
@@ -159,6 +189,65 @@ class ClaudeStreamJsonParser:
             results.append(line.decode("utf-8", errors="replace"))
         return results
 
+    def _format_antigravity_event(self, obj: dict) -> list[str]:
+        """Format one Antigravity (agy) NDJSON event.
+
+        Its stream is shaped differently from the other CLIs': the kind is in
+        "event" and the payload is nested under a key of the same name.
+        """
+        outputs: list[str] = []
+        name = obj.get("event")
+
+        if name == "init":
+            self.session_id = (obj.get("conversation_id") or "") or self.session_id
+            return outputs
+
+        if name == "step_update":
+            step = obj.get("step_update") or {}
+            step_type = step.get("step_type", "")
+            text = step.get("text_delta") or ""
+            if step_type == "agent_response":
+                if text:
+                    outputs.extend(self._emit_summary_if_changed())
+                    outputs.append(text)
+                    self._reset_tool_state()
+                return outputs
+            if step_type in ("user_input", "", "system_message"):
+                # The prompt echoed back, and housekeeping: not the agent's work.
+                return outputs
+            # Anything else is the agent using a tool. Its step_type is the
+            # literal "tool"; the name and arguments are nested.
+            if step.get("state") != "ACTIVE":
+                return outputs
+            tool_info = step.get("tool_info") or {}
+            tool_name, tool_input = _normalize_tool_call(
+                step.get("tool_name") or tool_info.get("name") or step_type,
+                tool_info.get("parameters") or {},
+            )
+            self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
+            tool_desc = self._format_tool_use(tool_name, tool_input)
+            if tool_desc:
+                self._tool_details.append(tool_desc)
+            self._pending_summary = True
+            outputs.extend(self._emit_summary_if_changed())
+            self.pending_tool_calls.append({
+                "id": f"{self.session_id or ''}:{step.get('step_index', '')}",
+                "name": tool_name,
+                "input": tool_input,
+            })
+            return outputs
+
+        if name == "result":
+            result = obj.get("result") or {}
+            usage = result.get("usage")
+            if isinstance(usage, dict):
+                self.result_stats = usage
+            self.session_id = (result.get("conversation_id") or "") or self.session_id
+            # The response text already arrived as agent_response deltas.
+            return outputs
+
+        return outputs
+
     def _format_json_event(self, obj: dict) -> list[str]:
         """Convert a stream-json event to human-readable text chunks.
 
@@ -168,6 +257,9 @@ class ClaudeStreamJsonParser:
         Returns:
             List of human-readable text chunks (may be empty if event should be hidden)
         """
+        if "event" in obj and "type" not in obj:
+            return self._format_antigravity_event(obj)
+
         event_type = obj.get("type", "")
         outputs: list[str] = []
 
@@ -239,7 +331,7 @@ class ClaudeStreamJsonParser:
             return outputs
 
         elif event_type == "message":
-            # Qwen/Gemini CLI format: {type: "message", role: "assistant", content: "..."}
+            # Qwen CLI format: {type: "message", role: "assistant", content: "..."}
             role = obj.get("role", "")
             if role == "assistant":
                 content = obj.get("content", "")
@@ -529,7 +621,7 @@ def build_agent_command(
     """Build CLI command and environment for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, local, mistral, mock)
+        provider: Provider type (anthropic, openai, antigravity, qwen, local, mistral, mock)
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
@@ -626,20 +718,25 @@ def build_agent_command(
         if full_prompt:
             initial_input = full_prompt + "\n"
 
-    elif provider == "gemini":
-        # Gemini CLI in YOLO mode with stream-json output.
-        # Use -p for headless execution; positional prompts keep the CLI interactive.
-        # GEMINI_CLI_HOME is the CLI's home override: it resolves its .gemini
-        # config/credentials dir under it, isolating accounts from each other.
-        # The CLI errors out (ENOENT) if the home doesn't exist, so create it.
-        gemini_home = safe_home() / ".chad" / "gemini-homes" / account_name
-        gemini_home.mkdir(parents=True, exist_ok=True)
-        cmd = [resolve_tool("gemini"), "-y", "--output-format", "stream-json"]
-        if model and model != "default":
-            cmd.extend(["-m", model])
-        if full_prompt:
-            cmd.extend(["-p", full_prompt])
-        env["GEMINI_CLI_HOME"] = str(gemini_home)
+    elif provider == "antigravity":
+        # Antigravity CLI in print mode with stream-json output. The account's
+        # login lives in a keyring slot shared by every account, so it is made
+        # the active one here, right before the CLI starts and reads it.
+        from chad.util.providers import (
+            activate_antigravity_account,
+            antigravity_env,
+            build_antigravity_command,
+        )
+
+        activate_antigravity_account(account_name)
+        cmd = build_antigravity_command(
+            resolve_tool("agy"),
+            full_prompt or "",
+            project_path=project_path,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        env.update(antigravity_env(account_name))
 
     elif provider == "qwen":
         # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
@@ -949,6 +1046,7 @@ class TaskExecutor:
         verification_reasoning: str | None = None,
         is_followup: bool = False,
         notify_slack: bool = True,
+        use_worktree: bool = True,
         # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -1011,11 +1109,21 @@ class TaskExecutor:
         git_mgr = GitWorktreeManager(path_obj)
         if not git_mgr.is_git_repo():
             raise ValueError(f"Project must be a git repository: {project_path}")
+        coding_provider = accounts[coding_account]
 
         # Create task
         task = Task(session_id=session_id)
         task.started_at = datetime.now(timezone.utc)
         task.state = TaskState.RUNNING
+        session.active = True
+        session.provider_type = coding_provider
+        session.task_description = task_description
+        if not is_followup or session.coding_account is None:
+            session.coding_account = coding_account
+            session.coding_model = coding_model
+            session.verification_account = verification_account
+            session.notify_slack = notify_slack
+            session.use_worktree = use_worktree
 
         # Create event log
         task.event_log = EventLog(session_id)
@@ -1031,9 +1139,6 @@ class TaskExecutor:
                     )
             self._tasks[task.id] = task
             self._activity_times[task.id] = now
-
-        # Get provider info
-        coding_provider = accounts[coding_account]
 
         # Build verification config. An account picked for this task wins over
         # the global verification_enabled flag, which only supplies the default:
@@ -1076,6 +1181,7 @@ class TaskExecutor:
                 verification_config,
                 is_followup,
                 notify_slack,
+                use_worktree,
             ),
             daemon=True,
         )
@@ -1102,6 +1208,7 @@ class TaskExecutor:
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
         override_prompt: str | None = None,
+        _overload_retry: bool = False,
     ) -> tuple[int, str]:
         """Execute a single phase of the task.
 
@@ -1140,6 +1247,10 @@ class TaskExecutor:
         with self._lock:
             self._activity_times[task.id] = last_output_time
         captured_output: list[str] = []
+        # Parsers suppress provider error envelopes from the displayed output,
+        # so retain a bounded raw tail for transient capacity detection.
+        overload_scan_tail = ""
+        overload_detected = False
         pty_service = get_pty_stream_service()
 
         def log_terminal_delta(text: str) -> int | None:
@@ -1183,7 +1294,7 @@ class TaskExecutor:
         use_stdin_pipe = coding_provider == "openai"
 
         # Create JSON parser for providers that use stream-json output
-        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "gemini", "kimi") else None
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "local", "antigravity", "kimi") else None
         # Codex prints its own rendered transcript; normalize it into clean prose
         # plus structured tool calls so the UI renders it like every other provider.
         codex_parser = CodexStreamParser() if coding_provider == "openai" else None
@@ -1198,7 +1309,7 @@ class TaskExecutor:
                 session_event_loop.feed_output(text)
 
         def log_pty_event(event: PTYEvent):
-            nonlocal last_output_time
+            nonlocal last_output_time, overload_scan_tail, overload_detected
             if event.type == "output":
                 last_output_time = time.time()
                 with self._lock:
@@ -1208,6 +1319,16 @@ class TaskExecutor:
                     chunk_bytes = base64.b64decode(event.data)
                 except Exception:
                     chunk_bytes = b""
+
+                if coding_provider in ("anthropic", "openai"):
+                    from chad.util.handoff import is_provider_overload_error
+
+                    overload_scan_tail = (overload_scan_tail + chunk_bytes.decode(
+                        "utf-8", errors="replace"
+                    ))[-2048:]
+                    overload_detected = overload_detected or is_provider_overload_error(
+                        overload_scan_tail
+                    )
 
                 # For anthropic/qwen, parse stream-json and convert to readable text
                 if json_parser:
@@ -1388,17 +1509,53 @@ class TaskExecutor:
         if task.cancel_requested:
             return -1, "\n".join(captured_output)
 
-        # Write Gemini usage stats captured from stream-json result event
-        if json_parser and coding_provider == "gemini":
-            from chad.util.providers import _append_gemini_usage
-            model = json_parser.init_model or coding_model or "default"
-            if json_parser.result_stats:
-                _append_gemini_usage(coding_account, model, json_parser.result_stats)
-            else:
-                # Fallback: write a minimal usage record so the session shows activity
-                _append_gemini_usage(coding_account, model, {"num_api_requests": 1})
+        if json_parser and json_parser.session_id:
+            session.provider_session_id = json_parser.session_id
+            session.provider_type = coding_provider
 
-        return exit_code, "\n".join(captured_output)
+        # A model-capacity response is transient. Once the PTY exits, start one
+        # continuation phase with the exact message a user would send in the
+        # provider TUI after waiting for recovery.
+        if (
+            overload_detected
+            and coding_provider in ("anthropic", "openai")
+            and not _overload_retry
+            and not task.cancel_requested
+        ):
+            emit(
+                "status",
+                status="Model is at capacity; waiting 60 seconds before continuing...",
+            )
+            time.sleep(PROVIDER_OVERLOAD_RETRY_DELAY_SECONDS)
+            retry_exit, retry_output = self._run_phase(
+                task=task,
+                session=session,
+                worktree_path=worktree_path,
+                task_description=task_description,
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                screenshots=None,
+                phase="continuation",
+                exploration_output="\n".join(captured_output),
+                rows=rows,
+                cols=cols,
+                emit=emit,
+                git_mgr=git_mgr,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
+                override_prompt="continue",
+                _overload_retry=True,
+            )
+            combined_output = "\n".join(captured_output)
+            if retry_output:
+                combined_output = f"{combined_output}\n{retry_output}"
+            return retry_exit, combined_output
+
+        captured_text = "\n".join(captured_output)
+        if exit_code == 0 and "[agy] print timeout" in captured_text:
+            exit_code = -2
+
+        return exit_code, captured_text
 
     def _run_task(
         self,
@@ -1419,6 +1576,7 @@ class TaskExecutor:
         verification_config: dict | None = None,
         is_followup: bool = False,
         notify_slack: bool = True,
+        use_worktree: bool = True,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1429,7 +1587,7 @@ class TaskExecutor:
 
         rows = terminal_rows if terminal_rows else TERMINAL_ROWS
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
-        status_logging_enabled = [False]
+        status_logging_enabled = [True]
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
@@ -1475,30 +1633,9 @@ class TaskExecutor:
                     target_provider=coding_provider,
                 )
 
-            # Create or reuse worktree
-            reuse_worktree = is_followup or is_resume
-            if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
-                emit("status", status="Reusing existing worktree...")
-                worktree_path = Path(session.worktree_path)
-                session.project_path = str(project_path)
-            else:
-                emit("status", status="Creating worktree...")
-                try:
-                    worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
-                    session.worktree_path = worktree_path
-                    session.worktree_branch = git_mgr._branch_name(task.session_id)
-                    session.worktree_base_commit = base_commit
-                    session.project_path = str(project_path)
-                except Exception as e:
-                    emit("error", error=f"Failed to create worktree: {e}")
-                    task.state = TaskState.FAILED
-                    task.error = str(e)
-                    task.completed_at = datetime.now(timezone.utc)
-                    return
-
-                worktree_path = Path(worktree_path)
-
-            # Log session start
+            # Persist the user request before doing any worktree or provider
+            # setup. Those steps can fail independently; the request and the
+            # failure must still be visible after a reload.
             if task.event_log:
                 verification_account = verification_config.get("verification_account") if verification_config else None
                 task.event_log.log(SessionStartedEvent(
@@ -1508,11 +1645,51 @@ class TaskExecutor:
                     coding_account=coding_account,
                     coding_model=coding_model,
                     verification_account=verification_account,
+                    notify_slack=notify_slack,
+                    use_worktree=use_worktree,
                     screenshots=screenshots or [],
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
-                status_logging_enabled[0] = True
+
+            # Create or reuse worktree
+            if not use_worktree:
+                worktree_path = Path(project_path)
+                session.worktree_path = None
+                session.worktree_branch = None
+                session.worktree_base_commit = None
+                session.project_path = str(project_path)
+            else:
+                reuse_worktree = is_followup or is_resume
+                if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
+                    emit("status", status="Reusing existing worktree...")
+                    worktree_path = Path(session.worktree_path)
+                    session.project_path = str(project_path)
+                else:
+                    emit("status", status="Preparing worktree (large LFS files are skipped)...")
+                    try:
+                        worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
+                        session.worktree_path = worktree_path
+                        session.worktree_branch = git_mgr._branch_name(task.session_id)
+                        session.worktree_base_commit = base_commit
+                        session.project_path = str(project_path)
+                    except Exception as e:
+                        detail = getattr(e, "stderr", None) or getattr(e, "stdout", None)
+                        detail = str(detail).strip() if detail else str(e)
+                        error = f"Failed to create worktree: {detail}"
+                        emit("error", error=error)
+                        emit("complete", success=False, message=error)
+                        task.state = TaskState.FAILED
+                        task.error = error
+                        task.result = error
+                        task.completed_at = datetime.now(timezone.utc)
+                        session.active = False
+                        session.status = "interrupted"
+                        if task.event_log:
+                            task.event_log.log(SessionEndedEvent(success=False, reason=f"error: {error}"))
+                        return
+
+                worktree_path = Path(worktree_path)
 
             emit("status", status=f"Starting {coding_provider} agent...")
             emit("message_start", speaker="CODING AI")
@@ -1603,6 +1780,9 @@ class TaskExecutor:
                 return
 
             # Handle timeout
+            if final_exit_code == 0 and "[agy] print timeout" in accumulated_output:
+                final_exit_code = -2
+
             if final_exit_code == -2:
                 emit("complete", success=False, message="Agent timed out", exit_code=-2)
                 emit("message_complete", speaker="CODING AI", content="Task timed out")
@@ -1612,9 +1792,10 @@ class TaskExecutor:
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
-                session.has_worktree_changes = git_mgr.has_changes(
-                    task.session_id,
-                    session.worktree_base_commit,
+                session.has_worktree_changes = (
+                    git_mgr.has_changes(task.session_id, session.worktree_base_commit)
+                    if use_worktree
+                    else False
                 )
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
@@ -1629,9 +1810,10 @@ class TaskExecutor:
                     task.result = "Task completed, but verification did not pass"
                 else:
                     task.result = "Task completed successfully"
-                session.has_worktree_changes = git_mgr.has_changes(
-                    task.session_id,
-                    session.worktree_base_commit,
+                session.has_worktree_changes = (
+                    git_mgr.has_changes(task.session_id, session.worktree_base_commit)
+                    if use_worktree
+                    else False
                 )
                 session.status = "completed"
                 emit(

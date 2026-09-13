@@ -191,10 +191,25 @@ class TestFileToTestMapping:
         tests = find_tests_for_files(["src/chad/nonexistent_module.py"])
         assert tests == []
 
-    def test_non_python_file_ignored(self):
+    def test_non_code_file_ignored(self):
         from chad.util.verification.tools import find_tests_for_files
-        tests = find_tests_for_files(["ui/src/App.tsx", "README.md"])
+        tests = find_tests_for_files([".gitignore", "LICENSE"])
         assert tests == []
+
+    def test_ui_and_css_files_mapped_to_tests(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(["ui/src/App.tsx"])
+        assert "test_chatview_ui.py" in tests
+        assert "test_session_grouping.py" in tests
+
+        css_tests = find_tests_for_files(["ui/src/styles/main.css"])
+        assert "test_chatview_ui.py" in css_tests
+        assert "test_css_styles.py" in css_tests
+
+    def test_direct_test_file_mapped_to_itself(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(["tests/test_chatview_ui.py"])
+        assert tests == ["test_chatview_ui.py"]
 
     def test_source_path_to_module(self):
         from chad.util.verification.tools import _source_path_to_module

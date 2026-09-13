@@ -109,6 +109,30 @@ def _source_path_to_module(file_path: str) -> Optional[str]:
     return rel
 
 
+# Non-module file patterns → test files mapping
+_FILE_PATTERNS_TO_TESTS = [
+    (r'(?:^|/)ui/.*\.css$', [
+        "test_chatview_ui.py", "test_css_styles.py",
+        "test_session_grouping.py", "test_task_executor.py",
+        "test_ui_build.py",
+    ]),
+    (r'(?:^|/)ui/src/.*\.(ts|tsx|html|json)$', [
+        "test_chatview_ui.py", "test_session_grouping.py",
+        "test_task_executor.py", "test_defaults.py",
+        "test_account_auth.py", "test_ui_build.py",
+    ]),
+    (r'(?:^|/)client/.*\.(ts|tsx|json)$', [
+        "test_account_auth.py", "test_defaults.py", "test_ui_build.py",
+    ]),
+    (r'(?:^|/)scripts/build.*ui.*\.py$', [
+        "test_ui_build.py",
+    ]),
+    (r'(?:^|/)README\.md$', [
+        "test_readme_links.py",
+    ]),
+]
+
+
 def find_tests_for_files(
     changed_files: List[str],
     project_root: Optional[Path] = None,
@@ -124,7 +148,24 @@ def find_tests_for_files(
     """
     tests = set()
     for f in changed_files:
-        module = _source_path_to_module(f)
+        p = f.replace("\\", "/")
+
+        # Direct test file in tests/ or standalone test filename
+        test_match = re.search(r'(?:^|/)(test_[^/]+\.py)$', p)
+        if test_match:
+            tests.add(test_match.group(1))
+            continue
+
+        # Check non-module patterns (UI, client, docs)
+        matched_pattern = False
+        for pattern, test_files in _FILE_PATTERNS_TO_TESTS:
+            if re.search(pattern, p):
+                tests.update(test_files)
+                matched_pattern = True
+        if matched_pattern:
+            continue
+
+        module = _source_path_to_module(p)
         if module is None:
             continue
         # Try exact match first, then prefix matches

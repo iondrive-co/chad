@@ -239,6 +239,33 @@ class TestInterruptFollowups:
         )
 
 
+class TestTaskStartupFeedback:
+    """The submitted prompt must remain visible while the agent starts."""
+
+    def test_task_start_adds_optimistic_user_message_and_thinking_state(self):
+        content = CHATVIEW_FILE.read_text()
+
+        assert "optimisticMessagesRef" in content
+        assert "content: taskDesc" in content
+        assert 'role="status"' in content
+        assert "Thinking" in content
+
+    def test_session_id_is_copyable(self):
+        content = (UI_DIR / "components" / "SessionLog.tsx").read_text()
+
+        assert "navigator.clipboard.writeText(sessionId)" in content
+        assert "Copy full session ID" in content
+        assert '<strong className="session-name">{sessionName}</strong>' in content
+        assert "<code>{sessionId}</code>" in content
+
+    def test_missing_completion_is_not_reported_as_success(self):
+        content = CHATVIEW_FILE.read_text()
+
+        assert "MISSING_COMPLETION_REASON" in content
+        assert 'setEndReason(MISSING_COMPLETION_REASON)' in content
+        assert "stream ended without a persisted completion event" in content
+
+
 class TestComposerInitialState:
     """Verify new-session composer state is derived from real task history."""
 
@@ -311,6 +338,7 @@ class TestComposerControlStyling:
             'className="model-select composer-control composer-control-secondary"',
             'className="reasoning-select composer-control composer-control-secondary"',
             'className="slack-toggle composer-control composer-control-secondary"',
+            'className="worktree-toggle composer-control composer-control-secondary"',
             'className="attach-btn composer-control composer-control-secondary"',
             'className="send-btn composer-control composer-control-primary"',
         ]
@@ -353,6 +381,21 @@ class TestComposerControlStyling:
         assert "width:" in rule_content, "Slack checkbox should set its own width"
         assert "height:" in rule_content, "Slack checkbox should set its own height"
         assert "margin: 0" in rule_content, "Slack checkbox should reset input margin"
+
+    def test_worktree_checkbox_overrides_global_input_width(self):
+        """The Worktree checkbox should not inherit the full-width form input rule."""
+        content = CSS_FILE.read_text()
+
+        match = re.search(
+            r"\.worktree-toggle \.worktree-toggle-checkbox\s*\{([^}]+)\}",
+            content,
+        )
+        assert match, "Should style .worktree-toggle-checkbox"
+        rule_content = match.group(1)
+
+        assert "width:" in rule_content, "Worktree checkbox should set its own width"
+        assert "height:" in rule_content, "Worktree checkbox should set its own height"
+        assert "margin: 0" in rule_content, "Worktree checkbox should reset input margin"
 
     def test_pending_followup_auto_starts_real_followup_task(self):
         """Queued interrupt follow-ups should auto-start a real is_followup task."""
@@ -427,51 +470,103 @@ class TestVerificationAgentPicker:
         )
 
 
-class TestProjectSelectorNewProject:
-    """Verify the chat project selector can create and select a new project path."""
+class TestProjectFixedAtSessionCreation:
+    """A session's project is chosen once, at creation, and can't change after.
 
-    def test_chatview_has_new_project_entry_form(self):
-        """Selecting New project should reveal an editable project path form."""
+    Regression coverage for: switching projects from within ChatView never
+    actually changed which project a task ran against (the session's own
+    project_path always won), so every session silently stayed grouped under
+    whichever project was configured first. The fix removes the in-chat
+    project dropdown entirely and requires the project to be picked when the
+    session is created (see TestNewSessionRequiresProjectChoice below).
+    """
+
+    def test_chatview_has_no_project_dropdown_or_add_form(self):
+        """ChatView must not offer any way to change or add a project."""
         content = CHATVIEW_FILE.read_text()
 
-        assert "NEW_PROJECT_VALUE" in content, (
-            "ChatView should have a sentinel option for starting a new project"
+        assert "NEW_PROJECT_VALUE" not in content, (
+            "ChatView should not have a sentinel option for starting a new project"
         )
-        assert "New project" in content, (
-            "Project selector should include a New project option"
+        assert "newProjectPath" not in content, (
+            "ChatView should not track a path being entered for a new project"
         )
-        assert "newProjectPath" in content, (
-            "ChatView should track the path being entered for a new project"
+        assert "creatingProject" not in content, (
+            "ChatView should not have new-project-form state"
         )
-        assert 'className="project-selector-new"' in content, (
-            "ChatView should render an inline form for entering the new project path"
+        assert 'className="project-selector-new"' not in content, (
+            "ChatView should not render an inline form for adding a project"
         )
-
-    def test_chatview_persists_new_project_and_refreshes_parent(self):
-        """The inline path form should save project settings and refresh project options."""
-        chat_content = CHATVIEW_FILE.read_text()
-        app_content = APP_FILE.read_text()
-
-        assert "onProjectsChange" in chat_content, (
-            "ChatView should accept a callback for refreshing parent project state"
+        assert "handleProjectSelect" not in content, (
+            "ChatView should not have a handler for changing the session's project"
         )
-        assert "api.setProjectSettings({ project_path: path })" in chat_content, (
-            "ChatView should persist the typed path as a configured project"
-        )
-        assert "await onProjectsChange?.()" in chat_content, (
-            "ChatView should refresh configured projects after adding one"
-        )
-        assert "onProjectsChange={loadProjects}" in app_content, (
-            "App should wire ChatView project additions back to the project list loader"
+        assert "projectSelectorValue" not in content, (
+            "ChatView should not track a project-selector <select> value"
         )
 
-    def test_project_selector_new_project_css_exists(self):
-        """The new-project form should have stable layout styling."""
+    def test_project_selector_new_project_css_removed(self):
+        """CSS for the removed inline new-project form should be gone too."""
         content = CSS_FILE.read_text()
 
-        assert ".project-selector-new" in content, (
-            "CSS should style the inline new-project form"
+        assert ".project-selector-new" not in content, (
+            "CSS for the removed inline new-project form should be deleted"
         )
-        assert ".project-selector-error" in content, (
-            "CSS should style validation errors without layout overlap"
+        assert ".project-selector-error" not in content, (
+            "CSS for the removed new-project validation error should be deleted"
         )
+
+
+class TestNewSessionRequiresProjectChoice:
+    """The project a new session runs against must be chosen explicitly.
+
+    Regression coverage for: the header's "New" button silently defaulted to
+    whichever project was configured first, so every new session (and its
+    tab grouping) ended up stuck on that one project.
+    """
+
+    def test_new_session_handler_has_no_default_project_fallback(self):
+        """handleNewSession must require an explicit project, not default to one."""
+        content = APP_FILE.read_text()
+
+        assert "Default to first configured project" not in content, (
+            "App should no longer silently default a new session to the first project"
+        )
+        assert "projects.length > 0 ? projects[0].project_path" not in content, (
+            "App should no longer fall back to the first configured project"
+        )
+
+    def test_new_session_control_is_a_project_picker(self):
+        """The header's new-session control must be a project-picking dropdown."""
+        content = APP_FILE.read_text()
+
+        assert "new-session-select" in content, (
+            "App should render a project-picking control for new sessions"
+        )
+        assert "new-session-btn" not in content, (
+            "the old unconditional New button should be removed"
+        )
+
+
+class TestFollowUpSettingsDefaults:
+    """Follow-up tasks should default agent, verification, slack, and worktree to the initial task."""
+
+    def test_initial_task_start_records_session_settings(self):
+        """startTaskRequest should record session settings when not a followup."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "setSessionCodingAgent(codingAccount.name);" in content
+        assert "setSessionVerificationAgent(verificationAccount ? verificationAccount.name : null);" in content
+
+    def test_chatview_restores_session_settings(self):
+        """ChatView should restore verification_account, notify_slack, and use_worktree."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "setSessionVerificationAgent(s.verification_account);" in content
+        assert "setPostToSlack(s.notify_slack);" in content
+        assert "setUseWorktree(s.use_worktree);" in content
+
+    def test_sending_clears_composer_draft(self):
+        """Sending a message clears composer draft so follow-ups use session settings."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "clearComposerDraft(sessionId);" in content

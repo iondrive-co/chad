@@ -6,6 +6,15 @@ interface Props {
   connected: boolean;
 }
 
+// Account names become directory names on the server, which restricts them to
+// this charset. Checked here so a bad name gets an explanation instead of the
+// bare "HTTP 422" a schema rejection surfaces.
+const ACCOUNT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const ACCOUNT_NAME_HINT = "Names start with a letter or digit and use only letters, digits, . _ -";
+// The tray has room for three characters per account, so that is all a code is.
+const ACCOUNT_CODE_RE = /^[A-Za-z0-9]{1,3}$/;
+const ACCOUNT_CODE_HINT = "A code is 1 to 3 letters or digits";
+
 export function ProvidersPanel({ api, connected }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -18,6 +27,10 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [loginKeys, setLoginKeys] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [editingCode, setEditingCode] = useState<string | null>(null);
+  const [codeValue, setCodeValue] = useState("");
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [refreshingUsage, setRefreshingUsage] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -134,6 +147,10 @@ export function ProvidersPanel({ api, connected }: Props) {
   const handleAdd = useCallback(async () => {
     if (!newName.trim()) return;
     const name = newName.trim();
+    if (!ACCOUNT_NAME_RE.test(name)) {
+      flash(ACCOUNT_NAME_HINT);
+      return;
+    }
     const provider = newType;
     setAdding(true);
     setStatus(null);
@@ -158,6 +175,47 @@ export function ProvidersPanel({ api, connected }: Props) {
       await handleLogin(name);
     }
   }, [api, newName, newType, localEndpoint, refresh, flash, handleLogin]);
+
+  const handleRename = useCallback(async (name: string) => {
+    const target = renameValue.trim();
+    if (!target || target === name) {
+      setRenaming(null);
+      return;
+    }
+    if (!ACCOUNT_NAME_RE.test(target)) {
+      flash(ACCOUNT_NAME_HINT);
+      return;
+    }
+    try {
+      await api.renameAccount(name, target);
+      setRenaming(null);
+      flash(`Renamed to ${target}`);
+      await refresh();
+    } catch (e) {
+      // The input stays open so the name can be corrected in place.
+      flash(e instanceof Error ? e.message : "Rename failed");
+    }
+  }, [api, renameValue, refresh, flash]);
+
+  const handleSetCode = useCallback(async (name: string) => {
+    const target = codeValue.trim().toUpperCase();
+    if (!target) {
+      setEditingCode(null);
+      return;
+    }
+    if (!ACCOUNT_CODE_RE.test(target)) {
+      flash(ACCOUNT_CODE_HINT);
+      return;
+    }
+    try {
+      await api.setAccountCode(name, target);
+      setEditingCode(null);
+      flash(`Tray code set to ${target}`);
+      await refresh();
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "Failed to set the code");
+    }
+  }, [api, codeValue, refresh, flash]);
 
   const handleDelete = useCallback(async (name: string) => {
     try {
@@ -210,8 +268,14 @@ export function ProvidersPanel({ api, connected }: Props) {
     } catch { /* */ }
   }, [api, refresh, flash]);
 
+  // A window the provider answered about and did not meter: OpenAI dropped the
+  // Codex 5-hour limit for Business/Team plans on 2026-07-12, so a team account
+  // reports a weekly pool and nothing else. Leaving the row out made a plan's
+  // own limits look like a bug in Chad.
+  const NO_LIMIT = "No limit on this account";
+
   const formatUsage = (pct: number | null, eta: string | null): string => {
-    if (pct === null) return "—";
+    if (pct === null) return NO_LIMIT;
     const bar = Math.round(pct / 10);
     const filled = "█".repeat(bar);
     const empty = "░".repeat(10 - bar);
@@ -254,8 +318,58 @@ export function ProvidersPanel({ api, connected }: Props) {
           return (
             <div key={a.name} className={`account-card ${a.ready ? "" : "not-ready"}`}>
               <div className="account-header">
-                <span className="account-name">{a.name}</span>
+                {renaming === a.name ? (
+                  <span className="account-rename">
+                    <input
+                      type="text"
+                      value={renameValue}
+                      autoFocus
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleRename(a.name);
+                        if (e.key === "Escape") setRenaming(null);
+                      }}
+                      disabled={dis}
+                    />
+                    <button onClick={() => handleRename(a.name)} disabled={dis}>Save</button>
+                    <button className="link-btn" onClick={() => setRenaming(null)}>Cancel</button>
+                  </span>
+                ) : (
+                  <button
+                    className="account-name account-name-btn"
+                    title="Rename this account"
+                    onClick={() => { setRenaming(a.name); setRenameValue(a.name); }}
+                    disabled={dis}
+                  >
+                    {a.name}
+                  </button>
+                )}
                 <span className="account-provider">{a.provider}</span>
+                {editingCode === a.name ? (
+                  <input
+                    className="account-code-input"
+                    type="text"
+                    value={codeValue}
+                    autoFocus
+                    maxLength={3}
+                    onChange={(e) => setCodeValue(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSetCode(a.name);
+                      if (e.key === "Escape") setEditingCode(null);
+                    }}
+                    onBlur={() => handleSetCode(a.name)}
+                    disabled={dis}
+                  />
+                ) : (
+                  <button
+                    className="account-code"
+                    title="The code this account shows under in the tray — click to change"
+                    onClick={() => { setEditingCode(a.name); setCodeValue(a.code); }}
+                    disabled={dis}
+                  >
+                    {a.code || "—"}
+                  </button>
+                )}
                 <span className={`account-status ${a.ready ? "ready" : ""}`}>
                   {a.ready ? "Ready" : "Logged out"}
                 </span>
@@ -348,21 +462,23 @@ export function ProvidersPanel({ api, connected }: Props) {
                   </div>
                 )}
 
-                {/* Usage display */}
+                {/* Usage display. Both windows are listed whenever the account
+                    reports either, so a window with no limit on it says so
+                    rather than going quietly missing. */}
                 {usage && !usage.logged_out && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
                   <div className="account-usage">
-                    {usage.session_usage_pct !== null && (
-                      <div className="usage-row">
-                        <span className="field-label">Session:</span>
-                        <span className="usage-bar">{formatUsage(usage.session_usage_pct, usage.session_reset_eta)}</span>
-                      </div>
-                    )}
-                    {usage.weekly_usage_pct !== null && (
-                      <div className="usage-row">
-                        <span className="field-label">Weekly:</span>
-                        <span className="usage-bar">{formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}</span>
-                      </div>
-                    )}
+                    <div className="usage-row">
+                      <span className="field-label">Session:</span>
+                      <span className={usage.session_usage_pct === null ? "usage-absent" : "usage-bar"}>
+                        {formatUsage(usage.session_usage_pct, usage.session_reset_eta)}
+                      </span>
+                    </div>
+                    <div className="usage-row">
+                      <span className="field-label">Weekly:</span>
+                      <span className={usage.weekly_usage_pct === null ? "usage-absent" : "usage-bar"}>
+                        {formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}
+                      </span>
+                    </div>
                     <div className="usage-row">
                       {formatAsOf(usage.usage_as_of) && (
                         <span className="usage-as-of">as of {formatAsOf(usage.usage_as_of)}</span>

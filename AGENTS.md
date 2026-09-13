@@ -74,7 +74,7 @@ UI: React (ui/) or app.py (CLI), both use server API
 
 | Class | Description |
 |-------|-------------|
-| ConfigManager | App config in `~/.chad.conf`. Password hashing, API key encryption, accounts, preferences. |
+| ConfigManager | App config in `~/.chad.conf`. Password hashing, API key encryption, accounts (incl. their model, reasoning and tray code), preferences. |
 
 ### Client Layer (`chad.ui.client`)
 
@@ -110,6 +110,10 @@ Built output: `ui/dist/` (served by API server at `/`).
 | Class | File | Description |
 |-------|------|-------------|
 | TerminalEmulator | `chad.ui.terminal_emulator` | Pyte-based emulator. ANSI to HTML with scrollback. |
+| Tray | `chad.ui.tray` | System tray icon and menu, no GUI toolkit. Backends: `linux` (D-Bus StatusNotifierItem via `tray/dbus.py`), `macos` (AppKit via ctypes), `windows` (Shell_NotifyIcon via ctypes). Icon drawn in `tray/icon.py`. Driven by `chad --tray`. `Tray(on_open=...)` rebuilds the menu each time a platform is about to draw it. |
+| UsageSummary | `chad.ui.tray.usage` | The read-only usage table at the top of the tray menu (`CWO  ███░░  54%  3h  ██░░░  44%  92h`) and the icon's tooltip. Read off the platform's threads, kept as a snapshot, and pushed when it changes. |
+| autostart | `chad.util.autostart` | Start-at-login entry: XDG autostart `.desktop`, launchd agent, or the HKCU Run key. Recorded in config as `autostart`, offered on first launch. |
+| UsageReading | `chad.util.account_usage` | One account's usage as its provider reports it. `read_account_usage()` is what both the usage endpoint and the tray menu call. |
 | ModelCatalog | `chad.util.model_catalog` | Discovers/caches models per provider from config files. |
 | AIToolInstaller | `chad.util.installer` | Installs CLIs (claude, codex, etc.) in `~/.chad/tools/`. |
 | ProcessRegistry | `chad.util.process_registry` | Process lifecycle with cleanup guarantees. SIGTERM→SIGKILL escalation. |

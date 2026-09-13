@@ -33,6 +33,9 @@ class Session:
     project_path: str | None = None
     coding_account: str | None = None
     coding_model: str | None = None
+    verification_account: str | None = None
+    notify_slack: bool = True
+    use_worktree: bool = True
     # Git worktree support
     worktree_path: Path | None = None
     worktree_branch: str | None = None
@@ -331,6 +334,9 @@ class SessionManager:
                 project_path = first_event.get("project_path")
                 coding_account = first_event.get("coding_account")
                 coding_model = first_event.get("coding_model")
+                verification_account = first_event.get("verification_account")
+                notify_slack = first_event.get("notify_slack", True)
+                use_worktree = first_event.get("use_worktree", True)
                 provider_type = first_event.get("coding_provider")
 
                 # Only sessions that did not finish cleanly should come back
@@ -370,6 +376,9 @@ class SessionManager:
                     project_path=project_path,
                     coding_account=coding_account,
                     coding_model=coding_model,
+                    verification_account=verification_account,
+                    notify_slack=notify_slack,
+                    use_worktree=use_worktree,
                     provider_type=provider_type,
                     status=status,
                     active=False,

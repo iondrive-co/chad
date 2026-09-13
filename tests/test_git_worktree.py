@@ -1,5 +1,6 @@
 """Tests for git worktree management."""
 
+import os
 import subprocess
 import threading
 import time
@@ -79,6 +80,22 @@ class TestGitWorktreeManager:
         """Test getting the main branch name."""
         mgr = GitWorktreeManager(git_repo)
         assert mgr.get_main_branch() == "main"
+
+    def test_create_worktree_skips_lfs_materialization(self, git_repo, monkeypatch):
+        """Task worktrees must not copy the repository's large LFS payloads."""
+        mgr = GitWorktreeManager(git_repo)
+        calls = []
+        original_run_git = mgr._run_git
+
+        def recording_run_git(*args, cwd=None, check=True, env=None):
+            calls.append((args, env))
+            return original_run_git(*args, cwd=cwd, check=check, env=env)
+
+        monkeypatch.setattr(mgr, "_run_git", recording_run_git)
+        mgr.create_worktree("lfs-skip")
+
+        add_call = next(env for args, env in calls if args[:2] == ("worktree", "add"))
+        assert add_call["GIT_LFS_SKIP_SMUDGE"] == "1"
 
     def test_create_worktree(self, git_repo):
         """Test creating a worktree."""
@@ -1457,3 +1474,64 @@ class TestWorktreeRegressionFixes:
         manager = GitWorktreeManager(repo)
         with pytest.raises(ValueError, match="no commits"):
             manager.create_worktree("nocommits")
+
+    def test_clean_stale_locks_removes_old_lock_files(self, git_repo):
+        """Stale lock files in git administrative directory must be cleaned."""
+        manager = GitWorktreeManager(git_repo)
+        lock_file = git_repo / ".git" / "index.lock"
+        lock_file.write_text("")
+        # Make the lock file timestamp older
+        old_time = time.time() - 10.0
+        os.utime(lock_file, (old_time, old_time))
+
+        cleaned = manager._clean_stale_locks(git_repo, min_age_seconds=2.0)
+        assert lock_file in cleaned
+        assert not lock_file.exists()
+
+    def test_commit_all_changes_recovers_from_stale_index_lock(self, git_repo):
+        """commit_all_changes must clean stale index.lock in worktree and succeed."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("locktest")
+        (worktree_path / "hello.txt").write_text("hello world\n")
+
+        # Plant a stale index.lock in the worktree's gitdir
+        git_dir = manager._get_git_dir_for_path(worktree_path)
+        assert git_dir is not None
+        lock_file = git_dir / "index.lock"
+        lock_file.write_text("")
+        old_time = time.time() - 10.0
+        os.utime(lock_file, (old_time, old_time))
+
+        success, error = manager.commit_all_changes("locktest", "commit with lock")
+        assert success is True, f"Expected success but got error: {error}"
+        assert not lock_file.exists()
+
+    def test_merge_to_main_recovers_from_stale_index_lock(self, git_repo):
+        """merge_to_main must clean stale index.lock and successfully merge."""
+        manager = GitWorktreeManager(git_repo)
+        worktree_path, _ = manager.create_worktree("mergelock")
+        (worktree_path / "feature.txt").write_text("feature content\n")
+
+        # Plant a stale index.lock in the main repository gitdir
+        main_lock = git_repo / ".git" / "index.lock"
+        main_lock.write_text("")
+        old_time = time.time() - 10.0
+        os.utime(main_lock, (old_time, old_time))
+
+        success, conflicts, error = manager.merge_to_main("mergelock", "merged feature")
+        assert success is True, f"Merge failed with error: {error}"
+        assert (git_repo / "feature.txt").read_text() == "feature content\n"
+        assert not main_lock.exists()
+
+    def test_run_git_strips_ambient_git_env(self, git_repo, monkeypatch):
+        """_run_git must strip ambient GIT_DIR, GIT_WORK_TREE, and GIT_INDEX_FILE."""
+        manager = GitWorktreeManager(git_repo)
+        monkeypatch.setenv("GIT_DIR", "/fake/nonexistent/gitdir")
+        monkeypatch.setenv("GIT_WORK_TREE", "/fake/nonexistent/worktree")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/fake/nonexistent/index")
+        monkeypatch.setenv("GIT_PREFIX", "fake/")
+
+        # rev-parse --git-dir should still succeed because ambient vars were stripped
+        res = manager._run_git("rev-parse", "--git-dir", check=False)
+        assert res.returncode == 0
+        assert res.stdout.strip() == ".git"

@@ -16,7 +16,7 @@ from chad.util.providers import (
     build_local_env,
     discover_local_models,
     ClaudeCodeProvider,
-    GeminiCodeAssistProvider,
+    AntigravityProvider,
     LocalProvider,
     OpenAICodexProvider,
     MistralVibeProvider,
@@ -51,23 +51,22 @@ class TestProviderLoginUtil:
         auth.write_text(json.dumps({"tokens": {}}), encoding="utf-8")
         assert provider_login.is_logged_in("openai", "acct") is False
 
-    def test_is_logged_in_gemini_uses_isolated_home(self, tmp_path, monkeypatch):
-        """Gemini login state comes from the per-account home, never ~/.gemini."""
+    def test_is_logged_in_antigravity_is_per_account(self, tmp_path, monkeypatch):
+        """One account signing in must not make every other account ready."""
         from chad.util import provider_login
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
-        # A global ~/.gemini login must NOT make accounts appear logged in.
-        global_creds = tmp_path / ".gemini" / "oauth_creds.json"
-        global_creds.parent.mkdir(parents=True, exist_ok=True)
-        global_creds.write_text("{}", encoding="utf-8")
-        assert provider_login.is_logged_in("gemini", "acct") is False
+        assert provider_login.is_logged_in("antigravity", "acct") is False
 
-        creds = tmp_path / ".chad" / "gemini-homes" / "acct" / ".gemini" / "oauth_creds.json"
-        creds.parent.mkdir(parents=True, exist_ok=True)
-        creds.write_text("{}", encoding="utf-8")
-        assert provider_login.is_logged_in("gemini", "acct") is True
-        assert provider_login.is_logged_in("gemini", "other") is False
+        credential = tmp_path / ".chad" / "antigravity-homes" / "acct" / "credential.json"
+        credential.parent.mkdir(parents=True, exist_ok=True)
+        credential.write_text(
+            json.dumps({"token": {"refresh_token": "1//refresh"}}), encoding="utf-8"
+        )
+
+        assert provider_login.is_logged_in("antigravity", "acct") is True
+        assert provider_login.is_logged_in("antigravity", "other") is False
 
     def test_is_logged_in_qwen_uses_isolated_home(self, tmp_path, monkeypatch):
         """Qwen login state comes from the per-account home, never ~/.qwen."""
@@ -104,16 +103,16 @@ class TestProviderLoginUtil:
         assert provider_login.is_logged_in("mistral", "acct") is True
         assert provider_login.is_logged_in("mistral", "other") is False
 
-    def test_tty_login_gemini_uses_isolated_home(self, tmp_path, monkeypatch):
-        """Gemini login runs with GEMINI_CLI_HOME so creds land in the account home."""
+    def test_tty_login_antigravity_uses_isolated_home(self, tmp_path, monkeypatch):
+        """Antigravity login runs with the same environment its runs get."""
         from chad.util import provider_login
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
-        cmd, extra_env = provider_login._tty_login_command("gemini", "acct", "/fake/gemini")
-        assert cmd == ["/fake/gemini", "-y"]
-        expected = tmp_path / ".chad" / "gemini-homes" / "acct"
-        assert extra_env["GEMINI_CLI_HOME"] == str(expected)
+        cmd, extra_env = provider_login._tty_login_command("antigravity", "acct", "/fake/agy")
+        assert cmd == ["/fake/agy"]
+        expected = tmp_path / ".chad" / "antigravity-homes" / "acct"
+        assert extra_env["HOME"] == str(expected)
         assert expected.is_dir()
 
     def test_tty_login_qwen_uses_isolated_home(self, tmp_path, monkeypatch):
@@ -128,6 +127,24 @@ class TestProviderLoginUtil:
         assert extra_env["HOME"] == str(expected)
         assert expected.is_dir()
 
+    def test_tty_login_claude_runs_the_login_command(self, tmp_path, monkeypatch):
+        """Claude login runs the CLI's login command, not the bare agent TUI.
+
+        Launching bare ``claude`` opens a normal coding session. With a dead
+        token still on disk the CLI reports itself logged in as whoever wrote
+        it, so the user was dropped into another account's session with no way
+        to sign in and no usage to read.
+        """
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        cmd, extra_env = provider_login._tty_login_command("anthropic", "acct", "/fake/claude")
+        assert cmd == ["/fake/claude", "auth", "login"]
+        expected = tmp_path / ".chad" / "claude-configs" / "acct"
+        assert extra_env["CLAUDE_CONFIG_DIR"] == str(expected)
+        assert expected.is_dir()
+
     def test_run_login_mistral_writes_isolated_env(self, tmp_path, monkeypatch):
         """The Mistral API key is written to the account's VIBE_HOME, not ~/.vibe."""
         from chad.util import provider_login
@@ -137,7 +154,7 @@ class TestProviderLoginUtil:
         monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, "/fake/vibe")
+            AIToolInstaller, "install_latest", lambda self, key: (True, "/fake/vibe")
         )
         ok, msg = provider_login.run_login("mistral", "acct", api_key="sk-test")
         assert ok is True
@@ -149,18 +166,96 @@ class TestProviderLoginUtil:
         assert provider_login.is_logged_in("mistral", "acct") is True
         assert provider_login.is_logged_in("mistral", "other") is False
 
-    def test_ensure_cli_delegates_to_installer(self, monkeypatch):
+    def test_account_home_covers_every_credentialed_provider(self, tmp_path, monkeypatch):
+        """Every provider that isolates credentials must report its account dir.
+
+        The rename path moves this directory; a provider missing from the map
+        would keep its login under the old name and come back logged out.
+        """
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        chad = tmp_path / ".chad"
+        assert provider_login.account_home("anthropic", "a") == chad / "claude-configs" / "a"
+        assert provider_login.account_home("openai", "a") == chad / "codex-homes" / "a"
+        assert provider_login.account_home("antigravity", "a") == chad / "antigravity-homes" / "a"
+        assert provider_login.account_home("qwen", "a") == chad / "qwen-homes" / "a"
+        assert provider_login.account_home("kimi", "a") == chad / "kimi-homes" / "a"
+        assert provider_login.account_home("mistral", "a") == chad / "vibe-homes" / "a"
+        # A local account is driven through the Qwen CLI, so it shares that home.
+        assert provider_login.account_home("local", "a") == chad / "qwen-homes" / "a"
+        # The mock provider keeps no credentials.
+        assert provider_login.account_home("mock", "a") is None
+
+    def test_rename_account_home_moves_the_login(self, tmp_path, monkeypatch):
+        """A renamed account keeps its credentials — the directory moves with it."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        old_home = tmp_path / ".chad" / "claude-configs" / "old"
+        old_home.mkdir(parents=True)
+        (old_home / ".credentials.json").write_text("{}", encoding="utf-8")
+
+        provider_login.rename_account_home("anthropic", "old", "new")
+
+        assert not old_home.exists()
+        new_home = tmp_path / ".chad" / "claude-configs" / "new"
+        assert (new_home / ".credentials.json").read_text(encoding="utf-8") == "{}"
+
+    def test_rename_account_home_without_credentials_is_a_no_op(self, tmp_path, monkeypatch):
+        """A never-logged-in account has no directory to move."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        provider_login.rename_account_home("anthropic", "old", "new")
+        provider_login.rename_account_home("mock", "old", "new")
+        assert not (tmp_path / ".chad" / "claude-configs" / "new").exists()
+
+    def test_rename_account_home_refuses_to_overwrite(self, tmp_path, monkeypatch):
+        """Moving onto an existing home would destroy that account's login."""
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        (tmp_path / ".chad" / "claude-configs" / "old").mkdir(parents=True)
+        (tmp_path / ".chad" / "claude-configs" / "new").mkdir(parents=True)
+
+        with pytest.raises(ValueError, match="new"):
+            provider_login.rename_account_home("anthropic", "old", "new")
+        assert (tmp_path / ".chad" / "claude-configs" / "old").exists()
+
+    def test_ensure_cli_installs_the_latest_for_every_provider(self, monkeypatch):
+        """Setting an account up settles the CLI version, for all of them.
+
+        A CLI too old to authorize is the failure this prevents, and the CLIs'
+        own updaters cannot: they npm install -g over an install Chad manages
+        and fail in front of the user.
+        """
         from chad.util import provider_login
         from chad.util.installer import AIToolInstaller
 
         seen = []
         monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool",
+            AIToolInstaller, "install_latest",
             lambda self, key: seen.append(key) or (True, f"/fake/{key}"),
         )
-        ok, path = provider_login.ensure_cli("openai")
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool",
+            lambda self, key: pytest.fail("setup must not settle for whatever is installed"),
+        )
+
+        ok, _path = provider_login.ensure_cli("openai")
+
         assert ok is True
         assert seen == ["codex"]
+
+        for provider, tool_key in provider_login.PROVIDER_TOOL_KEYS.items():
+            seen.clear()
+            assert provider_login.ensure_cli(provider)[0] is True
+            assert seen == [tool_key], provider
 
     def test_run_login_claude_new_terminal_spawns_window(self, tmp_path, monkeypatch):
         """Claude (TTY UI) login opens a terminal window when new_terminal is set."""
@@ -169,7 +264,7 @@ class TestProviderLoginUtil:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+            AIToolInstaller, "install_latest", lambda self, key: (True, f"/fake/{key}")
         )
         spawned = []
         monkeypatch.setattr(
@@ -180,7 +275,7 @@ class TestProviderLoginUtil:
         assert ok is True
         assert "terminal" in msg.lower()
         cmd, extra_env = spawned[0]
-        assert cmd[0] == "/fake/claude"
+        assert cmd == ["/fake/claude", "auth", "login"]
         assert "CLAUDE_CONFIG_DIR" in extra_env
 
     def test_run_login_claude_new_terminal_unavailable(self, tmp_path, monkeypatch):
@@ -190,7 +285,7 @@ class TestProviderLoginUtil:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+            AIToolInstaller, "install_latest", lambda self, key: (True, f"/fake/{key}")
         )
         monkeypatch.setattr(provider_login, "_spawn_terminal", lambda cmd, env: False)
         ok, msg = provider_login.run_login("anthropic", "acct", new_terminal=True)
@@ -204,7 +299,7 @@ class TestProviderLoginUtil:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
-            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+            AIToolInstaller, "install_latest", lambda self, key: (True, f"/fake/{key}")
         )
         calls = []
 
@@ -218,7 +313,7 @@ class TestProviderLoginUtil:
         monkeypatch.setattr("chad.util.provider_login.subprocess.run", fake_run)
         # Not authenticated and no terminal spawned -> runs the CLI directly.
         provider_login.run_login("anthropic", "acct", new_terminal=False)
-        assert calls and calls[0][0] == "/fake/claude"
+        assert calls and calls[0] == ["/fake/claude", "auth", "login"]
 
 
 class TestCreateProvider:
@@ -234,10 +329,10 @@ class TestCreateProvider:
         provider = create_provider(config)
         assert isinstance(provider, OpenAICodexProvider)
 
-    def test_create_gemini_provider(self):
-        config = ModelConfig(provider="gemini", model_name="default")
+    def test_create_antigravity_provider(self):
+        config = ModelConfig(provider="antigravity", model_name="default")
         provider = create_provider(config)
-        assert isinstance(provider, GeminiCodeAssistProvider)
+        assert isinstance(provider, AntigravityProvider)
 
     def test_create_mistral_provider(self):
         config = ModelConfig(provider="mistral", model_name="default")
@@ -1338,6 +1433,45 @@ class TestOpenAICodexProvider:
         mock_stdin.close.assert_called_once()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+    def test_get_response_retries_model_capacity_after_one_minute(self):
+        """A transient capacity error resumes the Codex thread with continue."""
+        events_by_attempt = [
+            [
+                {"type": "thread.started", "thread_id": "thread-capacity"},
+                {"type": "error", "message": "Selected model is at capacity. Please try a different model"},
+            ],
+            [
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "continued"}},
+            ],
+        ]
+
+        def fake_stream(_process, _fd, on_chunk, _timeout, idle_timeout=None, idle_timeout_callback=None):
+            for event in events_by_attempt.pop(0):
+                on_chunk(json.dumps(event) + "\n")
+            return "", False, False
+
+        first_process = Mock(stdin=Mock())
+        second_process = Mock(stdin=Mock())
+        with patch("chad.util.providers._start_pty_process", side_effect=[
+            (first_process, 11),
+            (second_process, 12),
+        ]) as mock_start, patch(
+            "chad.util.providers._stream_pty_output", side_effect=fake_stream
+        ), patch("chad.util.providers.time.sleep") as mock_sleep:
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+
+            assert provider.get_response(timeout=1.0) == "continued"
+
+        mock_sleep.assert_called_once_with(60.0)
+        assert mock_start.call_count == 2
+        first_process.stdin.write.assert_called_once_with(b"Hello")
+        second_process.stdin.write.assert_called_once_with(b"continue")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.util.providers.select.select")
     @patch("chad.util.providers.os.read")
     @patch("chad.util.providers.os.close")
@@ -2381,146 +2515,485 @@ class TestKimiCodeProvider:
         assert str(config_dir).startswith(str(Path.home()))
 
 
-class TestGeminiCodeAssistProvider:
-    """Tests for GeminiCodeAssistProvider."""
+class TestAntigravityCredentials:
+    """Antigravity keeps one login in the OS keyring, under a key every account
+    shares. Chad therefore owns that slot: each account's credential is kept
+    beside its home and made active just before that account runs. These lock
+    the behaviour that makes several Google accounts possible at all.
+    """
+
+    CREDENTIAL = json.dumps({
+        "token": {
+            "access_token": "ya29.a",
+            "token_type": "Bearer",
+            "refresh_token": "1//refresh-a",
+            "expiry": "2026-09-13T18:23:41+10:00",
+        },
+        "auth_method": "consumer",
+        # id_token payload is {"email": "a@example.com"}
+        "id_token": "x.eyJlbWFpbCI6ImFAZXhhbXBsZS5jb20ifQ.y",
+    })
+
+    @pytest.fixture
+    def keyring_slot(self, monkeypatch):
+        """A keyring that lives for one test, and no Secret Service behind it."""
+        import sys
+        import types
+
+        from chad.util import providers
+
+        slot: dict[str, str] = {}
+        # The machine running the tests has a real Secret Service holding a real
+        # login; these tests must not read it, or write to it.
+        monkeypatch.setitem(
+            sys.modules, "secretstorage",
+            types.SimpleNamespace(dbus_init=lambda: object(), get_all_collections=lambda _c: []),
+        )
+
+        class _Keyring:
+            @staticmethod
+            def get_password(service, user):
+                return slot.get(f"{service}/{user}")
+
+            @staticmethod
+            def set_password(service, user, value):
+                slot[f"{service}/{user}"] = value
+
+            @staticmethod
+            def delete_password(service, user):
+                del slot[f"{service}/{user}"]
+
+        monkeypatch.setitem(__import__("sys").modules, "keyring", _Keyring)
+        assert providers.read_antigravity_keyring() == ""
+        return slot
+
+    def test_a_login_is_kept_for_the_account_that_made_it(
+        self, tmp_path, monkeypatch, keyring_slot
+    ):
+        """The CLI writes one shared slot; Chad claims it for one account."""
+        from chad.util import providers
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        assert providers.antigravity_logged_in("acct-a") is False
+
+        keyring_slot["gemini/antigravity"] = self.CREDENTIAL
+        assert providers.capture_antigravity_login("acct-a") is True
+
+        assert providers.antigravity_logged_in("acct-a") is True
+        assert providers.antigravity_logged_in("acct-b") is False
+        assert providers.antigravity_account_email("acct-a") == "a@example.com"
+
+    def test_capturing_nothing_is_not_a_login(self, tmp_path, monkeypatch, keyring_slot):
+        """A sign-in that never completed must not leave a ready account."""
+        from chad.util import providers
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        assert providers.capture_antigravity_login("acct-a") is False
+        assert providers.antigravity_logged_in("acct-a") is False
+
+    def test_each_account_runs_as_itself(self, tmp_path, monkeypatch, keyring_slot):
+        """Activating an account puts its own login where the CLI reads it.
+
+        Without this every account after the first would run as whoever signed
+        in last — the whole reason Chad holds these itself.
+        """
+        from chad.util import providers
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        other = self.CREDENTIAL.replace("1//refresh-a", "1//refresh-b")
+        for name, credential in (("acct-a", self.CREDENTIAL), ("acct-b", other)):
+            keyring_slot["gemini/antigravity"] = credential
+            assert providers.capture_antigravity_login(name) is True
+
+        assert providers.activate_antigravity_account("acct-a") is True
+        assert keyring_slot["gemini/antigravity"] == self.CREDENTIAL
+
+        assert providers.activate_antigravity_account("acct-b") is True
+        assert keyring_slot["gemini/antigravity"] == other
+
+        # An account that never signed in cannot be activated, and must not
+        # leave the previous account's login in place as if it were its own.
+        assert providers.activate_antigravity_account("acct-c") is False
+
+    def test_clearing_the_slot_loses_no_account(self, tmp_path, monkeypatch, keyring_slot):
+        """Chad clears the slot before a sign-in so the new login is unambiguous."""
+        from chad.util import providers
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+        keyring_slot["gemini/antigravity"] = self.CREDENTIAL
+        providers.capture_antigravity_login("acct-a")
+
+        providers.clear_antigravity_login()
+
+        assert providers.read_antigravity_keyring() == ""
+        # The account still has its login, because Chad kept it.
+        assert providers.antigravity_logged_in("acct-a") is True
+        assert providers.activate_antigravity_account("acct-a") is True
+        assert providers.read_antigravity_keyring() == self.CREDENTIAL
+
+    def test_login_is_found_outside_the_default_collection(self, tmp_path, monkeypatch):
+        """The CLI's login is not where python-keyring looks for it.
+
+        It writes to the Secret Service's login collection, while keyring only
+        searches the one the Secret Service calls default — a different
+        collection on a desktop that has both. Searching just the default one
+        left a completed sign-in invisible, and the login sat at "logging in"
+        until it timed out.
+        """
+        import sys
+        import types
+
+        from chad.util import providers
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        class _Item:
+            def __init__(self, secret):
+                self.secret = secret
+
+            def get_secret(self):
+                return self.secret
+
+            def set_secret(self, value):
+                self.secret = value
+
+            def delete(self):
+                self.secret = b""
+
+        class _Collection:
+            def __init__(self, items, locked=False):
+                self.items = items
+                self.locked = locked
+
+            def is_locked(self):
+                return self.locked
+
+            def search_items(self, attrs):
+                assert attrs == {"service": "gemini", "username": "antigravity"}
+                return list(self.items)
+
+        item = _Item(self.CREDENTIAL.encode())
+        collections = [
+            _Collection([], locked=True),          # a locked one must be skipped
+            _Collection([]),                        # the default: empty
+            _Collection([item]),                    # login: where the CLI wrote
+        ]
+        fake_secretstorage = types.SimpleNamespace(
+            dbus_init=lambda: object(),
+            get_all_collections=lambda _conn: collections,
+        )
+        monkeypatch.setitem(sys.modules, "secretstorage", fake_secretstorage)
+        monkeypatch.setitem(
+            sys.modules, "keyring",
+            types.SimpleNamespace(
+                get_password=lambda service, user: None,   # looks in the default only
+                set_password=lambda *a: pytest.fail("must reuse the CLI's own item"),
+                delete_password=lambda *a: None,
+            ),
+        )
+
+        assert providers.read_antigravity_keyring() == self.CREDENTIAL
+        assert providers.capture_antigravity_login("acct-a") is True
+        assert providers.antigravity_logged_in("acct-a") is True
+
+        # Clearing blanks that item rather than deleting it, so the next
+        # activation still has the CLI's own slot to write into.
+        providers.clear_antigravity_login()
+        assert providers.read_antigravity_keyring() == ""
+        assert item.get_secret() == b""
+
+        # Activating writes back into that same item, not a new one elsewhere.
+        other = self.CREDENTIAL.replace("1//refresh-a", "1//refresh-b")
+        providers.antigravity_credential_file("acct-b").parent.mkdir(parents=True, exist_ok=True)
+        providers.antigravity_credential_file("acct-b").write_text(other, encoding="utf-8")
+        assert providers.activate_antigravity_account("acct-b") is True
+        assert item.get_secret().decode() == other
+
+    def test_a_machine_without_a_keyring_reports_signed_out(self, tmp_path, monkeypatch):
+        """No keyring is a state to report, not a crash on every account poll."""
+        from chad.util import providers
+
+        import sys
+        import types
+
+        class _Broken:
+            @staticmethod
+            def get_password(service, user):
+                raise RuntimeError("no keyring daemon")
+
+            @staticmethod
+            def set_password(service, user, value):
+                raise RuntimeError("no keyring daemon")
+
+            @staticmethod
+            def delete_password(service, user):
+                raise RuntimeError("no keyring daemon")
+
+        monkeypatch.setitem(sys.modules, "keyring", _Broken)
+        monkeypatch.setitem(
+            sys.modules, "secretstorage",
+            types.SimpleNamespace(
+                dbus_init=lambda: (_ for _ in ()).throw(RuntimeError("no session bus")),
+                get_all_collections=lambda _c: [],
+            ),
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        assert providers.read_antigravity_keyring() == ""
+        assert providers.capture_antigravity_login("acct-a") is False
+        assert providers.antigravity_logged_in("acct-a") is False
+        providers.clear_antigravity_login()  # must not raise
+
+    def test_missing_keyring_module_reports_signed_out(self, tmp_path, monkeypatch):
+        """When keyring is not installed, accounts report signed out without raising."""
+        from chad.util import providers
+        from chad.server.services.task_executor import build_agent_command
+
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        monkeypatch.setitem(
+            sys.modules, "secretstorage",
+            types.SimpleNamespace(
+                dbus_init=lambda: (_ for _ in ()).throw(RuntimeError("no session bus")),
+                get_all_collections=lambda _c: [],
+            ),
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        assert providers.read_antigravity_keyring() == ""
+        assert providers.capture_antigravity_login("acct-a") is False
+        assert providers.activate_antigravity_account("acct-a") is False
+        assert providers.antigravity_logged_in("acct-a") is False
+        providers.clear_antigravity_login()  # must not raise
+
+        # build_agent_command must also not raise
+        cmd, env, _ = build_agent_command("antigravity", "acct-a", tmp_path)
+        assert len(cmd) > 0
+
+
+class TestAntigravityProvider:
+    """Tests for AntigravityProvider."""
 
     def test_get_env_isolates_account_home(self, tmp_path):
-        """Each Gemini account runs with its own GEMINI_CLI_HOME."""
+        """Each account runs with its own home, so conversations stay apart."""
         with patch("chad.util.providers.safe_home", return_value=tmp_path):
-            env_a = GeminiCodeAssistProvider(
-                ModelConfig(provider="gemini", model_name="default", account_name="acct-a")
+            env_a = AntigravityProvider(
+                ModelConfig(provider="antigravity", model_name="default", account_name="acct-a")
             )._get_env()
-            env_b = GeminiCodeAssistProvider(
-                ModelConfig(provider="gemini", model_name="default", account_name="acct-b")
+            env_b = AntigravityProvider(
+                ModelConfig(provider="antigravity", model_name="default", account_name="acct-b")
             )._get_env()
 
-        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
-        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
-        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
 
     def test_get_env_without_account_uses_real_home(self, tmp_path):
         """Without an account name the CLI keeps its default home."""
         with patch("chad.util.providers.safe_home", return_value=tmp_path):
-            env = GeminiCodeAssistProvider(
-                ModelConfig(provider="gemini", model_name="default")
+            env = AntigravityProvider(
+                ModelConfig(provider="antigravity", model_name="default")
             )._get_env()
-        assert env["GEMINI_CLI_HOME"] == str(tmp_path)
+        assert env["HOME"] == str(tmp_path)
+
+    def test_command_runs_one_turn_without_prompting(self):
+        """Print mode, machine-readable output, and no approval prompts.
+
+        Without --dangerously-skip-permissions the CLI soft-denies every tool
+        that wants approval and still exits 0, which reads as an agent that
+        refused to do the work.
+        """
+        from chad.util.providers import build_antigravity_command
+
+        cmd = build_antigravity_command("/fake/agy", "do the thing")
+
+        assert cmd[0] == "/fake/agy"
+        assert cmd[-2:] == ["-p", "do the thing"]
+        # No project given, so nothing to add to the workspace.
+        assert "--add-dir" not in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+        assert cmd[cmd.index("--print-timeout") + 1] == "86400s"
+
+    def test_command_carries_model_effort_and_conversation(self):
+        """Model, reasoning effort and multi-turn resume all reach the CLI."""
+        from chad.util.providers import build_antigravity_command
+
+        cmd = build_antigravity_command(
+            "/fake/agy",
+            "next turn",
+            model="gemini-3.1-pro-high",
+            reasoning_effort="high",
+            conversation_id="conv-1",
+            timeout=1800,
+        )
+
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro-high"
+        assert cmd[cmd.index("--effort") + 1] == "high"
+        assert cmd[cmd.index("--conversation") + 1] == "conv-1"
+        # The CLI gives up after 5 minutes unless told otherwise, which would
+        # kill a long task mid-run.
+        assert cmd[cmd.index("--print-timeout") + 1] == "1800s"
+
+    def test_command_omits_defaults(self):
+        """"default" is Chad's word for "unset" and must not reach the CLI."""
+        from chad.util.providers import build_antigravity_command
+
+        cmd = build_antigravity_command(
+            "/fake/agy", "hi", model="default", reasoning_effort="default"
+        )
+
+        assert "--model" not in cmd
+        assert "--effort" not in cmd
+
+    def test_every_run_path_builds_the_same_command(self, tmp_path, monkeypatch):
+        """A task and autoconfigure invoke the CLI the same way.
+
+        A path that builds its own invocation is one that can run with
+        different permissions, a different output format, or as the wrong
+        account.
+        """
+        from chad.server.services.autoconfigure_service import _build_command
+        from chad.server.services.task_executor import build_agent_command
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        task_cmd, task_env, _ = build_agent_command("antigravity", "acct", tmp_path)
+        auto_cmd, auto_env, _ = _build_command("antigravity", "acct", tmp_path, "hi")
+
+        home = str(tmp_path / ".chad" / "antigravity-homes" / "acct")
+        for cmd, env in ((task_cmd, task_env), (auto_cmd, auto_env)):
+            assert "agy" in Path(cmd[0]).name
+            assert "--dangerously-skip-permissions" in cmd
+            assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+            assert env["HOME"] == home
+
+    USAGE_OUTPUT = (
+        "Gemini Models\tWeekly Limit Remaining\t98%\t2026-09-20T08:11:58Z\n"
+        "Gemini Models\tFive Hour Limit Remaining\t92%\t2026-09-13T13:11:58Z\n"
+        "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-20T08:51:26Z\n"
+        "Claude and GPT models\tFive Hour Limit Remaining\t75%\t2026-09-13T13:51:26Z\n"
+    )
+
+    def test_usage_is_what_is_used_not_what_is_left(self):
+        """The CLI reports remaining; Chad shows used, and must not confuse them.
+
+        Reading 92% remaining as 92% used would have Chad switch away from an
+        account that has barely been touched.
+        """
+        from chad.util.providers import _parse_antigravity_usage
+
+        usage = _parse_antigravity_usage(self.USAGE_OUTPUT)
+
+        assert usage[("gemini models", "session")] == (8.0, "2026-09-13T13:11:58Z")
+        assert usage[("gemini models", "weekly")] == (2.0, "2026-09-20T08:11:58Z")
+        assert usage[("claude and gpt models", "session")][0] == 25.0
+        assert usage[("claude and gpt models", "weekly")][0] == 0.0
+
+    def test_usage_ignores_anything_that_is_not_a_limit(self):
+        """The CLI prints other lines too; only real limit rows count."""
+        from chad.util.providers import _parse_antigravity_usage
+
+        usage = _parse_antigravity_usage(
+            "Fetching usage...\n"
+            "Gemini Models\tSomething Else\t50%\t2026-09-20T08:11:58Z\n"
+            "Gemini Models\tWeekly Limit Remaining\tn/a\t2026-09-20T08:11:58Z\n"
+            + self.USAGE_OUTPUT
+        )
+
+        assert set(usage) == {
+            ("gemini models", "session"),
+            ("gemini models", "weekly"),
+            ("claude and gpt models", "session"),
+            ("claude and gpt models", "weekly"),
+        }
+
+    def test_usage_follows_the_model_the_account_runs(self, monkeypatch):
+        """Gemini and Claude/GPT have separate limits under one login."""
+        from chad.util import providers
+
+        monkeypatch.setattr(
+            providers, "read_antigravity_usage",
+            lambda account_name: providers._parse_antigravity_usage(self.USAGE_OUTPUT),
+        )
+
+        gemini = AntigravityProvider(ModelConfig(
+            provider="antigravity", model_name="gemini-3.1-pro-high", account_name="acct"
+        ))
+        claude = AntigravityProvider(ModelConfig(
+            provider="antigravity", model_name="claude-opus-4-6-thinking", account_name="acct"
+        ))
+
+        assert gemini.get_session_usage_percentage() == 8.0
+        assert claude.get_session_usage_percentage() == 25.0
+        assert gemini.get_weekly_usage_percentage() == 2.0
+        assert claude.get_weekly_usage_percentage() == 0.0
+        # An account left on "default" runs Gemini.
+        default = AntigravityProvider(ModelConfig(
+            provider="antigravity", model_name="default", account_name="acct"
+        ))
+        assert default.get_session_usage_percentage() == 8.0
+
+    def test_usage_that_cannot_be_read_is_not_reported_as_zero(self, monkeypatch):
+        """Unknown usage reads as unknown, never as "plenty of room left"."""
+        from chad.util import providers
+
+        monkeypatch.setattr(providers, "read_antigravity_usage", lambda account_name: {})
+        provider = AntigravityProvider(ModelConfig(
+            provider="antigravity", model_name="default", account_name="acct"
+        ))
+
+        assert provider.supports_usage_reporting() is True
+        assert provider.get_session_usage_percentage() is None
+        assert provider.get_weekly_usage_percentage() is None
+        assert provider.get_session_reset_eta() is None
+
+    def test_usage_reports_when_each_limit_resets(self, monkeypatch):
+        """The tray shows how long until the limit comes back."""
+        from chad.util import providers
+
+        monkeypatch.setattr(
+            providers, "read_antigravity_usage",
+            lambda account_name: providers._parse_antigravity_usage(self.USAGE_OUTPUT),
+        )
+        provider = AntigravityProvider(ModelConfig(
+            provider="antigravity", model_name="default", account_name="acct"
+        ))
+
+        # Both are in the past for a test run, which floors at zero rather
+        # than reporting a negative wait.
+        assert provider.get_session_reset_eta() is not None
+        assert provider.get_weekly_reset_eta() is not None
 
     def test_send_message_includes_system_prompt(self):
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
+        provider = AntigravityProvider(
+            ModelConfig(provider="antigravity", model_name="default")
+        )
         provider.system_prompt = "system"
         provider.send_message("hello")
         assert "system" in provider.current_message
         assert "hello" in provider.current_message
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
-    @patch("chad.util.providers.select.select")
-    @patch("chad.util.providers.os.read")
-    @patch("chad.util.providers.os.close")
-    @patch("chad.util.providers.pty.openpty")
-    @patch("subprocess.Popen")
-    def test_get_response_success(self, mock_popen, mock_openpty, mock_close, mock_read, mock_select):
-        mock_openpty.return_value = (10, 11)
-
-        mock_stdin = Mock()
-        mock_process = Mock()
-        mock_process.stdin = mock_stdin
-        mock_process.poll.side_effect = [None, 0, 0, 0]
-        mock_popen.return_value = mock_process
-
-        mock_select.side_effect = [([10], [], []), ([], [], [])]
-        mock_read.side_effect = [b"result\n", b""]
-
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
-        provider.project_path = "/tmp/test"
+    def test_system_prompt_is_not_repeated_mid_conversation(self):
+        """The CLI keeps the conversation, so resending it would waste a turn."""
+        provider = AntigravityProvider(
+            ModelConfig(provider="antigravity", model_name="default")
+        )
+        provider.system_prompt = "system"
+        provider.conversation_id = "conv-1"
         provider.send_message("hello")
-
-        response = provider.get_response(timeout=5.0)
-        assert "result" in response
-        mock_popen.assert_called_once()
-        cmd = mock_popen.call_args[0][0]
-        assert "-p" in cmd
-        assert "hello" in cmd[cmd.index("-p") + 1]
-        assert provider.current_message is None
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
-    @patch("chad.util.providers.select.select")
-    @patch("chad.util.providers.os.read")
-    @patch("chad.util.providers.os.close")
-    @patch("chad.util.providers.pty.openpty")
-    @patch("subprocess.Popen")
-    def test_get_response_resume_uses_non_interactive_prompt(
-        self, mock_popen, mock_openpty, mock_close, mock_read, mock_select
-    ):
-        mock_openpty.return_value = (10, 11)
-
-        mock_stdin = Mock()
-        mock_process = Mock()
-        mock_process.stdin = mock_stdin
-        mock_process.poll.side_effect = [None, 0, 0, 0]
-        mock_popen.return_value = mock_process
-
-        mock_select.side_effect = [([10], [], []), ([], [], [])]
-        mock_read.side_effect = [b"result\n", b""]
-
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
-        provider.project_path = "/tmp/test"
-        provider.session_id = "existing-session"
-        provider.send_message("continue")
-
-        response = provider.get_response(timeout=5.0)
-        assert "result" in response
-        cmd = mock_popen.call_args[0][0]
-        assert "--resume" in cmd
-        assert "existing-session" in cmd
-        assert "-p" in cmd
-        assert "continue" in cmd[cmd.index("-p") + 1]
-        assert provider.current_message is None
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
-    @patch("chad.util.providers.select.select")
-    @patch("chad.util.providers.os.read")
-    @patch("chad.util.providers.os.close")
-    @patch("chad.util.providers.pty.openpty")
-    @patch("time.time")
-    @patch("subprocess.Popen")
-    def test_get_response_timeout(self, mock_popen, mock_time, mock_openpty, mock_close, mock_read, mock_select):
-        mock_openpty.return_value = (10, 11)
-
-        mock_stdin = Mock()
-        mock_process = Mock()
-        mock_process.stdin = mock_stdin
-        mock_process.poll.return_value = None
-        mock_process.kill = Mock()
-        mock_process.wait = Mock()
-        mock_popen.return_value = mock_process
-
-        mock_select.return_value = ([], [], [])
-        mock_time.side_effect = [0, 0, 2000, 2000]
-
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
-        provider.send_message("hello")
-        response = provider.get_response(timeout=5)
-        assert "timed out" in response
-        assert provider.current_message is None
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
-    @patch("chad.util.providers.os.close")
-    @patch("chad.util.providers.pty.openpty")
-    @patch("subprocess.Popen")
-    def test_get_response_missing_cli(self, mock_popen, mock_openpty, mock_close):
-        mock_openpty.return_value = (10, 11)
-        mock_popen.side_effect = FileNotFoundError("missing")
-
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
-        provider.send_message("hello")
-        response = provider.get_response(timeout=5)
-        assert "Failed to run Gemini" in response
-        assert provider.current_message is None
-
-    def test_get_response_no_message(self):
-        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
-        assert provider.get_response(timeout=1) == ""
+        assert provider.current_message == "hello"
 
 
 class TestWindowsCodexStallHandling:
@@ -2805,17 +3278,17 @@ class TestProviderGetSessionId:
         provider.thread_id = "thread_abc123"
         assert provider.get_session_id() == "thread_abc123"
 
-    def test_gemini_provider_returns_session_id(self):
-        """Gemini provider returns session_id when set."""
-        config = ModelConfig(provider="gemini", model_name="default")
-        provider = GeminiCodeAssistProvider(config)
+    def test_antigravity_provider_returns_session_id(self):
+        """Antigravity reports the conversation id it resumes with."""
+        config = ModelConfig(provider="antigravity", model_name="default")
+        provider = AntigravityProvider(config)
 
         # Initially None
         assert provider.get_session_id() is None
 
-        # After setting session_id
-        provider.session_id = "gemini_session_xyz"
-        assert provider.get_session_id() == "gemini_session_xyz"
+        # After a turn reports its conversation
+        provider.conversation_id = "conv-xyz"
+        assert provider.get_session_id() == "conv-xyz"
 
     def test_qwen_provider_returns_session_id(self):
         """Qwen provider returns session_id when set."""
@@ -2865,12 +3338,6 @@ class TestProviderUsageReporting:
         provider = OpenAICodexProvider(config)
         assert provider.supports_usage_reporting() is True
         # get_session_usage_percentage returns None when session files not available
-
-    def test_gemini_provider_supports_usage_reporting(self):
-        """Gemini provider supports usage percentage reporting via local session files."""
-        config = ModelConfig(provider="gemini", model_name="default")
-        provider = GeminiCodeAssistProvider(config)
-        assert provider.supports_usage_reporting() is True
 
     def test_qwen_provider_supports_usage_reporting(self):
         """Qwen provider supports usage percentage reporting via local session files."""
@@ -2925,27 +3392,27 @@ class TestProviderQuotaDetection:
 
     def test_base_provider_detects_generic_patterns(self):
         """Base AIProvider.is_quota_exhausted uses handoff patterns."""
-        config = ModelConfig(provider="gemini", model_name="default")
-        provider = GeminiCodeAssistProvider(config)
+        config = ModelConfig(provider="antigravity", model_name="default")
+        provider = AntigravityProvider(config)
         result = provider.is_quota_exhausted("Error: insufficient credits")
         assert result == "session_limit_reached"
 
     def test_base_provider_returns_none_for_normal_output(self):
         """Base AIProvider.is_quota_exhausted returns None for normal text."""
-        config = ModelConfig(provider="gemini", model_name="default")
-        provider = GeminiCodeAssistProvider(config)
+        config = ModelConfig(provider="antigravity", model_name="default")
+        provider = AntigravityProvider(config)
         result = provider.is_quota_exhausted("Analyzing the codebase structure...")
         assert result is None
 
     def test_all_providers_have_is_quota_exhausted(self):
         """Every provider class has an is_quota_exhausted method."""
         from chad.util.providers import (
-            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            ClaudeCodeProvider, OpenAICodexProvider, AntigravityProvider,
             QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         )
         provider_classes = [
-            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            ClaudeCodeProvider, OpenAICodexProvider, AntigravityProvider,
             QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         ]
@@ -2955,12 +3422,12 @@ class TestProviderQuotaDetection:
     def test_all_providers_have_weekly_usage(self):
         """Every provider class has a get_weekly_usage_percentage method."""
         from chad.util.providers import (
-            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            ClaudeCodeProvider, OpenAICodexProvider, AntigravityProvider,
             QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         )
         provider_classes = [
-            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            ClaudeCodeProvider, OpenAICodexProvider, AntigravityProvider,
             QwenCodeProvider, KimiCodeProvider,
             MistralVibeProvider, MockProvider,
         ]
@@ -2969,8 +3436,9 @@ class TestProviderQuotaDetection:
 
     def test_providers_without_weekly_return_none(self):
         """Providers that don't have weekly data return None."""
+        # Antigravity is not in this list: it reports both limits through
+        # its own `/usage` command.
         providers = [
-            GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default")),
             QwenCodeProvider(ModelConfig(provider="qwen", model_name="default")),
             MistralVibeProvider(ModelConfig(provider="mistral", model_name="default")),
             KimiCodeProvider(ModelConfig(provider="kimi", model_name="default")),
@@ -3253,31 +3721,6 @@ class TestUsagePercentageCalculation:
         assert weekly_pct is None  # null value → None, not an error
         assert weekly_eta is None
 
-    def test_gemini_usage_not_logged_in(self, tmp_path):
-        """Gemini returns None when oauth credentials don't exist."""
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_gemini_usage_percentage("")
-            assert result is None
-
-    def test_gemini_usage_gated_on_isolated_account_home(self, tmp_path):
-        """A named account's usage is gated on ITS creds, not the global ~/.gemini."""
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            # Global creds must not make the account look logged in
-            assert _get_gemini_usage_percentage("acct") is None
-
-            acct_dir = tmp_path / ".chad" / "gemini-homes" / "acct" / ".gemini"
-            acct_dir.mkdir(parents=True)
-            (acct_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-            assert _get_gemini_usage_percentage("acct") == 0.0
-
     def test_qwen_usage_gated_on_isolated_account_home(self, tmp_path):
         """A named account's usage is gated on ITS creds, not the global ~/.qwen."""
         from chad.util.providers import _get_qwen_usage_percentage
@@ -3310,72 +3753,6 @@ class TestUsagePercentageCalculation:
             acct_dir.mkdir(parents=True)
             (acct_dir / ".env").write_text("MISTRAL_API_KEY='acct-key'\n")
             assert _get_mistral_usage_percentage("acct") == 0.0
-
-    def test_gemini_usage_logged_in_no_usage(self, tmp_path):
-        """Gemini returns 0% when logged in but no usage JSONL exists."""
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_gemini_usage_percentage("")
-            assert result == 0.0
-
-    def test_gemini_usage_counts_today_requests(self, tmp_path):
-        """Gemini correctly counts today's requests from usage JSONL."""
-        import json
-        from datetime import datetime, timezone
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-
-        # Create usage JSONL file
-        chad_dir = tmp_path / ".chad"
-        chad_dir.mkdir(parents=True, exist_ok=True)
-
-        today = datetime.now(timezone.utc).isoformat()
-        yesterday = "2020-01-01T12:00:00+00:00"
-
-        lines = [
-            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100, "output_tokens": 50}),
-            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 200, "output_tokens": 80}),
-            json.dumps({"timestamp": yesterday, "model": "gemini-pro", "input_tokens": 50}),  # Not today
-        ]
-        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_gemini_usage_percentage("")
-            # 2 requests today out of the 2000/day free-tier limit = 0.1%
-            assert result == pytest.approx(0.1, abs=0.01)
-
-    def test_append_gemini_usage_writes_jsonl(self, tmp_path):
-        """_append_gemini_usage writes a JSONL record."""
-        from chad.util.providers import _append_gemini_usage, _read_gemini_usage
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            _append_gemini_usage("gem-1", "gemini-2.5-pro", {
-                "input_tokens": 1000,
-                "output_tokens": 200,
-                "cached": 500,
-                "total_tokens": 1700,
-                "tool_calls": 3,
-                "duration_ms": 4500,
-            })
-            records = _read_gemini_usage()
-            assert len(records) == 1
-            rec = records[0]
-            assert rec["account"] == "gem-1"
-            assert rec["model"] == "gemini-2.5-pro"
-            assert rec["input_tokens"] == 1000
-            assert rec["output_tokens"] == 200
-            assert rec["cached_tokens"] == 500
-            assert rec["total_tokens"] == 1700
-            assert rec["tool_calls"] == 3
-            assert "timestamp" in rec
 
     def test_qwen_usage_not_logged_in(self, tmp_path):
         """Qwen returns None when oauth credentials don't exist."""
@@ -3472,30 +3849,6 @@ class TestUsagePercentageCalculation:
             # 5 requests today out of 1000 limit = 0.5%
             assert result == pytest.approx(0.5, abs=0.01)
 
-    def test_gemini_usage_handles_malformed_jsonl(self, tmp_path):
-        """Gemini gracefully handles malformed JSONL lines."""
-        import json
-        from datetime import datetime, timezone
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-
-        chad_dir = tmp_path / ".chad"
-        chad_dir.mkdir(parents=True, exist_ok=True)
-        today = datetime.now(timezone.utc).isoformat()
-        lines = [
-            "not valid json",
-            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100}),
-        ]
-        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_gemini_usage_percentage("")
-            # 1 valid request out of the 2000/day free-tier limit = 0.05%
-            assert result == pytest.approx(0.05, abs=0.01)
-
     def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
         """Qwen gracefully handles malformed jsonl lines."""
         import json
@@ -3521,28 +3874,6 @@ class TestUsagePercentageCalculation:
             result = _get_qwen_usage_percentage("")
             # Only 1 valid request counted
             assert result == pytest.approx(0.05, abs=0.01)
-
-    def test_usage_capped_at_100_percent(self, tmp_path):
-        """Usage percentage is capped at 100% even if over limit."""
-        import json
-        from datetime import datetime, timezone
-        from chad.util.providers import _get_gemini_usage_percentage
-
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-
-        chad_dir = tmp_path / ".chad"
-        chad_dir.mkdir(parents=True, exist_ok=True)
-
-        today = datetime.now(timezone.utc).isoformat()
-        # Create more requests than the daily limit (2000)
-        lines = [json.dumps({"timestamp": today, "model": "gemini-pro"}) for _ in range(2500)]
-        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
-
-        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
-            result = _get_gemini_usage_percentage("")
-            assert result == 100.0  # Capped at 100%
 
     def test_kimi_usage_not_configured(self, tmp_path):
         """Kimi returns None when config doesn't exist."""
@@ -3661,6 +3992,13 @@ class TestCodexUsageFreshness:
         sessions_dir = self._home_dir(tmp_path, account) / ".codex" / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         path = sessions_dir / name
+        # Every snapshot the Codex CLI writes carries window_minutes, and it is
+        # what tells the session window from the weekly one.
+        default_minutes = {"primary": 300, "secondary": 10080}
+        for slot, minutes in default_minutes.items():
+            window = (rate_limits or {}).get(slot)
+            if window and "window_minutes" not in window:
+                window["window_minutes"] = minutes
         event = {
             "type": "event_msg",
             "payload": {"type": "token_count", "rate_limits": rate_limits},
@@ -3801,6 +4139,94 @@ class TestCodexUsageFreshness:
 
         with patch("chad.util.providers.safe_home", return_value=tmp_path):
             assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(30.0)
+
+    def test_a_weekly_window_in_the_primary_slot_is_read_as_weekly(self, tmp_path):
+        """The slots are not roles: window_minutes says which window is which.
+
+        A team-plan account reports its 7-day pool in `primary` with
+        `secondary` empty. Trusting the slot names showed that pool's figure,
+        and its 166-hour reset, as the 5-hour session window.
+        """
+        from chad.util.providers import (
+            _get_codex_reset_eta,
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {
+                    "used_percent": 1.0,
+                    "window_minutes": 10080,
+                    "resets_at": now + 166 * 3600 + 60,
+                },
+                "secondary": None,
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(1.0)
+            assert _get_codex_usage_percentage("acct") is None
+            assert "166h" in _get_codex_reset_eta("acct", "weekly")
+            assert _get_codex_reset_eta("acct", "session") is None
+
+    def test_each_window_keeps_its_own_reset(self, tmp_path):
+        """The 5-hour reset and the weekly one must not be swapped."""
+        from chad.util.providers import _get_codex_reset_eta
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {
+                    "used_percent": 20.0, "window_minutes": 300,
+                    "resets_at": now + 2 * 3600 + 60,
+                },
+                "secondary": {
+                    "used_percent": 40.0, "window_minutes": 10080,
+                    "resets_at": now + 100 * 3600 + 60,
+                },
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_reset_eta("acct", "session").startswith("2h")
+            assert _get_codex_reset_eta("acct", "weekly").startswith("100h")
+
+    def test_a_window_with_no_length_is_not_guessed_at(self, tmp_path):
+        """window_minutes of 0 appears in real snapshots and places nothing."""
+        from chad.util.providers import (
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                "primary": {"used_percent": 55.0, "window_minutes": 0, "resets_at": now + 60},
+                "secondary": None,
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_usage_percentage("acct") is None
+            assert _get_codex_weekly_usage_percentage("acct") is None
+
+    def test_an_account_with_no_snapshot_reports_nothing_not_zero(self, tmp_path):
+        """0% reads as "plenty left"; unknown has to look unknown."""
+        from chad.util.providers import (
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        (tmp_path / ".chad" / "codex-homes" / "acct" / ".codex").mkdir(parents=True)
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_usage_percentage("acct") is None
+            assert _get_codex_weekly_usage_percentage("acct") is None
 
     def test_null_window_snapshot_is_skipped(self, tmp_path):
         """A newer snapshot whose windows are null (a different limit bucket that

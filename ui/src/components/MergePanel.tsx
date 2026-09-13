@@ -29,7 +29,6 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [currentBranch, setCurrentBranch] = useState("");
   const [targetBranch, setTargetBranch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
-  const [worktreeHasChanges, setWorktreeHasChanges] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -67,11 +66,10 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   useEffect(() => {
     const load = async () => {
       try {
-        const [branchData, worktreeStatus] = await Promise.all([
+        const [branchData] = await Promise.all([
           refreshBranches(),
           api.getWorktreeStatus(sessionId),
         ]);
-        setWorktreeHasChanges(worktreeStatus.has_changes);
         const preferredTarget =
           branchData.branches[0] || branchData.default || branchData.current || "";
         if (!preferredTarget) {
@@ -117,8 +115,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         if (
           summaryData.files_changed === 0 &&
           summaryData.insertions === 0 &&
-          summaryData.deletions === 0 &&
-          !worktreeHasChanges
+          summaryData.deletions === 0
         ) {
           onDismiss();
           return;
@@ -134,7 +131,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     };
 
     void loadDiffSummary();
-  }, [api, onDismiss, sessionId, targetBranch, worktreeHasChanges]);
+  }, [api, onDismiss, sessionId, targetBranch]);
 
   const handleViewChanges = useCallback(async () => {
     if (diff) {
@@ -310,14 +307,6 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {insertions > 0 && <span className="insertions">+{insertions}</span>}
         {deletions > 0 && <span className="deletions">-{deletions}</span>}
       </div>
-
-      {nothingToMerge && worktreeHasChanges && (
-        <div className="error-text">
-          These session changes are already present on "{targetBranch}", so there is nothing to
-          merge into that branch. Choose a different target branch if you want to merge the same
-          changes elsewhere.
-        </div>
-      )}
 
       <button
         className="expand-btn"

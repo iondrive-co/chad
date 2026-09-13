@@ -7,10 +7,7 @@ import secrets
 import threading
 import time
 
-from fastapi import Request, WebSocket
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
+from fastapi import WebSocket
 
 
 def generate_token() -> str:
@@ -51,7 +48,7 @@ class _TicketNonceStore:
 _ticket_nonces = _TicketNonceStore()
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
+class BearerAuthMiddleware:
     """Middleware that requires Bearer token on /api/ routes.
 
     The token is read from ``app.state.auth_token`` on every request rather
@@ -64,33 +61,49 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     - Static UI routes (/, /assets/)
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        token = getattr(request.app.state, "auth_token", None)
-        if not token:
-            return await call_next(request)
+    def __init__(self, app):
+        self.app = app
 
-        path = request.url.path
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        app_instance = scope.get("app")
+        token = getattr(getattr(app_instance, "state", None), "auth_token", None) if app_instance else None
+        if not token:
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        method = scope.get("method", "")
 
         # Always pass through OPTIONS — CORS preflight requests never carry
         # auth headers, so blocking them breaks cross-origin access entirely.
-        if request.method == "OPTIONS":
-            return await call_next(request)
+        if method == "OPTIONS":
+            return await self.app(scope, receive, send)
 
         # Skip auth for health check and static routes
         if path == "/status" or path == "/" or path == "/assets" or path.startswith("/assets/"):
-            return await call_next(request)
+            return await self.app(scope, receive, send)
 
         # Check Authorization header (constant-time compare)
-        auth_header = request.headers.get("authorization", "")
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("latin1")
         if hmac.compare_digest(auth_header, f"Bearer {token}"):
-            return await call_next(request)
+            return await self.app(scope, receive, send)
 
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Invalid or missing authentication token"},
-        )
+        body = b'{"detail":"Invalid or missing authentication token"}'
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
 
 
 def _urlsafe_b64decode(data: str) -> bytes:

@@ -37,3 +37,17 @@ class SlackSettingsUpdate(BaseModel):
     enabled: bool | None = Field(default=None, description="Enable or disable Slack integration")
     channel: str | None = Field(default=None, description="Slack channel ID")
     bot_token: str | None = Field(default=None, description="Slack bot token (xoxb-...)")
+
+
+class AutostartSettings(BaseModel):
+    """Whether Chad starts at login on the machine running the server."""
+
+    enabled: bool = Field(default=False, description="Chad starts at login with a tray icon")
+    supported: bool = Field(default=False, description="This machine has a tray to start into")
+    location: str = Field(default="", description="Where the login entry is recorded")
+
+
+class AutostartUpdate(BaseModel):
+    """Request to turn start-at-login on or off."""
+
+    enabled: bool = Field(description="Whether Chad should start at login")

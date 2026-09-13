@@ -17,8 +17,8 @@ interface UploadedScreenshot {
 interface Props {
   api: ChadAPI;
   sessionId: string;
+  sessionName?: string;
   onSessionChange: () => void;
-  onProjectsChange?: () => Promise<void> | void;
   defaultProjectPath?: string;
   apiBaseUrl?: string;
   token?: string;
@@ -30,10 +30,30 @@ interface Props {
   projects?: ProjectSettings[];
 }
 
-const NEW_PROJECT_VALUE = "__new_project__";
-
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
+}
+
+// Unsent composer state (draft message + next-message settings), kept per
+// session so switching session tabs and coming back doesn't lose it. Chat
+// switches sessions by remounting ChatView (`key={selectedSession}` in
+// App.tsx), which would otherwise drop all local state; this module-level
+// map survives the remount. It's intentionally in-memory only — it doesn't
+// need to survive a page reload, just tab switching within the app.
+interface ComposerDraft {
+  inputText: string;
+  codingAccountName: string | null;
+  codingModel: string;
+  codingReasoning: string;
+  verificationAccountName: string | null;
+  postToSlack: boolean;
+  useWorktree: boolean;
+}
+
+const composerDrafts = new Map<string, ComposerDraft>();
+
+export function clearComposerDraft(sessionId: string): void {
+  composerDrafts.delete(sessionId);
 }
 
 function getSessionActivationSinceSeq(events: Array<{ type?: string; seq?: number }>, fallbackSeq: number): number {
@@ -45,11 +65,13 @@ function getSessionActivationSinceSeq(events: Array<{ type?: string; seq?: numbe
   return fallbackSeq;
 }
 
+const MISSING_COMPLETION_REASON = "error: stream ended without a persisted completion event";
+
 export function ChatView({
   api,
   sessionId,
+  sessionName,
   onSessionChange,
-  onProjectsChange,
   defaultProjectPath = "",
   apiBaseUrl,
   token,
@@ -68,7 +90,9 @@ export function ChatView({
   // Whether Slack integration is configured (controls the "post to Slack"
   // toggle) and whether the next task should post its milestones to Slack.
   const [slackEnabled, setSlackEnabled] = useState(false);
-  const [postToSlack, setPostToSlack] = useState(true);
+  const [postToSlack, setPostToSlack] = useState(() => composerDrafts.get(sessionId)?.postToSlack ?? true);
+  const [useWorktree, setUseWorktree] = useState(() => composerDrafts.get(sessionId)?.useWorktree ?? true);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
   // Models available for the selected coding agent and the per-message override
   // chosen for the next answer ("" = use the account's configured model).
   const [codingModels, setCodingModels] = useState<string[]>([]);
@@ -79,10 +103,15 @@ export function ChatView({
   // session that has not run a task yet.
   const [sessionCodingAgent, setSessionCodingAgent] = useState<string | null>(null);
   const [sessionCodingModel, setSessionCodingModel] = useState<string | null>(null);
+  const [sessionVerificationAgent, setSessionVerificationAgent] = useState<string | null | undefined>(undefined);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
-  const [inputText, setInputText] = useState("");
+  // The task API returns before the WebSocket is guaranteed to be connected.
+  // Keep submitted prompts visible immediately, then consume the matching
+  // persisted user_message event when it arrives without rendering it twice.
+  const optimisticMessagesRef = useRef<Map<string, number>>(new Map());
+  const [inputText, setInputText] = useState(() => composerDrafts.get(sessionId)?.inputText ?? "");
   const [hasRunTask, setHasRunTask] = useState(false);
   const [pendingFollowup, setPendingFollowup] = useState<string | null>(null);
   // Track how the session ended: null (still running or no task), "completed", "cancelled", "timeout", "failed", etc.
@@ -120,19 +149,16 @@ export function ChatView({
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
   const [taskScreenshots, setTaskScreenshots] = useState<string[]>([]);
 
-  // Track current project path for settings
+  // Project a session runs against is fixed at creation time (see App.tsx's
+  // new-session picker) and never changes afterward, so this just mirrors it
+  // for settings lookups — it is not user-editable from within the chat.
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
-  const [creatingProject, setCreatingProject] = useState(false);
-  const [newProjectPath, setNewProjectPath] = useState("");
-  const [savingProject, setSavingProject] = useState(false);
-  const [projectCreateError, setProjectCreateError] = useState<string | null>(null);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
 
   // Sync when parent changes defaultProjectPath (e.g. selecting a session tab)
   useEffect(() => {
     if (defaultProjectPath) {
       setCurrentProjectPath(defaultProjectPath);
-      setCreatingProject(false);
     }
   }, [defaultProjectPath]);
 
@@ -272,6 +298,8 @@ export function ChatView({
           if (ends.length > 0) {
             const lastEnd = ends[ends.length - 1];
             setEndReason(lastEnd.reason || "completed");
+          } else if (starts.length > 0) {
+            setEndReason(MISSING_COMPLETION_REASON);
           }
 
           const status = await api.getWorktreeStatus(sessionId);
@@ -306,6 +334,23 @@ export function ChatView({
         setVerificationAgent(conversationHasTask ? convo.task.verification_account || null : null);
         setTaskScreenshots(conversationHasTask ? convo.task.screenshots || [] : []);
         setHasRunTask(conversationHasTask);
+        if (conversationHasTask) {
+          if (convo.task.coding_account) {
+            setSessionCodingAgent(convo.task.coding_account);
+          }
+          if (convo.task.coding_model) {
+            setSessionCodingModel(convo.task.coding_model);
+          }
+          if (convo.task.verification_account !== undefined) {
+            setSessionVerificationAgent(convo.task.verification_account || null);
+          }
+          if (convo.task.notify_slack !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+            setPostToSlack(convo.task.notify_slack);
+          }
+          if (convo.task.use_worktree !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+            setUseWorktree(convo.task.use_worktree);
+          }
+        }
         conversationSeqRef.current = conversationHasTask ? convo.latest_seq : 0;
       } catch {
         if (!cancelled) {
@@ -320,17 +365,27 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
-  // Load this session's own coding agent/model (set once it has run a task)
-  // so the composer can reuse it instead of a global default.
+  // Load this session's own coding agent/model
+  // (set once it has run a task) so the composer can reuse it instead of a global default.
   useEffect(() => {
     let cancelled = false;
     setSessionCodingAgent(null);
     setSessionCodingModel(null);
+    setSessionVerificationAgent(undefined);
     api.getSession(sessionId)
       .then((s) => {
         if (cancelled) return;
         setSessionCodingAgent(s.coding_account);
         setSessionCodingModel(s.coding_model);
+        if (s.verification_account !== undefined) {
+          setSessionVerificationAgent(s.verification_account);
+        }
+        if (s.notify_slack !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+          setPostToSlack(s.notify_slack);
+        }
+        if (s.use_worktree !== undefined && !composerDrafts.get(sessionId)?.inputText) {
+          setUseWorktree(s.use_worktree);
+        }
       })
       .catch(() => { /* new/unknown session: fall back to defaults */ });
     return () => { cancelled = true; };
@@ -341,6 +396,17 @@ export function ChatView({
     let cancelled = false;
     api.listAccounts().then((res) => {
       if (cancelled) return;
+
+      // An unsent draft for this session (from before a tab switch) wins over
+      // every other default — it's what the user last had selected.
+      const draft = composerDrafts.get(sessionId);
+      if (draft?.inputText && draft?.codingAccountName) {
+        const draftAccount = res.accounts.find((a) => a.name === draft.codingAccountName);
+        if (draftAccount) {
+          setCodingAccount(draftAccount);
+          return;
+        }
+      }
 
       // Reuse the agent this session already runs with, so continuing a
       // session keeps its own agent rather than resetting to a global default.
@@ -372,7 +438,7 @@ export function ChatView({
       if (!cancelled) setCodingAccount(null);
     });
     return () => { cancelled = true; };
-  }, [api, currentProjectPath, projects, sessionCodingAgent]);
+  }, [api, sessionId, currentProjectPath, projects, sessionCodingAgent]);
 
   // Load provider metadata so we know which coding agents support a reasoning level.
   useEffect(() => {
@@ -398,30 +464,65 @@ export function ChatView({
   // session runs with, restore its saved model; otherwise clear the override so
   // a stale selection can't leak onto a different account.
   useEffect(() => {
-    // Reasoning levels differ per provider, so a level chosen for one agent may
-    // not exist for the next — reset to the provider default on agent change.
-    setCodingReasoning("");
     if (!codingAccount) {
+      setCodingReasoning("");
       setCodingModel("");
       setCodingModels([]);
       return;
     }
-    setCodingModel(
-      sessionCodingAgent === codingAccount.name ? (sessionCodingModel ?? "") : "",
-    );
+    // An unsent draft for this same agent restores its model/reasoning pick;
+    // otherwise fall back to the session's own saved model, or the provider
+    // default. Reasoning levels differ per provider, so a level chosen for
+    // one agent may not exist for the next — reset on agent change.
+    const draft = composerDrafts.get(sessionId);
+    if (draft && draft.codingAccountName === codingAccount.name) {
+      setCodingReasoning(draft.codingReasoning);
+      setCodingModel(draft.codingModel);
+    } else {
+      setCodingReasoning("");
+      setCodingModel(
+        sessionCodingAgent === codingAccount.name ? (sessionCodingModel ?? "") : "",
+      );
+    }
     let cancelled = false;
     api.getAccountModels(codingAccount.name)
       .then((r) => { if (!cancelled) setCodingModels(r.models); })
       .catch(() => { if (!cancelled) setCodingModels([]); });
     return () => { cancelled = true; };
-  }, [api, codingAccount, sessionCodingAgent, sessionCodingModel]);
+  }, [api, sessionId, codingAccount, sessionCodingAgent, sessionCodingModel]);
 
   // Seed the verification agent picker. The global settings only supply its
-  // initial value — whatever the picker ends up holding is what runs, so the
-  // enabled flag and the default account are resolved in one chain rather than
-  // racing to set it.
+  // initial value for new sessions. For sessions that have already run a task,
+  // the initial task's verification agent is reused.
   useEffect(() => {
     let cancelled = false;
+
+    // An unsent draft with text for this session restores its verification pick
+    // (including an explicit "None") instead of re-resolving the default.
+    const draft = composerDrafts.get(sessionId);
+    if (draft?.inputText) {
+      if (!draft.verificationAccountName) {
+        setVerificationAccount(null);
+      } else {
+        api.getAccount(draft.verificationAccountName)
+          .then((acct) => { if (!cancelled) setVerificationAccount(acct); })
+          .catch(() => { if (!cancelled) setVerificationAccount(null); });
+      }
+      return () => { cancelled = true; };
+    }
+
+    // Reuse the verification agent this session already runs with (including None).
+    if (sessionVerificationAgent !== undefined) {
+      if (!sessionVerificationAgent) {
+        setVerificationAccount(null);
+      } else {
+        api.getAccount(sessionVerificationAgent)
+          .then((acct) => { if (!cancelled) setVerificationAccount(acct); })
+          .catch(() => { if (!cancelled) setVerificationAccount(null); });
+      }
+      return () => { cancelled = true; };
+    }
+
     // Claim the defaults BEFORE any await so concurrent/repeat runs can't both
     // apply them — a later run must never wipe a manual account pick.
     if (verificationDefaultsApplied.current) return;
@@ -447,7 +548,23 @@ export function ChatView({
       .catch(() => { /* no default account to seed */ });
 
     return () => { cancelled = true; };
-  }, [api]);
+  }, [api, sessionId, sessionVerificationAgent]);
+
+  // Persist unsent composer state (draft text + next-message settings) so a
+  // session switch that remounts this view doesn't lose it — see
+  // composerDrafts above.
+  useEffect(() => {
+    if (!inputText && !codingAccount) return;
+    composerDrafts.set(sessionId, {
+      inputText,
+      codingAccountName: codingAccount?.name ?? null,
+      codingModel,
+      codingReasoning,
+      verificationAccountName: verificationAccount?.name ?? null,
+      postToSlack,
+      useWorktree,
+    });
+  }, [sessionId, inputText, codingAccount, codingModel, codingReasoning, verificationAccount, postToSlack, useWorktree]);
 
   // React to session becoming active (from polling or on mount).
   // When another UI starts a task, the polled sessionActive prop flips to true
@@ -498,9 +615,9 @@ export function ChatView({
     api.getEvents(sessionId, 0, "session_ended").then((data) => {
       const ends = (data.events as { type: string; reason?: string }[])
         .filter((e) => e.type === "session_ended");
-      setEndReason(ends.length > 0 ? ends[ends.length - 1].reason || "completed" : "completed");
+      setEndReason(ends.length > 0 ? ends[ends.length - 1].reason || "completed" : MISSING_COMPLETION_REASON);
     }).catch(() => {
-      setEndReason("completed");
+      setEndReason(MISSING_COMPLETION_REASON);
     });
     api.getWorktreeStatus(sessionId).then((status) => {
       if (status.exists && status.has_changes) {
@@ -532,8 +649,28 @@ export function ChatView({
         continue;
       }
 
+      if (evtType === "status" && data.status) {
+        setTaskStatus(String(data.status));
+        if (seq) maxSeq = Math.max(maxSeq, seq);
+        continue;
+      }
+
+      if (evtType === "assistant_message") {
+        setTaskStatus(null);
+      }
+
       const item = mapEventToConversationItem(data, seq);
       if (item) {
+        if (evtType === "user_message") {
+          const content = item.content ?? "";
+          const pending = optimisticMessagesRef.current.get(content) ?? 0;
+          if (pending > 0) {
+            if (pending === 1) optimisticMessagesRef.current.delete(content);
+            else optimisticMessagesRef.current.set(content, pending - 1);
+            if (seq) maxSeq = Math.max(maxSeq, seq);
+            continue;
+          }
+        }
         newItems.push(item);
         if (seq) maxSeq = Math.max(maxSeq, seq);
       }
@@ -602,10 +739,10 @@ export function ChatView({
             const lastEnd = ends[ends.length - 1];
             setEndReason(lastEnd.reason || "completed");
           } else {
-            setEndReason("completed");
+            setEndReason(MISSING_COMPLETION_REASON);
           }
         }).catch(() => {
-          setEndReason("completed");
+          setEndReason(MISSING_COMPLETION_REASON);
         }),
         api.getWorktreeStatus(sessionId).then((status) => {
           if (status.exists && status.has_changes) {
@@ -626,6 +763,7 @@ export function ChatView({
     setHistoricalChunks([]);
     setHistoricalEvents([]);
     setTaskActive(true);
+    setTaskStatus(useWorktree ? "Preparing worktree…" : "Starting agent…");
     setShowMerge(false);
     setEndReason(null);
     setTaskDescription(taskDesc);
@@ -634,8 +772,19 @@ export function ChatView({
       setConversation([]);
       conversationSeqRef.current = 0;
     }
+    const pendingCount = optimisticMessagesRef.current.get(taskDesc) ?? 0;
+    optimisticMessagesRef.current.set(taskDesc, pendingCount + 1);
+    setConversation((prev) => [
+      ...(isFollowup ? prev : []),
+      {
+        seq: -Date.now(),
+        ts: new Date().toISOString(),
+        type: "user",
+        content: taskDesc,
+      },
+    ]);
     setHasRunTask(true);
-  }, [reset]);
+  }, [reset, useWorktree]);
 
   const handleMergeDone = useCallback(() => {
     setShowMerge(false);
@@ -771,40 +920,6 @@ export function ChatView({
     setDragOver(false);
   }, []);
 
-  const handleProjectSelect = useCallback((value: string) => {
-    setProjectCreateError(null);
-    if (value === NEW_PROJECT_VALUE) {
-      setCreatingProject(true);
-      setCurrentProjectPath("");
-      return;
-    }
-    setCreatingProject(false);
-    setNewProjectPath("");
-    setCurrentProjectPath(value);
-  }, []);
-
-  const handleAddProjectFromChat = useCallback(async () => {
-    const path = newProjectPath.trim();
-    if (!path) {
-      setProjectCreateError("Enter a project path");
-      return;
-    }
-
-    setSavingProject(true);
-    setProjectCreateError(null);
-    try {
-      const settings = await api.setProjectSettings({ project_path: path });
-      await onProjectsChange?.();
-      setCurrentProjectPath(settings.project_path);
-      setCreatingProject(false);
-      setNewProjectPath("");
-    } catch {
-      setProjectCreateError("Failed to add project");
-    } finally {
-      setSavingProject(false);
-    }
-  }, [api, newProjectPath, onProjectsChange]);
-
   const removeScreenshot = useCallback((index: number) => {
     setScreenshots((prev) => {
       const removed = prev[index];
@@ -850,7 +965,14 @@ export function ChatView({
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
       notify_slack: slackEnabled && postToSlack,
+      use_worktree: useWorktree,
     });
+
+    if (!isFollowup) {
+      setSessionCodingAgent(codingAccount.name);
+      setSessionCodingModel(codingModel || null);
+      setSessionVerificationAgent(verificationAccount ? verificationAccount.name : null);
+    }
 
     handleTaskStart(message, isFollowup);
   }, [
@@ -865,6 +987,7 @@ export function ChatView({
     handleTaskStart,
     slackEnabled,
     postToSlack,
+    useWorktree,
   ]);
 
   const handleSendMessage = useCallback(async () => {
@@ -916,6 +1039,7 @@ export function ChatView({
     try {
       await startTaskRequest(message, hasRunTask, screenshots);
       setInputText("");
+      clearComposerDraft(sessionId);
       screenshots.forEach((s) => {
         URL.revokeObjectURL(s.previewUrl);
         previewUrlsRef.current.delete(s.previewUrl);
@@ -1011,9 +1135,6 @@ export function ChatView({
     }).catch(() => {});
   }, [api, currentProjectPath]);
 
-  const projectSelectorValue = creatingProject ? NEW_PROJECT_VALUE : currentProjectPath;
-  const showNewProjectForm = creatingProject || projects.length === 0;
-
   // The reasoning-level dropdown only makes sense for coding agents whose
   // provider supports it, and the available levels vary per provider (Codex has
   // four, Claude Code has more, others have none).
@@ -1030,7 +1151,7 @@ export function ChatView({
           sessionId={sessionId}
           refreshTrigger={worktreeRefresh}
         />
-        <SessionLog api={api} sessionId={sessionId} />
+        <SessionLog api={api} sessionId={sessionId} sessionName={sessionName} />
         {sessionPaused && (
           <button
             type="button"
@@ -1067,49 +1188,12 @@ export function ChatView({
         </div>
       )}
 
-      {/* Project selector - shown when no task has been run yet */}
-      {!hasRunTask && (
+      {/* The project a session runs against is fixed when the session is created
+          (see the "New" project picker in App.tsx) and can't be changed here —
+          this is just a reminder of which project it is. */}
+      {!hasRunTask && currentProjectPath && (
         <div className="project-selector-bar">
-          {projects.length > 0 ? (
-            <label>
-              Project
-              <select
-                value={projectSelectorValue}
-                onChange={(e) => handleProjectSelect(e.target.value)}
-              >
-                <option value="">-- Select a project --</option>
-                {projects.map((p) => (
-                  <option key={p.project_path} value={p.project_path}>
-                    {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
-                  </option>
-                ))}
-                <option value={NEW_PROJECT_VALUE}>New project</option>
-              </select>
-            </label>
-          ) : (
-            <span className="project-selector-label">Project</span>
-          )}
-          {showNewProjectForm && (
-            <form
-              className="project-selector-new"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void handleAddProjectFromChat();
-              }}
-            >
-              <input
-                value={newProjectPath}
-                onChange={(e) => setNewProjectPath(e.target.value)}
-                placeholder="/path/to/project"
-                aria-label="New project path"
-                disabled={savingProject}
-              />
-              <button type="submit" disabled={savingProject || !newProjectPath.trim()}>
-                {savingProject ? "Adding..." : "Add"}
-              </button>
-              {projectCreateError && <span className="project-selector-error">{projectCreateError}</span>}
-            </form>
-          )}
+          <span className="project-selector-label">Project: {currentProjectPath}</span>
         </div>
       )}
 
@@ -1168,6 +1252,14 @@ export function ChatView({
                   </div>
                 );
               })}
+              {taskActive && (
+                <div className="chat-item start" role="status" aria-live="polite">
+                  <div className="chat-bubble assistant thinking-bubble">
+                    <div className="chat-bubble-label">Agent</div>
+                    <div className="chat-bubble-text">{taskStatus || "Thinking"}<span className="thinking-dots" aria-hidden="true">…</span></div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div
@@ -1265,6 +1357,19 @@ export function ChatView({
                       onChange={(e) => setPostToSlack(e.target.checked)}
                     />
                     Slack
+                  </label>
+                  <label
+                    className="worktree-toggle composer-control composer-control-secondary"
+                    title="Run task in an isolated Git worktree (uncheck to run directly in the project directory)"
+                  >
+                    <input
+                      type="checkbox"
+                      className="worktree-toggle-checkbox"
+                      checked={useWorktree}
+                      disabled={sending || taskActive}
+                      onChange={(e) => setUseWorktree(e.target.checked)}
+                    />
+                    Worktree
                   </label>
                   {!taskActive && (
                     <button

@@ -287,6 +287,7 @@ body {
   overflow-x: auto;
   scrollbar-width: none;
   align-items: center;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -481,6 +482,55 @@ label {
 .new-session-btn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.new-session-select {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  padding: 10px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  flex-shrink: 0;
+  width: auto;
+  min-width: 110px;
+}
+
+.new-session-select:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.new-session-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Let the tab strip consume available space while the new-session control
+   remains a fixed-width sibling in the header. */
+.connection-indicator {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .connection-indicator {
+    display: none;
+  }
+
+  .new-session-select {
+    width: 104px;
+    max-width: 104px;
+    min-width: 104px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
 }
 
 .badge {
@@ -775,6 +825,23 @@ label {
   border: 1px solid var(--border);
 }
 
+.thinking-bubble {
+  opacity: 0.78;
+}
+
+.thinking-dots {
+  display: inline-block;
+  width: 1.2em;
+  overflow: hidden;
+  vertical-align: bottom;
+  animation: thinking-dots 1.2s steps(4, end) infinite;
+}
+
+@keyframes thinking-dots {
+  from { width: 0; }
+  to { width: 1.2em; }
+}
+
 .chat-bubble.milestone {
   background: var(--bubble-milestone-bg, #eef2ff);
   color: var(--text);
@@ -874,8 +941,9 @@ label {
   color: var(--text-muted);
 }
 
-.composer-control-secondary:not(.slack-toggle):hover:not(:disabled),
-.slack-toggle.composer-control-secondary:hover:not(:has(.slack-toggle-checkbox:disabled)) {
+.composer-control-secondary:not(.slack-toggle):not(.worktree-toggle):hover:not(:disabled),
+.slack-toggle.composer-control-secondary:hover:not(:has(.slack-toggle-checkbox:disabled)),
+.worktree-toggle.composer-control-secondary:hover:not(:has(.worktree-toggle-checkbox:disabled)) {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -893,12 +961,14 @@ label {
 }
 
 .composer-control:disabled,
-.slack-toggle:has(.slack-toggle-checkbox:disabled) {
+.slack-toggle:has(.slack-toggle-checkbox:disabled),
+.worktree-toggle:has(.worktree-toggle-checkbox:disabled) {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.slack-toggle {
+.slack-toggle,
+.worktree-toggle {
   user-select: none;
 }
 
@@ -911,7 +981,17 @@ label {
   cursor: pointer;
 }
 
-.slack-toggle .slack-toggle-checkbox:disabled {
+.worktree-toggle .worktree-toggle-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.slack-toggle .slack-toggle-checkbox:disabled,
+.worktree-toggle .worktree-toggle-checkbox:disabled {
   cursor: not-allowed;
 }
 
@@ -1303,12 +1383,65 @@ label {
   font-size: 16px;
 }
 
+/* The account name doubles as its rename control. */
+.account-name-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.account-name-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.account-rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-rename input {
+  width: auto;
+  min-width: 160px;
+  font-weight: 600;
+}
+
+.account-rename button:not(.link-btn) {
+  padding: 4px 10px;
+  font-size: 14px;
+}
+
 .account-provider {
   font-size: 16px;
   color: var(--text-muted);
   background: var(--bg-tertiary);
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+/* The tray code: a monospace chip, clicked to change. */
+.account-code,
+.account-code-input {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 1px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  width: 4.5em;
+  text-align: center;
+}
+
+.account-code:hover:not(:disabled) {
+  /* The background is spelled out because the base button:hover rule is more
+     specific than a bare class and would paint the chip accent. */
+  background: var(--bg-tertiary);
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .account-status {
@@ -1361,6 +1494,13 @@ label {
   font-family: var(--font-mono);
   letter-spacing: 1px;
   color: var(--text);
+}
+
+/* A window with no limit on it — stated, but not competing with the windows
+   that have real numbers. */
+.usage-absent {
+  color: var(--text-muted, #999);
+  font-style: italic;
 }
 
 .usage-as-of {
@@ -1780,6 +1920,13 @@ label {
   position: relative;
 }
 
+.session-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .session-log-toggle {
   background: none;
   border: none;
@@ -1800,6 +1947,39 @@ label {
   font-family: var(--font-mono);
   font-size: 0.875rem;
   color: var(--text-muted);
+}
+
+.session-id {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  user-select: text;
+}
+
+.session-id code {
+  color: var(--text);
+  font-family: var(--font-mono);
+  user-select: text;
+}
+
+.session-name {
+  color: var(--text);
+  font-weight: 500;
+  user-select: text;
+}
+
+.session-id-label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-id-copy {
+  padding: 3px 8px;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .session-log-content {
@@ -2587,87 +2767,14 @@ label {
   flex-wrap: wrap;
 }
 
-.project-selector-bar label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 1rem;
-  color: var(--text-muted);
-  flex: 1;
-}
-
 .project-selector-label {
   font-size: 1rem;
   color: var(--text-muted);
 }
 
-.project-selector-bar select,
-.project-selector-new input {
-  flex: 1;
-  padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 1rem;
-}
-
-.project-selector-bar select:focus,
-.project-selector-new input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.project-selector-new {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.project-selector-new input {
-  min-width: 180px;
-}
-
-.project-selector-new button {
-  padding: 6px 14px;
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  white-space: nowrap;
-}
-
-.project-selector-new button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.project-selector-error {
-  font-size: 1rem;
-  color: var(--error);
-}
-
 @media (max-width: 640px) {
   .project-selector-bar {
     align-items: stretch;
-  }
-
-  .project-selector-bar label,
-  .project-selector-new {
-    flex-basis: 100%;
-  }
-
-  .project-selector-new {
-    flex-wrap: wrap;
-  }
-
-  .project-selector-error {
-    flex-basis: 100%;
   }
 
   .projects-layout {

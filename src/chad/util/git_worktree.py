@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -175,9 +176,19 @@ class GitWorktreeManager:
                 self._repo_locks[key] = lock
             return lock
 
-    def _run_git(self, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def _run_git(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
         """Run a git command and return the result."""
         cmd = ["git"] + list(args)
+        run_env = os.environ.copy() if env is None else env.copy()
+        for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"):
+            if env is None or var not in env:
+                run_env.pop(var, None)
         return subprocess.run(
             cmd,
             cwd=cwd or self.project_path,
@@ -186,6 +197,7 @@ class GitWorktreeManager:
             encoding="utf-8",
             errors="replace",
             check=check,
+            env=run_env,
         )
 
     def is_git_repo(self) -> bool:
@@ -204,6 +216,47 @@ class GitWorktreeManager:
         if not path.is_absolute():
             path = self.project_path / path
         return path
+
+    def _get_git_dir_for_path(self, path: Path) -> Path | None:
+        """Find the git administrative directory (.git or worktree gitdir) for a path."""
+        dot_git = path / ".git"
+        try:
+            if dot_git.is_file():
+                content = dot_git.read_text(encoding="utf-8").strip()
+                if content.startswith("gitdir:"):
+                    target = content.split(":", 1)[1].strip()
+                    git_dir = Path(target)
+                    if not git_dir.is_absolute():
+                        git_dir = (path / git_dir).resolve()
+                    if git_dir.is_dir():
+                        return git_dir
+            elif dot_git.is_dir():
+                return dot_git
+        except (OSError, ValueError):
+            pass
+        return None
+
+    def _clean_stale_locks(self, path: Path | None = None, min_age_seconds: float = 2.0) -> list[Path]:
+        """Remove stale git lock files (e.g. index.lock, HEAD.lock) in gitdir for path.
+
+        Returns list of cleaned lock file paths.
+        """
+        target_path = path or self.project_path
+        git_dir = self._get_git_dir_for_path(target_path)
+        if not git_dir or not git_dir.is_dir():
+            return []
+
+        cleaned = []
+        now = time.time()
+        for lock_file in git_dir.glob("*.lock"):
+            try:
+                mtime = lock_file.stat().st_mtime
+                if (now - mtime) >= min_age_seconds:
+                    lock_file.unlink(missing_ok=True)
+                    cleaned.append(lock_file)
+            except OSError:
+                pass
+        return cleaned
 
     def _ensure_worktree_dir_excluded(self) -> None:
         """Make git ignore .chad-worktrees/ via .git/info/exclude.
@@ -273,6 +326,7 @@ class GitWorktreeManager:
         """
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
+        self._clean_stale_locks(self.project_path)
 
         # Clean up any existing worktree/branch from previous runs.
         # Also check if the branch exists even when the directory doesn't — a crash
@@ -302,6 +356,8 @@ class GitWorktreeManager:
             )
 
         # Create worktree with new branch
+        worktree_env = os.environ.copy()
+        worktree_env["GIT_LFS_SKIP_SMUDGE"] = "1"
         self._run_git(
             "worktree",
             "add",
@@ -309,6 +365,7 @@ class GitWorktreeManager:
             branch_name,
             str(worktree_path),
             base_commit,
+            env=worktree_env,
         )
 
         # Symlink the main project's venv so agents don't need to reinstall deps
@@ -330,6 +387,8 @@ class GitWorktreeManager:
         """Delete a worktree and its associated branch."""
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
+        self._clean_stale_locks(worktree_path, min_age_seconds=0.0)
+        self._clean_stale_locks(self.project_path)
 
         # Remove worktree if it exists
         if worktree_path.exists():
@@ -387,6 +446,8 @@ class GitWorktreeManager:
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return False
+
+        self._clean_stale_locks(worktree_path)
 
         # Check for uncommitted changes
         result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
@@ -633,8 +694,15 @@ class GitWorktreeManager:
         if not worktree_path.exists():
             return False, "Worktree not found"
 
+        # Clean any stale locks before staging
+        self._clean_stale_locks(worktree_path)
+
         # Stage all changes
         add_result = self._run_git("add", "-A", cwd=worktree_path, check=False)
+        if add_result.returncode != 0 and "index.lock" in add_result.stderr:
+            self._clean_stale_locks(worktree_path, min_age_seconds=0.0)
+            add_result = self._run_git("add", "-A", cwd=worktree_path, check=False)
+
         if add_result.returncode != 0:
             detail = add_result.stderr.strip() or add_result.stdout.strip() or "git add failed"
             return False, detail
@@ -649,6 +717,10 @@ class GitWorktreeManager:
 
         # Commit
         commit_result = self._run_git("commit", "-m", message, cwd=worktree_path, check=False)
+        if commit_result.returncode != 0 and "index.lock" in commit_result.stderr:
+            self._clean_stale_locks(worktree_path, min_age_seconds=0.0)
+            commit_result = self._run_git("commit", "-m", message, cwd=worktree_path, check=False)
+
         if commit_result.returncode != 0:
             detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "git commit failed"
             return False, detail
@@ -748,6 +820,10 @@ class GitWorktreeManager:
             if not worktree_path.exists():
                 return False, None, "Worktree not found"
 
+            # Clean stale locks on both worktree and main repo
+            self._clean_stale_locks(worktree_path)
+            self._clean_stale_locks(self.project_path)
+
             # Refuse to merge into the worktree's own branch — that would produce
             # a "already used by worktree" error from git checkout.
             if merge_target == branch_name or merge_target.startswith("chad-task-"):
@@ -778,6 +854,9 @@ class GitWorktreeManager:
             original_branch = self.get_current_branch()
             if original_branch and original_branch != merge_target:
                 result = self._run_git("checkout", merge_target, check=False)
+                if result.returncode != 0 and "index.lock" in result.stderr:
+                    self._clean_stale_locks(self.project_path, min_age_seconds=0.0)
+                    result = self._run_git("checkout", merge_target, check=False)
                 if result.returncode != 0:
                     # Restore stash if checkout failed
                     self._restore_stash(stash_sha)
@@ -789,6 +868,9 @@ class GitWorktreeManager:
 
             # Use squash merge to combine all changes into a single commit
             result = self._run_git("merge", "--squash", branch_name, check=False)
+            if result.returncode != 0 and "index.lock" in result.stderr:
+                self._clean_stale_locks(self.project_path, min_age_seconds=0.0)
+                result = self._run_git("merge", "--squash", branch_name, check=False)
 
             if result.returncode != 0:
                 # Check for conflicts
@@ -810,6 +892,9 @@ class GitWorktreeManager:
 
             # Squash merge succeeded - now commit with the user's message
             commit_result = self._run_git("commit", "-m", final_msg, check=False)
+            if commit_result.returncode != 0 and "index.lock" in commit_result.stderr:
+                self._clean_stale_locks(self.project_path, min_age_seconds=0.0)
+                commit_result = self._run_git("commit", "-m", final_msg, check=False)
             if commit_result.returncode != 0:
                 # Commit failed - abort the merge and restore state
                 self._run_git("reset", "--hard", "HEAD", check=False)

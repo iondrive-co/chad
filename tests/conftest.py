@@ -27,6 +27,19 @@ sys.path = [SRC_STR, TESTS_STR] + [
 # arriving mid-import can't deadlock on the import lock while the handler runs.
 from test_helpers import reap_child_processes  # noqa: E402
 
+# Strip ambient git environment variables so tests that spawn git commands
+# (e.g. when run from a git hook) never operate on the host repository.
+_GIT_ISOLATION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+)
+for _var in _GIT_ISOLATION_VARS:
+    os.environ.pop(_var, None)
+
 
 # ---------------------------------------------------------------------------
 # Process-leak safety net
@@ -118,6 +131,9 @@ class _NoOpTunnelService:
 @pytest.fixture(autouse=True)
 def _isolate_session_logs(tmp_path_factory, monkeypatch):
     """Keep session logs isolated and Slack disabled per test run."""
+    for _var in _GIT_ISOLATION_VARS:
+        monkeypatch.delenv(_var, raising=False)
+
     log_dir = tmp_path_factory.mktemp("session_logs")
     monkeypatch.setenv("CHAD_SESSION_LOG_DIR", str(log_dir))
     monkeypatch.setenv("CHAD_SESSION_LOG_MAX_FILES", "200")

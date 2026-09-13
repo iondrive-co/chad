@@ -404,6 +404,51 @@ class TestNoUnixModulesAtTopLevel:
         assert not src.exists(), "pty_runner.py should be deleted (dead code)"
 
 
+class TestTrayAndAutostartOnWindows:
+    """The tray and its login entry have to work on Windows too."""
+
+    def test_tray_package_imports_without_unix_modules(self, monkeypatch):
+        """The tray front and every backend import on a Windows-shaped system."""
+        _hide_unix_modules(monkeypatch)
+        for module in ("chad.ui.tray", "chad.ui.tray.windows", "chad.ui.tray.linux",
+                       "chad.ui.tray.macos", "chad.ui.tray.icon", "chad.ui.tray.dbus"):
+            _force_reimport(module, monkeypatch)
+
+        import chad.ui.tray.windows as backend
+
+        assert backend.WNDPROC is not None
+        assert hasattr(backend, "NOTIFYICONDATA")
+
+    def test_autostart_imports_without_unix_modules(self, monkeypatch):
+        """The login entry module must not need pty/fcntl to be read."""
+        _hide_unix_modules(monkeypatch)
+        _force_reimport("chad.util.autostart", monkeypatch)
+
+        import chad.util.autostart as autostart
+
+        assert autostart.RUN_VALUE
+        assert autostart.launch_command()[-1] == "--tray"
+
+    def test_windows_login_entry_is_the_run_key(self, monkeypatch):
+        """Windows gets a per-user Run value, not a .desktop or a plist."""
+        from chad.util import autostart
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        entry = str(autostart.entry_path())
+
+        assert "CurrentVersion" in entry and entry.endswith(autostart.RUN_VALUE)
+        assert ".desktop" not in entry and ".plist" not in entry
+
+    def test_windows_icon_is_an_ico(self):
+        """Shell_NotifyIcon takes an HICON, so the icon must render as .ico."""
+        from chad.ui.tray import icon
+
+        data = icon.ico()
+
+        assert data[:4] == b"\x00\x00\x01\x00"
+        assert len(data) > 100
+
+
 class TestWindowsPipeStreaming:
     """Verify Windows ConPTY streaming delivers output incrementally."""
 
@@ -635,6 +680,21 @@ class TestProviderHomeIsolationOnWindows:
         expected = str(tmp_path / ".chad" / "qwen-homes" / "acct")
         assert extra_env["HOME"] == expected
         assert extra_env["USERPROFILE"] == expected
+
+    def test_rename_account_home_moves_under_windows_home(self, tmp_path, monkeypatch):
+        """Renaming an account moves its credentials on Windows too."""
+        from chad.util import provider_login
+
+        monkeypatch.setattr("os.name", "nt")
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+        old_home = tmp_path / ".chad" / "codex-homes" / "old"
+        (old_home / ".codex").mkdir(parents=True)
+        (old_home / ".codex" / "auth.json").write_text("{}", encoding="utf-8")
+
+        provider_login.rename_account_home("openai", "old", "new")
+
+        assert not old_home.exists()
+        assert (tmp_path / ".chad" / "codex-homes" / "new" / ".codex" / "auth.json").exists()
 
 
 class TestToolUpdatesOnWindows:

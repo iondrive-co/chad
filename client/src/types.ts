@@ -12,6 +12,9 @@ export interface Session {
   coding_model: string | null;
   coding_provider: string | null;
   task_description: string | null;
+  verification_account?: string | null;
+  notify_slack?: boolean;
+  use_worktree?: boolean;
   status: "active" | "completed" | "interrupted";
   resumable: boolean;
   created_at: string;
@@ -65,6 +68,7 @@ export interface TaskCreate {
   override_prompt?: string | null;
   is_followup?: boolean;
   notify_slack?: boolean;
+  use_worktree?: boolean;
 }
 
 export interface TaskStatus {
@@ -92,7 +96,7 @@ export interface TaskFollowupResponse {
 export type ProviderType =
   | "anthropic"
   | "openai"
-  | "gemini"
+  | "antigravity"
   | "qwen"
   | "local"
   | "mistral"
@@ -116,6 +120,8 @@ export interface ProviderList {
 export interface Account {
   name: string;
   provider: ProviderType;
+  /** Short code this account shows under in the tray. */
+  code: string;
   model: string | null;
   reasoning: string | null;
   role: RoleType | null;
@@ -175,6 +181,15 @@ export interface CleanupSettings {
 export interface UserPreferences {
   last_project_path: string | null;
   ui_mode: string;
+}
+
+export interface AutostartSettings {
+  /** Chad starts at login with a tray icon */
+  enabled: boolean;
+  /** The server's machine has a tray to start into */
+  supported: boolean;
+  /** Where the login entry is recorded */
+  location: string;
 }
 
 export interface SlackSettings {
@@ -318,6 +333,8 @@ export interface ConversationTask {
   coding_account: string;
   coding_model: string | null;
   verification_account: string | null;
+  notify_slack?: boolean;
+  use_worktree?: boolean;
   screenshots?: string[];
 }
 

@@ -708,6 +708,211 @@ class TestConfigManager:
         keep_refs = [s for s in action_settings if s.get("target_account") == "keep"]
         assert len(keep_refs) == 1
 
+    def test_delete_account_clears_project_agent_choices(self, tmp_path):
+        """A deleted account must not stay pinned as a project's agent."""
+        import base64
+        import bcrypt
+
+        mgr = ConfigManager(tmp_path / "test.conf")
+        password_hash = mgr.hash_password("pw")
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        mgr.store_account("to-delete", "mock", "", "")
+        mgr.store_account("keep", "mock", "", "")
+        mgr.set_project_config("/proj", {
+            "preferred_coding_agent": "to-delete",
+            "autoconfigure_agent": "to-delete",
+        })
+        mgr.set_project_config("/other", {"preferred_coding_agent": "keep"})
+
+        mgr.delete_account("to-delete")
+
+        assert mgr.get_project_config("/proj").get("preferred_coding_agent") is None
+        assert mgr.get_project_config("/proj").get("autoconfigure_agent") is None
+        assert mgr.get_project_config("/other")["preferred_coding_agent"] == "keep"
+
+    def test_rename_account_carries_every_reference(self, tmp_path, monkeypatch):
+        """rename_account must move every setting that names the account.
+
+        An account name is stored in eight places. A rename that rewrote only
+        the accounts dict would silently drop the coding role, the verification
+        agent, the model/reasoning choices, the mock knobs, the usage actions
+        and the per-project agent pins.
+        """
+        import base64
+        import bcrypt
+
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path / "home"))
+        mgr = ConfigManager(tmp_path / "test.conf")
+        password_hash = mgr.hash_password("pw")
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        mgr.store_account("old-name", "mock", "", "", model="mock-model", reasoning="high")
+        mgr.store_account("other", "mock", "", "")
+        mgr.assign_role("old-name", "CODING")
+        mgr.set_verification_agent("old-name")
+        mgr.set_mock_remaining_usage("old-name", 0.2)
+        mgr.set_mock_run_duration_seconds("old-name", 120)
+        mgr.set_mock_session_reset_time("old-name", "2026-01-01T00:00:00Z")
+        mgr.set_action_settings([
+            {"event": "session_usage", "threshold": 90, "action": "switch_provider",
+             "target_account": "old-name"},
+            {"event": "weekly_usage", "threshold": 80, "action": "switch_provider",
+             "target_account": "other"},
+        ])
+        mgr.set_project_config("/proj", {
+            "preferred_coding_agent": "old-name",
+            "autoconfigure_agent": "old-name",
+        })
+
+        mgr.rename_account("old-name", "new-name")
+
+        assert not mgr.has_account("old-name")
+        assert mgr.list_accounts()["new-name"] == "mock"
+        # Position in the list is stable so the UI order doesn't jump.
+        assert list(mgr.list_accounts()) == ["new-name", "other"]
+        assert mgr.get_account_model("new-name") == "mock-model"
+        assert mgr.get_account_reasoning("new-name") == "high"
+        assert mgr.get_role_assignment("CODING") == "new-name"
+        assert mgr.get_verification_agent() == "new-name"
+        assert mgr.get_mock_remaining_usage("new-name") == 0.2
+        assert mgr.get_mock_run_duration_seconds("new-name") == 120
+        assert mgr.get_mock_session_reset_time("new-name") == "2026-01-01T00:00:00Z"
+        targets = [s.get("target_account") for s in mgr.get_action_settings()]
+        assert targets == ["new-name", "other"]
+        project = mgr.get_project_config("/proj")
+        assert project["preferred_coding_agent"] == "new-name"
+        assert project["autoconfigure_agent"] == "new-name"
+
+    def test_rename_account_rejects_unknown_and_duplicate_names(self, tmp_path, monkeypatch):
+        """Renaming a missing account, or onto a name in use, must not touch config."""
+        import base64
+        import bcrypt
+
+        monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path / "home"))
+        mgr = ConfigManager(tmp_path / "test.conf")
+        password_hash = mgr.hash_password("pw")
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        mgr.store_account("one", "mock", "", "")
+        mgr.store_account("two", "mock", "", "")
+
+        with pytest.raises(ValueError):
+            mgr.rename_account("missing", "fresh")
+        with pytest.raises(ValueError):
+            mgr.rename_account("one", "two")
+
+        assert list(mgr.list_accounts()) == ["one", "two"]
+
+    def test_derived_codes_are_short_distinct_and_from_the_name(self):
+        """The tray has room for three characters, and they have to differ."""
+        from chad.util.config_manager import derive_account_code
+
+        assert derive_account_code("codex") == "COD"
+        assert derive_account_code("mistral") == "MIS"
+        assert derive_account_code("LocalQwen") == "LOC"
+        # Separated names give an initial per part, so siblings stay apart.
+        assert derive_account_code("claude-work") == "CWO"
+        assert derive_account_code("claude-iondrive") == "CIO"
+        assert derive_account_code("claude-code-work") == "CCW"
+        # A name with nothing to take three characters from still gets a code.
+        assert derive_account_code("q") == "Q"
+
+    def test_a_derived_code_avoids_the_ones_already_taken(self):
+        from chad.util.config_manager import derive_account_code
+
+        assert derive_account_code("codex", taken={"COD"}) == "CO2"
+        assert derive_account_code("codex", taken={"COD", "CO2"}) == "CO3"
+
+    def test_account_codes_are_filled_in_once_and_then_kept(self, tmp_path):
+        """Codes are assigned on first read, so existing accounts get them."""
+        mgr = self.manager(tmp_path)
+        mgr.store_account("claude-work", "anthropic", "", "")
+        mgr.store_account("claude-iondrive", "anthropic", "", "")
+
+        codes = mgr.account_codes()
+
+        assert codes == {"claude-work": "CWO", "claude-iondrive": "CIO"}
+        # Written down, so a later account cannot shift an existing code.
+        assert mgr.account_codes() == codes
+        mgr.store_account("codex", "openai", "", "")
+        assert mgr.account_codes()["claude-work"] == "CWO"
+
+    def test_two_accounts_never_share_a_code(self, tmp_path):
+        mgr = self.manager(tmp_path)
+        mgr.store_account("work", "anthropic", "", "")
+        mgr.store_account("wor-king", "anthropic", "", "")
+
+        codes = mgr.account_codes()
+
+        assert len(set(codes.values())) == 2, codes
+
+    def test_a_code_can_be_set_by_hand(self, tmp_path):
+        mgr = self.manager(tmp_path)
+        mgr.store_account("claude-work", "anthropic", "", "")
+
+        mgr.set_account_code("claude-work", "wrk")
+
+        assert mgr.account_codes() == {"claude-work": "WRK"}, "codes are upper case"
+
+    def test_a_code_already_in_use_is_refused(self, tmp_path):
+        mgr = self.manager(tmp_path)
+        mgr.store_account("one", "anthropic", "", "")
+        mgr.store_account("two", "anthropic", "", "")
+        mgr.set_account_code("one", "ABC")
+
+        with pytest.raises(ValueError):
+            mgr.set_account_code("two", "abc")
+
+    def test_rename_account_leaves_credential_directories_alone(self, tmp_path, monkeypatch):
+        """The config manager must not reach outside its own config file.
+
+        Moving credentials is the caller's job. While this method did it, a
+        test that renamed `claude-work` through a temporary config moved the
+        developer's own Claude credentials out from under them.
+        """
+        mgr = self.manager(tmp_path, monkeypatch)
+        mgr.store_account("claude-work", "anthropic", "", "")
+        home = tmp_path / "home" / ".chad" / "claude-configs" / "claude-work"
+        home.mkdir(parents=True)
+        (home / ".credentials.json").write_text("{}", encoding="utf-8")
+
+        mgr.rename_account("claude-work", "claude-personal")
+
+        assert home.exists(), "rename_account moved a credential directory"
+        assert not (home.parent / "claude-personal").exists()
+
+    def test_a_renamed_account_keeps_its_code(self, tmp_path, monkeypatch):
+        mgr = self.manager(tmp_path, monkeypatch)
+        mgr.store_account("claude-work", "anthropic", "", "")
+        mgr.set_account_code("claude-work", "WRK")
+
+        mgr.rename_account("claude-work", "claude-personal")
+
+        assert mgr.account_codes() == {"claude-personal": "WRK"}
+
+    def manager(self, tmp_path, monkeypatch=None):
+        """A config manager with a usable, empty config.
+
+        Pass monkeypatch for anything that resolves a home directory: a test
+        renaming `claude-work` once moved the developer's real credentials.
+        """
+        import base64
+
+        import bcrypt
+
+        if monkeypatch is not None:
+            monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path / "home"))
+        mgr = ConfigManager(tmp_path / "test.conf")
+        mgr.save_config({
+            "password_hash": mgr.hash_password("pw"),
+            "encryption_salt": base64.urlsafe_b64encode(bcrypt.gensalt()).decode(),
+        })
+        return mgr
+
     def test_save_and_load_preferences(self, tmp_path):
         """Test saving and loading user preferences."""
         config_path = tmp_path / "test.conf"
@@ -1335,6 +1540,7 @@ class TestConfigUIParity:
         "slack_bot_token",
         "slack_channel",
         "local_endpoint",
+        "autostart",
     }
 
     # Keys that are only in web UI (makes sense for web-only settings)
@@ -1382,6 +1588,7 @@ class TestConfigUIParity:
         "slack_bot_token": ["slack_bot_token", "slack_token", "bot_token", "slack_settings"],
         "slack_channel": ["slack_channel", "slack_settings", "channel id"],
         "local_endpoint": ["local_endpoint", "local-endpoint", "local model endpoint"],
+        "autostart": ["autostart", "start at login", "start_at_login"],
     }
 
     def test_cli_ui_exposes_all_required_keys(self):

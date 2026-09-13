@@ -135,6 +135,69 @@ class TestClaudeStreamJsonParser:
         assert results == []
         assert parser.init_model == "claude-sonnet-4-5"
 
+    def test_antigravity_tool_arguments_are_read_from_tool_info(self):
+        """Its tools name themselves in tool_name, with PascalCase arguments.
+
+        Reading step_type as the tool name rendered every call as
+        `tool({"conversation_id": ...})` with the whole event as its arguments.
+        """
+        parser = ClaudeStreamJsonParser()
+        stream = (
+            b'{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file",'
+            b'"parameters":{"AbsolutePath":"/w/a.py"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"grep_search","tool_info":{"name":"grep_search",'
+            b'"parameters":{"Query":"needle","SearchPath":"/w"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file",'
+            b'"parameters":{"TargetFile":"/w/c.py"}}}}\n'
+        )
+
+        parser.feed(stream)
+
+        calls = {c["name"]: c["input"] for c in parser.pending_tool_calls}
+        assert calls["Read"]["file_path"] == "/w/a.py"
+        assert calls["Grep"]["pattern"] == "needle"
+        assert calls["Grep"]["path"] == "/w"
+        assert calls["Write"]["file_path"] == "/w/c.py"
+        # Nothing may leak the raw event through as arguments.
+        assert "tool" not in calls
+        assert not any("conversation_id" in args for args in calls.values())
+
+    def test_antigravity_events_become_prose_and_tool_calls(self):
+        """Antigravity's stream is shaped differently from every other CLI's.
+
+        The kind is in "event" and the payload is nested, so a parser that only
+        reads "type" renders the whole run as nothing.
+        """
+        parser = ClaudeStreamJsonParser()
+        stream = (
+            b'{"event":"init","conversation_id":"conv-1",'
+            b'"init":{"cwd":"/w","tools":["run_command"]}}\n'
+            b'{"event":"step_update","step_update":{"step_index":0,"state":"DONE",'
+            b'"step_type":"user_input"}}\n'
+            b'{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE",'
+            b'"step_type":"tool","tool_name":"run_command","tool_info":'
+            b'{"name":"run_command","parameters":{"CommandLine":"pytest tests/"}}}}\n'
+            b'{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE",'
+            b'"step_type":"agent_response","text_delta":"All tests pass"}}\n'
+            b'{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS",'
+            b'"response":"All tests pass","usage":{"total_tokens":15837}}}\n'
+        )
+
+        out = parser.feed(stream)
+
+        # The prompt echo is not the agent's work and must not be displayed.
+        assert not any("user_input" in chunk for chunk in out)
+        assert "All tests pass" in out
+        # The conversation id is what the next turn resumes with.
+        assert parser.session_id == "conv-1"
+        # Tool steps are named in Chad's vocabulary, not the CLI's.
+        assert [c["name"] for c in parser.pending_tool_calls] == ["Bash"]
+        assert parser.pending_tool_calls[0]["input"]["command"] == "pytest tests/"
+        assert parser.result_stats["total_tokens"] == 15837
+
     def test_init_captures_model_from_gemini_event(self):
         """Parser captures model name from Gemini-style init events."""
         parser = ClaudeStreamJsonParser()
@@ -467,32 +530,56 @@ class TestBuildAgentCommand:
         assert len(cmd) == 7  # claude, -p, --verbose, --output-format, stream-json, --permission-mode, bypassPermissions
         assert initial_input is None
 
-    def test_gemini_uses_non_interactive_prompt_flag(self, tmp_path):
-        """Gemini must run headless with -p so the process exits after each phase."""
+    def test_antigravity_uses_non_interactive_prompt_flag(self, tmp_path):
+        """Antigravity must run headless with -p so the process exits each phase."""
         cmd, env, initial_input = build_agent_command(
-            "gemini", "test-account", tmp_path, "Fix the bug"
+            "antigravity", "test-account", tmp_path, "Fix the bug"
         )
 
-        assert "gemini" in Path(cmd[0]).name
-        assert "-y" in cmd
+        assert "agy" in Path(cmd[0]).name
+        assert "--dangerously-skip-permissions" in cmd
         assert "--output-format" in cmd and "stream-json" in cmd
+        assert cmd[cmd.index("--print-timeout") + 1] == "86400s"
         assert "-p" in cmd
         prompt_idx = cmd.index("-p")
         assert "Fix the bug" in cmd[prompt_idx + 1]
         assert "EXPLORATION_RESULT:" in cmd[prompt_idx + 1]
         assert initial_input is None
 
-    def test_gemini_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
-        """Each Gemini account gets its own GEMINI_CLI_HOME (credential isolation)."""
+    def test_antigravity_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
+        """Each Antigravity account runs with its own home (conversations, settings)."""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
 
-        _, env_a, _ = build_agent_command("gemini", "acct-a", tmp_path)
-        _, env_b, _ = build_agent_command("gemini", "acct-b", tmp_path)
+        _, env_a, _ = build_agent_command("antigravity", "acct-a", tmp_path)
+        _, env_b, _ = build_agent_command("antigravity", "acct-b", tmp_path)
 
-        assert env_a["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-a")
-        assert env_b["GEMINI_CLI_HOME"] == str(tmp_path / ".chad" / "gemini-homes" / "acct-b")
-        assert env_a["GEMINI_CLI_HOME"] != env_b["GEMINI_CLI_HOME"]
+        assert env_a["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-a")
+        assert env_b["HOME"] == str(tmp_path / ".chad" / "antigravity-homes" / "acct-b")
+        assert env_a["HOME"] != env_b["HOME"]
+
+    def test_antigravity_is_given_the_project_to_work_in(self, tmp_path, monkeypatch):
+        """The worktree has to be added, or the agent works somewhere else.
+
+        An unadded directory is treated as untrusted: the CLI silently works in
+        a scratch workspace of its own and still reports success, so the task
+        comes back green having never touched the project.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        cmd, _, _ = build_agent_command("antigravity", "acct", tmp_path)
+
+        assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path)
+
+    def test_antigravity_streams_machine_readable_output(self, tmp_path, monkeypatch):
+        """Chad reads the run as events, not as a rendered transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CHAD_TEMP_HOME", raising=False)
+
+        cmd, _, _ = build_agent_command("antigravity", "acct", tmp_path)
+
+        assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
     def test_qwen_sets_isolated_home_per_account(self, tmp_path, monkeypatch):
         """Each Qwen account gets its own HOME (credential isolation)."""
@@ -702,6 +789,89 @@ def test_idle_warning_threshold_stays_below_timeout(tmp_path, monkeypatch):
     executor = TaskExecutor(ConfigManager(), SessionManager(), inactivity_timeout=2.0)
 
     assert executor._idle_warning_threshold() == 1.0
+
+
+def test_worktree_failure_persists_request_and_failure(tmp_path, monkeypatch):
+    """A setup failure must remain visible instead of producing an empty session."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"mock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="worktree-failure")
+    executor = TaskExecutor(ConfigManager(), session_manager)
+
+    import chad.server.services.task_executor as te
+    monkeypatch.setattr(
+        te.GitWorktreeManager,
+        "create_worktree",
+        lambda _self, _task_id: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(
+                128,
+                ["git", "worktree", "add"],
+                stderr="fatal: no space left on device\n",
+            )
+        ),
+    )
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="This must survive setup failure",
+        coding_account="mock",
+    )
+    task._thread.join(timeout=5)
+
+    events = task.event_log.get_events()
+    assert any(e.get("type") == "user_message" and e.get("content") == "This must survive setup failure" for e in events)
+    assert any(e.get("type") == "session_ended" and not e.get("success") for e in events)
+    stream_events = executor.get_events(task.id, timeout=0.01)
+    assert any(e.type == "complete" and not e.data.get("success") for e in stream_events)
+    assert task.state == TaskState.FAILED
+    assert "no space left on device" in (task.error or "")
+
+
+def test_task_without_worktree_runs_directly_in_project(tmp_path, monkeypatch):
+    """When use_worktree=False, task runs directly in project without creating worktree."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"mock": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="no-worktree")
+    executor = TaskExecutor(ConfigManager(), session_manager)
+
+    import chad.server.services.task_executor as te
+    worktree_created = []
+
+    def mock_create_worktree(_self, task_id):
+        worktree_created.append(task_id)
+        raise AssertionError("create_worktree should not be called when use_worktree=False")
+
+    monkeypatch.setattr(te.GitWorktreeManager, "create_worktree", mock_create_worktree)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Run directly in project directory",
+        coding_account="mock",
+        use_worktree=False,
+    )
+    task._thread.join(timeout=5)
+
+    assert not worktree_created
+    assert session.worktree_path is None
+    assert session.worktree_branch is None
+    assert session.worktree_base_commit is None
+    assert session.has_worktree_changes is False
+    assert task.state == TaskState.COMPLETED
 
 
 def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
@@ -1305,14 +1475,12 @@ class TestModelPassThrough:
         )
         assert "MAX_THINKING_TOKENS" not in env_default
 
-    def test_gemini_model_flag(self, tmp_path):
-        """Gemini provider passes -m flag."""
+    def test_antigravity_model_flag(self, tmp_path):
+        """Antigravity names the model with --model."""
         cmd, env, _ = build_agent_command(
-            "gemini", "test", tmp_path, "fix bug", model="gemini-2.5-pro"
+            "antigravity", "test", tmp_path, "fix bug", model="gemini-3.1-pro-high"
         )
-        assert "-m" in cmd
-        idx = cmd.index("-m")
-        assert cmd[idx + 1] == "gemini-2.5-pro"
+        assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro-high"
 
     def test_qwen_model_flag(self, tmp_path):
         """Qwen provider passes -m flag."""
@@ -1651,3 +1819,122 @@ class TestVerificationSelectionOverridesGlobalFlag:
             },
         )
         assert result is None
+
+
+class TestAntigravityTimeoutExecution:
+    """Tests for Antigravity timeout detection during task execution."""
+
+    def test_task_executor_detects_antigravity_timeout_in_event_loop_output(
+        self, tmp_path, monkeypatch
+    ):
+        """When event loop finishes with exit 0 but accumulated output has [agy] print timeout,
+        TaskExecutor marks task as FAILED with timeout and session status as interrupted."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config_path = tmp_path / "chad.conf"
+        config_path.write_text(
+            json.dumps({
+                "accounts": {"acct": {"provider": "antigravity"}},
+            })
+        )
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        session_manager = SessionManager()
+        session = session_manager.create_session(project_path=str(tmp_path), name="test-timeout")
+        executor = TaskExecutor(ConfigManager(), session_manager)
+
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util import provider_login
+        monkeypatch.setattr(provider_login, "is_logged_in", lambda *args: True)
+
+        # Mock event_loop.run to return exit 0 but with agy timeout in output
+        monkeypatch.setattr(
+            SessionEventLoop,
+            "run",
+            lambda *args, **kwargs: (
+                0,
+                "[agy] print timeout after 5m0s with turn in progress; returning partial output\n",
+            ),
+        )
+
+        task = executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Explore project",
+            coding_account="acct",
+            use_worktree=False,
+        )
+        task._thread.join(timeout=5)
+
+        assert task.state == TaskState.FAILED
+        assert task.error == "Agent timed out"
+        assert session.status == "interrupted"
+
+        events = task.event_log.get_events()
+        ended_event = next(e for e in events if e.get("type") == "session_ended")
+        assert ended_event["success"] is False
+        assert ended_event["reason"] == "timeout"
+
+    def test_initial_task_saves_settings_on_session(self, tmp_path, monkeypatch):
+        """Initial task saves verification_account, notify_slack, use_worktree on session."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config_path = tmp_path / "chad.conf"
+        config_path.write_text(
+            json.dumps({
+                "accounts": {"coder1": {"provider": "mock"}},
+            })
+        )
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+        from chad.util import provider_login
+        monkeypatch.setattr(provider_login, "is_logged_in", lambda *args: True)
+
+        session_mgr = SessionManager()
+        executor = TaskExecutor(ConfigManager(), session_mgr)
+        session = session_mgr.create_session(project_path=str(tmp_path), name="Test")
+
+        monkeypatch.setattr(
+            executor,
+            "_run_task",
+            lambda *args, **kwargs: None,
+        )
+
+        task1 = executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Initial task",
+            coding_account="coder1",
+            coding_model="model1",
+            verification_account="checker1",
+            notify_slack=False,
+            use_worktree=False,
+            is_followup=False,
+        )
+
+        assert session.coding_account == "coder1"
+        assert session.coding_model == "model1"
+        assert session.verification_account == "checker1"
+        assert session.notify_slack is False
+        assert session.use_worktree is False
+
+        # Mark first task as completed
+        task1.state = TaskState.COMPLETED
+
+        # Follow-up should not overwrite the session's initial settings
+        executor.start_task(
+            session_id=session.id,
+            project_path=str(tmp_path),
+            task_description="Follow-up task",
+            coding_account="coder1",
+            coding_model="model2",
+            verification_account="other_checker",
+            notify_slack=True,
+            use_worktree=True,
+            is_followup=True,
+        )
+
+        assert session.coding_account == "coder1"
+        assert session.coding_model == "model1"
+        assert session.verification_account == "checker1"
+        assert session.notify_slack is False
+        assert session.use_worktree is False

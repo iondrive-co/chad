@@ -53,7 +53,7 @@ def test_get_reasoning_levels_are_provider_specific():
     assert openai == ["minimal", "low", "medium", "high"]
 
     # Providers without a reasoning knob return an empty list.
-    for provider in ("gemini", "qwen", "local", "mistral", "kimi", "mock"):
+    for provider in ("antigravity", "qwen", "local", "mistral", "kimi", "mock"):
         assert get_reasoning_levels(provider) == []
 
 
@@ -108,7 +108,7 @@ def test_providers_endpoint_reports_reasoning_levels(client):
 
     assert by_type["anthropic"]["reasoning_levels"] == get_reasoning_levels("anthropic")
     assert by_type["openai"]["reasoning_levels"] == ["minimal", "low", "medium", "high"]
-    for provider in ("gemini", "qwen", "local", "mistral", "kimi"):
+    for provider in ("antigravity", "qwen", "local", "mistral", "kimi"):
         assert by_type[provider]["reasoning_levels"] == []
 
 

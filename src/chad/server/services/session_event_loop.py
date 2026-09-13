@@ -772,6 +772,9 @@ class SessionEventLoop:
 
         # Now safe to bail on signal-killed agents (negative exit code).
         # Pending actions were already handled above.
+        if exit_code == 0 and "[agy] print timeout" in output:
+            exit_code = -2
+
         if exit_code < 0:
             return exit_code, output
 
@@ -804,6 +807,8 @@ class SessionEventLoop:
                 output += "\n" + cont_output
                 # The task's outcome is the LAST run's exit code — a failed
                 # continuation must not be masked by the initial run's 0.
+                if cont_exit == 0 and "[agy] print timeout" in cont_output:
+                    cont_exit = -2
                 exit_code = cont_exit
 
                 if getattr(self.task, "cancel_requested", False):
