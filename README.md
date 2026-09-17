@@ -1,3 +1,5 @@
+NOTE: Chad 1.0 is the last release as it has been folded into [nop](https://github.com/iondrive-co/nop).
+
 # Chad: YOLO AI
 
 Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
